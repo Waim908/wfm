@@ -3,7 +3,7 @@
 
 #include "resource.h"
 
-static inline void loadStrings_en() {
+static inline void loadStrings_zh() {
     lc_str.app_name = APP_NAME;
     lc_str.app_version = L"版本 " APP_VERSION;
     lc_str.app_dev_name = L"作者：" APP_DEV_NAME;
