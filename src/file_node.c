@@ -221,7 +221,7 @@ void initFileNodes() {
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
     
     // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
-    userProfileNodeName = wcsdup(lc_str.userprofile ? lc_str.userprofile : L"User");
+    userProfileNodeName = wcsdup(L"User");
     struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_DIR); // 特殊处理的 TYPE_DIR
 
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
