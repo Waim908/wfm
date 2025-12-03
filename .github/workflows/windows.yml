@@ -24,8 +24,8 @@ jobs:
           mkdir C:\wfm
           cp wfm.exe C:\wfm\
           cp libcdio.dll C:\wfm\
-          cd C:\wfm
-          7z -oC:\ wfm.zip .\*
+          cd C:\
+          7z a wfm.zip wfm
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create Release
