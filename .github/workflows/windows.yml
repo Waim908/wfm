@@ -36,7 +36,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: wfm
+          name: wfm-${{ github.event.inputs.inputTag }}
           draft: false
           prerelease: false
           tag_name: ${{ github.event.inputs.inputTag }}
