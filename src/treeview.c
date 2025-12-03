@@ -80,6 +80,7 @@ static void updateTreeItems() {
                     pidl = ILCreateFromPathW(userProfilePath);
                 }
                 break;
+            }
             default:
                 break;
         }
