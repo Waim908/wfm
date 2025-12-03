@@ -5,7 +5,8 @@ struct FileNode* currPathFileNode = NULL;
 
 static wchar_t desktopPath[MAX_PATH] = {0};
 static wchar_t personalPath[MAX_PATH] = {0};
-static wchar_t userProfilePath[MAX_PATH] = {0};
+static wchar_t userProfilePath[MAX_PATH] = {0}; // 新增：用户目录路径
+static wchar_t* userProfileNodeName = NULL;     // 用于指针识别
 
 wchar_t* getDesktopPath() {
     return desktopPath;
@@ -210,24 +211,36 @@ void setCurrPathFromString(wchar_t* path) {
 }
 
 void initFileNodes() {
+    // 获取标准路径
+    SHGetFolderPath(NULL, CSIDL_DESKTOP, NULL, SHGFP_TYPE_CURRENT, desktopPath);
+    SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, personalPath);
+    GetEnvironmentVariableW(L"USERPROFILE", userProfilePath, MAX_PATH);
+
+    // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
-    struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
-    struct FileNode* userProfileNode = allocFileNode("test", TYPE_USERPROFILE);
+    
+    // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
+    userProfileNodeName = wcsdup(lc_str.userprofile ? lc_str.userprofile : L"User");
+    struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_DIR); // 特殊处理的 TYPE_DIR
 
+    struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
+    
+    // 链接顺序：桌面 -> 文档 -> 用户 -> 此电脑
     desktopNode->sibling = documentsNode;
-    documentsNode->sibling = computerNode;
-    documentsNode->sibling = userProfileNode;
+    documentsNode->sibling = userNode;
+    userNode->sibling = computerNode;
+    
+    // 构建“此电脑”的子项（驱动器）
     buildChildNodes(computerNode, true);
     
     treeFileNode = desktopNode;
-
-    ExpandEnvironmentStringsW(L"%USERPROFILE%", userProfilePath, MAX_PATH);
-    SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, personalPath);      
-    SHGetFolderPath(NULL, CSIDL_DESKTOP, NULL, SHGFP_TYPE_CURRENT, desktopPath);
-    
     currPathFileNode = NULL;
+    
+    // 检查子目录状态
     checkIfNodesHasChildDirs(treeFileNode, true);
+    
+    // 默认选中“此电脑”
     setCurrPathFileNode(computerNode);
 }
 
@@ -240,32 +253,37 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
     while (currNode) {
         wchar_t* filename = NULL;
         
-        switch (currNode->type) {
-            case TYPE_DESKTOP:
-                filename = desktopPath;
-                break;
-            case TYPE_PERSONAL:
-                filename = personalPath;
-                break;
-            case TYPE_USERPROFILE:
-                filename = userProfilePath;
-                break;
-            case TYPE_FILE:
-            case TYPE_DIR:
-            case TYPE_DRIVE:
-                filename = currNode->name;              
-                break;
-            default:
-                break;
+        // 特殊识别用户目录节点（通过指针比较，确保唯一性）
+        if (currNode->name == userProfileNodeName) {
+            filename = userProfilePath;
+        }
+        else {
+            switch (currNode->type) {
+                case TYPE_DESKTOP:
+                    filename = desktopPath;
+                    break;
+                case TYPE_PERSONAL:
+                    filename = personalPath;
+                    break;
+                case TYPE_FILE:
+                case TYPE_DIR:
+                case TYPE_DRIVE:
+                    filename = currNode->name;
+                    break;
+                default:
+                    break;
+            }
         }
         
-        if (filename && filename[0] != '\0') {
+        if (filename && filename[0] != L'\0') {
             if (count > 0) {
                 swprintf_s(tmp, MAX_PATH, L"%ls\\%ls", filename, path);
                 wcscpy_s(path, MAX_PATH, tmp);
             }
-            else wcscpy_s(path, MAX_PATH, filename);
-            count++;        
+            else {
+                wcscpy_s(path, MAX_PATH, filename);
+            }
+            count++;
         }
         
         currNode = currNode->parent;
