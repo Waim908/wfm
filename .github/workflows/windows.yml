@@ -12,14 +12,15 @@ jobs:
 
     steps:
       - name: windows
+        # default powershell
         run: |
           pushd C:\
           aria2c -x4 -s4 https://github.com/skeeto/w64devkit/releases/download/v2.5.0/w64devkit-x64-2.5.0.7z.exe
           7z x w64devkit-x64-2.5.0.7z.exe
           git clone -b wfm-custom https://github.com/Waim908/wfm.git
           cd wfm
-          build.bat
-          dir
+          .\build.bat
+          ls
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
