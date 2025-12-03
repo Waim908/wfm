@@ -4,7 +4,7 @@ EXE_NAME=wfm.exe
 
 LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid .\libcdio.dll -Wl,--subsystem,windows
 RC=windres
-CFLAGS=-O3 -s -flto -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0600 -Wall
+CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0600 -Wall
 
 all: ${EXE_NAME}
 
