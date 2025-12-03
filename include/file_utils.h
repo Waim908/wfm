@@ -139,6 +139,9 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
         case TYPE_PERSONAL:
             wcscpy_s(result->typeName, 80, lc_str.folder);
             break;
+        case TYPE_USERPROFILE:
+            wcscpy_s(result->typeName, 80, lc_str.folder);
+            break;      
         case TYPE_COMPUTER:
             wcscpy_s(result->typeName, 80, lc_str.computer);
             break;

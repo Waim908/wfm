@@ -222,7 +222,7 @@ void initFileNodes() {
     
     // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
     userProfileNodeName = wcsdup(L"User");
-    struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_DIR); // 特殊处理的 TYPE_DIR
+    struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_USERPROFILE);
 
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
     
@@ -264,6 +264,9 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                     break;
                 case TYPE_PERSONAL:
                     filename = personalPath;
+                    break;
+                case TYPE_USERPROFILE:
+                    filename = userProfilePath;
                     break;
                 case TYPE_FILE:
                 case TYPE_DIR:
