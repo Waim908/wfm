@@ -5,6 +5,7 @@ struct FileNode* currPathFileNode = NULL;
 
 static wchar_t desktopPath[MAX_PATH] = {0};
 static wchar_t personalPath[MAX_PATH] = {0};
+static wchar_t userProfilePath[MAX_PATH] = {0};
 
 wchar_t* getDesktopPath() {
     return desktopPath;
@@ -212,13 +213,16 @@ void initFileNodes() {
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
-    
+    struct FileNode* userProfileNode = allocFileNode("test", TYPE_USERPROFILE);
+
     desktopNode->sibling = documentsNode;
     documentsNode->sibling = computerNode;
+    documentsNode->sibling = userProfileNode;
     buildChildNodes(computerNode, true);
     
     treeFileNode = desktopNode;
-    
+
+    ExpandEnvironmentStringsW(L"%USERPROFILE%", userProfilePath, MAX_PATH);
     SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, personalPath);      
     SHGetFolderPath(NULL, CSIDL_DESKTOP, NULL, SHGFP_TYPE_CURRENT, desktopPath);
     
@@ -242,6 +246,9 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                 break;
             case TYPE_PERSONAL:
                 filename = personalPath;
+                break;
+            case TYPE_USERPROFILE:
+                filename = userProfilePath;
                 break;
             case TYPE_FILE:
             case TYPE_DIR:
