@@ -5,6 +5,11 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      inputTag:
+        description: "Tag："
+        required: true
+        default: "1.5b1"
 
 jobs:
   build:
