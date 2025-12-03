@@ -19,8 +19,14 @@ jobs:
           7z x w64devkit-x64-2.5.0.7z.exe
           git clone -b wfm-custom https://github.com/Waim908/wfm.git
           cd wfm
-          .\build.bat
-          ls
+          .\build_action.bat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          mkdir C:\wfm
+          cp wfm.exe C:\wfm\
+          cp libcdio.dll C:\wfm\
+          cd C:\wfm
+          7z -oC:\ wfm.zip .\*
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -32,6 +38,6 @@ jobs:
           body: |
             wfm test
           files: |
-            C:\wfm\wfm.exe
+            C:\wfm.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
