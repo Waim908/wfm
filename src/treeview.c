@@ -73,6 +73,13 @@ static void updateTreeItems() {
             case TYPE_COMPUTER:
                 SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidl);
                 break;
+            case TYPE_USERPROFILE: {
+                // 获取 %USERPROFILE% 路径并转换为 PIDL
+                wchar_t userProfilePath[MAX_PATH];
+                if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, userProfilePath))) {
+                    pidl = ILCreateFromPathW(userProfilePath);
+                }
+                break;
             default:
                 break;
         }

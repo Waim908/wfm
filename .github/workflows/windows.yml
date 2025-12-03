@@ -39,7 +39,7 @@ jobs:
           name: wfm
           draft: false
           prerelease: false
-          tag_name: wfm
+          tag_name: ${{ github.event.inputs.inputTag }}
           body: |
             wfm test
           files: |

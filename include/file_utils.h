@@ -10,6 +10,7 @@ enum FileType {
     TYPE_DRIVE,
     TYPE_DESKTOP,
     TYPE_PERSONAL,
+    TYPE_USERPROFILE,
     TYPE_COMPUTER
 };
 
