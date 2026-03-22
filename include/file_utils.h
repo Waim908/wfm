@@ -93,10 +93,6 @@ static inline wchar_t* getFileExtension(wchar_t* path) {
     return ext && *ext++ != L'\0' ? ext : NULL;
 }
 
-static inline bool isCDDrivePath(wchar_t* path) {
-    return (path[0] == L'x' || path[0] == L'X') && path[1] == L':';
-}
-
 static inline bool hasFileExtension(wchar_t* path, wchar_t* targetExt) {
     wchar_t* ext = getFileExtension(path);
     return ext && wcsicmp(ext, targetExt) == 0;
@@ -127,10 +123,7 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
             wcscpy_s(result->typeName, 80, lc_str.folder);
             break;
         case TYPE_DRIVE: {
-            if (isCDDrivePath(path)) {
-                wcscpy_s(result->typeName, 80, lc_str.cd_drive);           
-            }
-            else wcscpy_s(result->typeName, 80, lc_str.local_drive);
+            wcscpy_s(result->typeName, 80, lc_str.local_drive);
             break;
         }
         case TYPE_DESKTOP:
@@ -218,18 +211,6 @@ static inline void clearDirectory(wchar_t* targetPath) {
         while (FindNextFile(handle, &wfd));
         FindClose(handle);
     }
-}
-
-static inline bool getCurrentISOPath(wchar_t* result) {
-    wmemset(result, L'\0', MAX_PATH);
-    int pathLen = MAX_PATH;
-    HKEY hkey;
-    if (RegOpenKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
-        RegQueryValue(hkey, NULL, result, (PLONG)&pathLen);
-        RegCloseKey(hkey);
-    }
-    
-    return pathLen != MAX_PATH;
 }
 
 #endif

@@ -1,8 +1,8 @@
 OBJS=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/resource.o
-INCLUDE_DIR=-I.\include -I.\include\libcdio
+INCLUDE_DIR=-I.\include
 EXE_NAME=wfm.exe
 
-LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid .\libcdio.dll -Wl,--subsystem,windows
+LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -Wl,--subsystem,windows
 RC=windres
 CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0600 -Wall
 

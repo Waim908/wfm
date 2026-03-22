@@ -12,7 +12,6 @@ static inline void loadStrings_en() {
     lc_str.file = L"File";
     lc_str.folder = L"Folder";
     lc_str.local_drive = L"Local Drive";
-    lc_str.cd_drive = L"CD Drive";
     lc_str.computer = L"Computer";
     lc_str.desktop = L"Desktop";
     lc_str.documents = L"Documents";
@@ -40,8 +39,6 @@ static inline void loadStrings_en() {
     lc_str.new_folder = L"New Folder";
     lc_str.new_file = L"New File";
     lc_str.items = L"Items";
-    lc_str.load_iso_image = L"Load ISO Image";
-    lc_str.unload_iso_image = L"Unload ISO Image";
     lc_str.no_media = L"No media";
     lc_str.alert = L"Alert";
     lc_str.enter_folder_name = L"Enter folder name:";
@@ -55,7 +52,6 @@ static inline void loadStrings_en() {
     lc_str.deleting_files = L"Deleting files";
     lc_str.copying_files = L"Copying files";
     lc_str.moving_files = L"Moving files";
-    lc_str.extracting_files = L"Extracting files";
     lc_str.confirm_delete = L"Confirm Delete";
     lc_str.confirm_exit = L"Confirm Exit";
     lc_str.search = L"Search";
@@ -63,11 +59,9 @@ static inline void loadStrings_en() {
     
     lc_str.fmt_file = L"%ls File";
     
-    lc_str.msg_invalid_iso_image_file = L"Invalid ISO Image file!";
     lc_str.msg_deleting_files = L"Deleting files, please wait...";
     lc_str.msg_copying_files = L"Copying files, please wait...";
     lc_str.msg_moving_files = L"Moving files, please wait...";
-    lc_str.msg_extracting_files = L"Extracting files, please wait...";
     lc_str.msg_cancel_file_operation = L"Do you want to cancel the operation?";
     lc_str.msg_confirm_delete_item = L"Are you sure you want to delete \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Are you sure you want to delete %d items?";

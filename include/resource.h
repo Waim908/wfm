@@ -62,7 +62,6 @@ struct LC_STR {
     wchar_t* file;
     wchar_t* folder;
     wchar_t* local_drive;
-    wchar_t* cd_drive;
     wchar_t* computer;
     wchar_t* desktop;
     wchar_t* documents;
@@ -90,8 +89,6 @@ struct LC_STR {
     wchar_t* new_folder;
     wchar_t* new_file;
     wchar_t* items;
-    wchar_t* load_iso_image;
-    wchar_t* unload_iso_image;
     wchar_t* no_media;
     wchar_t* alert;
     wchar_t* enter_folder_name;
@@ -105,7 +102,6 @@ struct LC_STR {
     wchar_t* deleting_files;
     wchar_t* copying_files;
     wchar_t* moving_files;
-    wchar_t* extracting_files;
     wchar_t* confirm_delete;
     wchar_t* confirm_exit;
     wchar_t* search;
@@ -113,11 +109,9 @@ struct LC_STR {
     
     wchar_t* fmt_file;
     
-    wchar_t* msg_invalid_iso_image_file;
     wchar_t* msg_deleting_files;
     wchar_t* msg_copying_files;
     wchar_t* msg_moving_files;
-    wchar_t* msg_extracting_files;
     wchar_t* msg_cancel_file_operation;
     wchar_t* msg_confirm_delete_item;
     wchar_t* msg_confirm_delete_multiple_items;

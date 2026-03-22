@@ -12,7 +12,6 @@ static inline void loadStrings_zh() {
     lc_str.file = L"文件";
     lc_str.folder = L"文件夹";
     lc_str.local_drive = L"本地磁盘";
-    lc_str.cd_drive = L"CD 驱动器";
     lc_str.computer = L"计算机";
     lc_str.desktop = L"桌面";
     lc_str.documents = L"文档";
@@ -40,8 +39,6 @@ static inline void loadStrings_zh() {
     lc_str.new_folder = L"新建文件夹";
     lc_str.new_file = L"新建文件";
     lc_str.items = L"项";
-    lc_str.load_iso_image = L"加载 ISO 映像";
-    lc_str.unload_iso_image = L"卸载 ISO 映像";
     lc_str.no_media = L"无介质";
     lc_str.alert = L"警告";
     lc_str.enter_folder_name = L"请输入文件夹名称：";
@@ -55,7 +52,6 @@ static inline void loadStrings_zh() {
     lc_str.deleting_files = L"正在删除文件";
     lc_str.copying_files = L"正在复制文件";
     lc_str.moving_files = L"正在移动文件";
-    lc_str.extracting_files = L"正在解压文件";
     lc_str.confirm_delete = L"确认删除";
     lc_str.confirm_exit = L"确认退出";
     lc_str.search = L"搜索";
@@ -63,11 +59,9 @@ static inline void loadStrings_zh() {
 
     lc_str.fmt_file = L"%ls 文件";
 
-    lc_str.msg_invalid_iso_image_file = L"无效的 ISO 映像文件！";
     lc_str.msg_deleting_files = L"正在删除文件，请稍候...";
     lc_str.msg_copying_files = L"正在复制文件，请稍候...";
     lc_str.msg_moving_files = L"正在移动文件，请稍候...";
-    lc_str.msg_extracting_files = L"正在解压文件，请稍候...";
     lc_str.msg_cancel_file_operation = L"是否要取消此操作？";
     lc_str.msg_confirm_delete_item = L"确定要删除“%ls”吗？";
     lc_str.msg_confirm_delete_multiple_items = L"确定要删除 %d 个项目吗？";

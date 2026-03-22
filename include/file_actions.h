@@ -8,6 +8,5 @@ void cutFiles(struct FileNode** nodes, int count);
 void pasteFiles(wchar_t* dstDir);
 void pasteShortcuts(wchar_t* dstDir);
 void createDesktopShortcuts(struct FileNode** nodes, int count);
-void extractFilesFromISOImage(wchar_t* isoPath, wchar_t* dstPath);
 
 #endif
