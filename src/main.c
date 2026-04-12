@@ -12,6 +12,7 @@ extern HWND hwndTreeview;
 
 HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
+HFONT hGuiFont = NULL;
 struct LC_STR lc_str = {0};
 
 void GetWindowRectInParent(HWND hwnd, RECT* rect) {
@@ -244,6 +245,7 @@ static void createMainMenu() {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow) {
+    SetProcessDPIAware();
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
     
@@ -253,6 +255,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     loadLCStrings(localeName);
     
     globalHInstance = hInstance;
+
+    NONCLIENTMETRICS ncm = {0};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    hGuiFont = CreateFontIndirect(&ncm.lfMessageFont);
 
     WNDCLASSEX wcx = {0};
     wcx.cbSize = sizeof(wcx);
@@ -288,6 +295,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     createSizebar();
     createContentView();
     createStatusbar();
+
+    SendMessage(hwndToolbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndTreeview, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     
     setViewStyle(STYLE_DETAILS);
     int treeviewWidth = hwndWidth * 0.2f;

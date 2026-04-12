@@ -275,7 +275,7 @@ static struct AddrButton* addAddrButton() {
     struct AddrButton* button = &addrButtons[index];
     button->hwnd = CreateWindowEx(0, WC_BUTTON, NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
     button->isArrow = false;
-    SendMessage(button->hwnd, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(button->hwnd, WM_SETFONT, (WPARAM)hGuiFont, 0);
     return button;
 }
 
@@ -376,7 +376,7 @@ void createNavbar() {
                                 
     hwndAddrEdit = CreateWindowEx(0, WC_EDIT, NULL, WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL | ES_LEFT,
                                   0, 0, 0, 0, hwndAddrEditWrapper, (HMENU)NULL, globalHInstance, NULL);
-    SendMessage(hwndAddrEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(hwndAddrEdit, WM_SETFONT, (WPARAM)hGuiFont, 0);
     AddrEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndAddrEdit, GWLP_WNDPROC, (LONG_PTR)AddrEditWndProc);     
     
     hwndSearchEditWrapper = CreateWindowEx(0, WC_STATIC, NULL, WS_VISIBLE | WS_CHILD | WS_BORDER, 
@@ -385,7 +385,7 @@ void createNavbar() {
                                            
     hwndSearchEdit = CreateWindowEx(0, WC_EDIT, NULL, WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL | ES_LEFT, 
                                     0, 0, 0, 0, hwndSearchEditWrapper, (HMENU)NULL, globalHInstance, NULL);
-    SendMessage(hwndSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(hwndSearchEdit, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SearchEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditWndProc);           
 
     setEditMode(false);

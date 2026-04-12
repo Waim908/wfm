@@ -56,6 +56,8 @@ static inline void timetToFileTime(time_t t, LPFILETIME result) {
     } \
     while(0)
 
+extern HFONT hGuiFont;
+
 void navigateToFileNode(struct FileNode* node);
 void navigateToPath(wchar_t* path);
 void navigateUp();
