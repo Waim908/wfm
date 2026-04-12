@@ -6,6 +6,37 @@
 #define COLUMN_DATE_IDX 3
 #define COLUMN_PATH_IDX 4
 
+// 扩展名图标缓存
+#define EXT_CACHE_SIZE 128
+static struct {
+    wchar_t ext[16];
+    int icon;
+} extIconCache[EXT_CACHE_SIZE];
+static int extCacheCount = 0;
+
+// 目录图标缓存
+static int folderIconCached = 0;
+static int folderIconIndex = 0;
+
+// 快速查找扩展名图标缓存
+static int findExtIconCache(wchar_t* ext) {
+    if (!ext) return -1;
+    for (int i = 0; i < extCacheCount; i++) {
+        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
+            return extIconCache[i].icon;
+        }
+    }
+    return -1;
+}
+
+// 添加扩展名图标缓存
+static void addExtIconCache(wchar_t* ext, int icon) {
+    if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
+    wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
+    extIconCache[extCacheCount].icon = icon;
+    extCacheCount++;
+}
+
 enum Msg {
     MSG_ADD_ITEM = WM_APP,
     MSG_SEARCH_DONE
@@ -334,24 +365,74 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             struct ListItem* item = &items[nmlvdi->item.iItem];
             
             if (!item->loaded) {
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(item->node, path);
-                
-                struct FileInfo fi = {0};
-                getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
-
-                if (item->node->type == TYPE_FILE) {
-                    formatFileSize(item->size, item->formattedSize);
+                // 使用图标缓存优化
+                if (item->node->type == TYPE_DIR) {
+                    // 目录图标缓存
+                    if (!folderIconCached) {
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        struct FileInfo fi = {0};
+                        getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
+                        folderIconIndex = fi.icon;
+                        folderIconCached = 1;
+                        wcscpy_s(item->type, 80, lc_str.folder);
+                    }
+                    item->icon = folderIconIndex;
+                    wcscpy_s(item->type, 80, lc_str.folder);
+                }
+                else if (item->node->type == TYPE_FILE) {
+                    // 获取扩展名
+                    wchar_t* ext = wcsrchr(item->node->name, L'.');
+                    int cachedIcon = findExtIconCache(ext);
                     
+                    if (cachedIcon >= 0) {
+                        item->icon = cachedIcon;
+                        // 设置类型名称
+                        wcscpy_s(item->type, 80, lc_str.file);
+                        if (ext) {
+                            wchar_t* extStr = ext + 1;
+                            if (wcsicmp(extStr, L"exe") == 0) {
+                                wcscpy_s(item->type, 80, lc_str.application);
+                            }
+                            else if (wcsicmp(extStr, L"lnk") == 0) {
+                                wcscpy_s(item->type, 80, lc_str.shortcut);
+                            }
+                            else {
+                                wchar_t value[30] = {0};
+                                strToUpper(extStr, value);
+                                swprintf_s(item->type, 80, lc_str.fmt_file, value);
+                            }
+                        }
+                    }
+                    else {
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        struct FileInfo fi = {0};
+                        getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                        item->icon = fi.icon;
+                        wcscpy_s(item->type, 80, fi.typeName);
+                        // 缓存扩展名图标
+                        if (ext) addExtIconCache(ext, fi.icon);
+                    }
+                    
+                    // 格式化文件大小和日期
+                    formatFileSize(item->size, item->formattedSize);
                     SYSTEMTIME systemTime = {0};
                     FILETIME localFiletime;
                     if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
                         formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
                     }
                 }
-
-                item->icon = fi.icon;
-                wcscpy_s(item->type, 80, fi.typeName);
+                else {
+                    // 其他类型（驱动器等）
+                    wchar_t path[MAX_PATH] = {0};
+                    getFileNodePath(item->node, path);
+                    struct FileInfo fi = {0};
+                    getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
+                    item->icon = fi.icon;
+                    wcscpy_s(item->type, 80, fi.typeName);
+                }
+                
                 item->loaded = true;                
             }
             

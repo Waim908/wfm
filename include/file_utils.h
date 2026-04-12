@@ -101,22 +101,17 @@ static inline bool hasFileExtension(wchar_t* path, wchar_t* targetExt) {
 static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon, struct FileInfo* result) {
     SHFILEINFO sfi = {0};
     result->icon = 0;
-    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
-    if (SHGetFileInfo(path, 0, &sfi, sizeof(SHFILEINFO), flags)) {
-        result->icon = sfi.iIcon;
+    
+    // 始终使用 SHGFI_USEFILEATTRIBUTES 避免实际文件访问，显著提升性能
+    DWORD flags = SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
+    
+    if (type == TYPE_DIR) {
+        SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
     }
-    else {        
-        if (type == TYPE_DIR) {
-            flags |= SHGFI_USEFILEATTRIBUTES;
-            SHGetFileInfo(L"dir", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
-            result->icon = sfi.iIcon;
-        }
-        else if (type == TYPE_FILE) {
-            flags |= SHGFI_USEFILEATTRIBUTES;
-            SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
-            result->icon = sfi.iIcon;
-        }       
+    else {
+        SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
     }
+    result->icon = sfi.iIcon;
     
     switch (type) {
         case TYPE_DIR:
