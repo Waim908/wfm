@@ -20,6 +20,8 @@ static struct FileNode* allocFileNode(wchar_t* name, enum FileType type) {
     node->sibling = NULL;
     node->children = NULL;
     node->hasChildDirs = false;
+    node->size = 0;
+    memset(&node->modifiedTime, 0, sizeof(FILETIME));
     return node;
 }
 
@@ -96,6 +98,15 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
                 wchar_t* name = wcsdup(wfd.cFileName);
                 struct FileNode* child = allocFileNode(name, type);
                 child->parent = parent;
+                
+                // 直接保存文件属性，避免后续重复 API 调用
+                if (type == TYPE_FILE) {
+                    LARGE_INTEGER filesize;
+                    filesize.LowPart = wfd.nFileSizeLow;
+                    filesize.HighPart = wfd.nFileSizeHigh;
+                    child->size = filesize.QuadPart;
+                    memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
+                }
                 
                 if (!firstChild) firstChild = child;
                 if (lastChild) lastChild->sibling = child;

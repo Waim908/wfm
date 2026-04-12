@@ -76,25 +76,9 @@ extern HWND hwndMain;
 HWND hwndContentView = NULL;
 
 static void fillFileInfo(struct FileNode* node, struct ListItem* item) {
-    item->size = 0;
-    memset(&item->modifiedTime, 0, sizeof(FILETIME));
-    
-    if (node->type == TYPE_FILE) {
-        LARGE_INTEGER filesize;
-        WIN32_FILE_ATTRIBUTE_DATA info = {0};
-
-        wchar_t path[MAX_PATH] = {0};
-        getFileNodePath(node, path);
-        GetFileAttributesEx(path, GetFileExInfoStandard, &info);        
-
-        if ((info.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)) {
-            filesize.LowPart = info.nFileSizeLow;
-            filesize.HighPart = info.nFileSizeHigh;
-            item->size = filesize.QuadPart;
-        }
-
-        memcpy(&item->modifiedTime, &info.ftLastWriteTime, sizeof(FILETIME));
-    }
+    // 直接使用已保存的文件属性，无需再次调用 API
+    item->size = node->size;
+    memcpy(&item->modifiedTime, &node->modifiedTime, sizeof(FILETIME));
 }
 
 static void updateStatusbar() {

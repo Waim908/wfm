@@ -10,6 +10,8 @@ struct FileNode {
     struct FileNode* sibling;
     struct FileNode* children;
     bool hasChildDirs;
+    uint64_t size;
+    FILETIME modifiedTime;
 };
 
 void initFileNodes();
