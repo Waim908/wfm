@@ -42,6 +42,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_NAME), lc_str.app_name);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_VERSION), lc_str.app_version);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_DEV_NAME), lc_str.app_dev_name);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_MOD_NAME), L"Modify by Waim908");
             return (INT_PTR)TRUE;
         }
     }
