@@ -109,6 +109,12 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
         flags |= SHGFI_USEFILEATTRIBUTES;
         SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
     }
+    else if (type == TYPE_DRIVE) {
+        // 驱动器路径必须以反斜杠结尾（如 "C:\"），否则无法正确获取驱动器图标
+        wchar_t drivePath[4] = {0};
+        swprintf_s(drivePath, 4, L"%lc:\\", path[0]);
+        SHGetFileInfo(drivePath, 0, &sfi, sizeof(SHFILEINFO), flags);
+    }
     else {
         // 检查是否为 exe 或 lnk 文件，这些需要实际访问文件获取内嵌图标
         wchar_t* ext = wcsrchr(path, L'.');
