@@ -1,10 +1,28 @@
 OBJS=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/resource.o
-INCLUDE_DIR=-I.\include
+INCLUDE_DIR=-I./include
 EXE_NAME=wfm.exe
 
 LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -Wl,--subsystem,windows
-RC=windres
 CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0600 -Wall
+
+# Detect OS and set compiler/toolchain accordingly
+UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+
+ifeq ($(UNAME_S),Linux)
+    # Linux cross-compilation with mingw-w64
+    CC = x86_64-w64-mingw32-gcc
+    RC = x86_64-w64-mingw32-windres
+    RM = rm -f
+    MKDIR = mkdir -p
+    RMDIR = rm -rf obj
+else
+    # Windows native compilation
+    CC = gcc
+    RC = windres
+    RM = del
+    MKDIR = mkdir
+    RMDIR = del /q obj\*.o 2>nul || exit 0
+endif
 
 all: ${EXE_NAME}
 
@@ -12,13 +30,14 @@ ${EXE_NAME}: ${OBJS}
 	${CC} -o ${EXE_NAME} ${OBJS} ${LDFLAGS}
 
 clean:
-	del obj\*.o ${EXE_NAME}
+	${RMDIR}
+	${RM} ${EXE_NAME}
 
 obj:
-	mkdir obj
+	${MKDIR} obj
 
 obj/%.o: src/%.c obj
 	${CC} ${CFLAGS} ${INCLUDE_DIR} -c $< -o $@
 
 obj/resource.o: res/resource.rc res/Application.manifest res/main.ico res/go.ico res/refresh.ico res/search.ico res/nav_arrow.ico res/up.ico res/copy.ico res/cut.ico res/paste.ico res/delete.ico res/new_folder.ico res/new_file.ico include/resource.h
-	${RC} ${INCLUDE_DIR} -I.\res -i $< -o $@
+	${RC} ${INCLUDE_DIR} -I./res -i $< -o $@
