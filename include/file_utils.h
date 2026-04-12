@@ -102,14 +102,27 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
     SHFILEINFO sfi = {0};
     result->icon = 0;
     
-    // 始终使用 SHGFI_USEFILEATTRIBUTES 避免实际文件访问，显著提升性能
-    DWORD flags = SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
+    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
     
     if (type == TYPE_DIR) {
+        // 目录使用 USEFILEATTRIBUTES 即可
+        flags |= SHGFI_USEFILEATTRIBUTES;
         SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
     }
     else {
-        SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
+        // 检查是否为 exe 或 lnk 文件，这些需要实际访问文件获取内嵌图标
+        wchar_t* ext = wcsrchr(path, L'.');
+        bool needRealAccess = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+        
+        if (needRealAccess) {
+            // exe/lnk 需要访问文件获取真实图标
+            SHGetFileInfo(path, 0, &sfi, sizeof(SHFILEINFO), flags);
+        }
+        else {
+            // 其他文件类型使用 USEFILEATTRIBUTES 快速获取
+            flags |= SHGFI_USEFILEATTRIBUTES;
+            SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
+        }
     }
     result->icon = sfi.iIcon;
     

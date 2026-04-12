@@ -383,7 +383,11 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                 else if (item->node->type == TYPE_FILE) {
                     // 获取扩展名
                     wchar_t* ext = wcsrchr(item->node->name, L'.');
-                    int cachedIcon = findExtIconCache(ext);
+                    
+                    // exe 和 lnk 文件不使用缓存，每个文件可能有不同图标
+                    bool skipCache = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+                    
+                    int cachedIcon = skipCache ? -1 : findExtIconCache(ext);
                     
                     if (cachedIcon >= 0) {
                         item->icon = cachedIcon;
@@ -411,8 +415,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
                         item->icon = fi.icon;
                         wcscpy_s(item->type, 80, fi.typeName);
-                        // 缓存扩展名图标
-                        if (ext) addExtIconCache(ext, fi.icon);
+                        // 非 exe/lnk 文件缓存扩展名图标
+                        if (ext && !skipCache) addExtIconCache(ext, fi.icon);
                     }
                     
                     // 格式化文件大小和日期
