@@ -821,12 +821,18 @@ void refreshContentView() {
     
     struct FileNode* child = currPathFileNode->children;
     
-    numItems = getChildNodeCount(currPathFileNode);
-    items = calloc(numItems, sizeof(struct ListItem));
-    int index = 0;
+    // 单次遍历：计数并填充
+    int capacity = 64;
+    numItems = 0;
+    items = malloc(capacity * sizeof(struct ListItem));
     
     while (child) {
-        struct ListItem* item = &items[index++];
+        if (numItems >= capacity) {
+            capacity *= 2;
+            items = realloc(items, capacity * sizeof(struct ListItem));
+        }
+        struct ListItem* item = &items[numItems++];
+        memset(item, 0, sizeof(struct ListItem));
         item->node = child;
         item->loaded = false;
 

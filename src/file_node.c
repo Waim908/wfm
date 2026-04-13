@@ -63,7 +63,6 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
         while (drives[i] != L'\0') {
             wchar_t* drive = &drives[i];
             i += wcslen(drive) + 1;
-            if (!isPathExists(drive)) continue;
 
             wchar_t* name = malloc(3 * sizeof(wchar_t));
             name[0] = drive[0];
@@ -72,6 +71,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             
             struct FileNode* child = allocFileNode(name, TYPE_DRIVE);
             child->parent = parent;
+            child->hasChildDirs = true;
             
             if (!firstChild) firstChild = child;
             if (lastChild) lastChild->sibling = child;
@@ -81,42 +81,48 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
     else {
         wchar_t path[MAX_PATH] = {0};
         getFileNodePath(parent, path);
-        if (!isPathExists(path)) return;
         
         WIN32_FIND_DATA wfd = {0};
         wcscat_s(path, MAX_PATH, L"\\*");
         HANDLE handle = FindFirstFile(path, &wfd);
+        if (handle == INVALID_HANDLE_VALUE) goto done;
         
         do {
-            if (wcscmp(wfd.cFileName, L".") == 0 || wcscmp(wfd.cFileName, L"..") == 0 ||
-               (onlyDirs && (wfd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE))) continue; 
+            if (wfd.cFileName[0] == L'.' && (wfd.cFileName[1] == L'\0' || 
+                (wfd.cFileName[1] == L'.' && wfd.cFileName[2] == L'\0'))) continue;
+            if (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) continue;
+
+            bool isDir = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            if (onlyDirs && !isDir) continue;
+            if (!isDir && !(wfd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)) continue;
             
-            if (((wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (wfd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)) &&
-                !(wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) {
-                enum FileType type = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? TYPE_DIR : TYPE_FILE;
-                
-                wchar_t* name = wcsdup(wfd.cFileName);
-                struct FileNode* child = allocFileNode(name, type);
-                child->parent = parent;
-                
-                // 直接保存文件属性，避免后续重复 API 调用
-                if (type == TYPE_FILE) {
-                    LARGE_INTEGER filesize;
-                    filesize.LowPart = wfd.nFileSizeLow;
-                    filesize.HighPart = wfd.nFileSizeHigh;
-                    child->size = filesize.QuadPart;
-                    memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
-                }
-                
-                if (!firstChild) firstChild = child;
-                if (lastChild) lastChild->sibling = child;
-                lastChild = child;              
-            }               
+            enum FileType type = isDir ? TYPE_DIR : TYPE_FILE;
+            
+            wchar_t* name = wcsdup(wfd.cFileName);
+            struct FileNode* child = allocFileNode(name, type);
+            child->parent = parent;
+            
+            if (isDir) {
+                child->hasChildDirs = true;
+            }
+            else {
+                LARGE_INTEGER filesize;
+                filesize.LowPart = wfd.nFileSizeLow;
+                filesize.HighPart = wfd.nFileSizeHigh;
+                child->size = filesize.QuadPart;
+                memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
+            }
+            
+            if (!firstChild) firstChild = child;
+            if (lastChild) lastChild->sibling = child;
+            lastChild = child;              
         }
         while (FindNextFile(handle, &wfd));
         FindClose(handle);
     }
     
+done:
     parent->children = firstChild;
 }
 
@@ -229,13 +235,17 @@ void initFileNodes() {
 
     // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
+    desktopNode->hasChildDirs = true;
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
+    documentsNode->hasChildDirs = true;
     
     // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
     userProfileNodeName = wcsdup(L"User");
     struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_USERPROFILE);
+    userNode->hasChildDirs = true;
 
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
+    computerNode->hasChildDirs = true;
     
     // 链接顺序：桌面 -> 文档 -> 用户 -> 此电脑
     desktopNode->sibling = documentsNode;
@@ -248,8 +258,7 @@ void initFileNodes() {
     treeFileNode = desktopNode;
     currPathFileNode = NULL;
     
-    // 检查子目录状态
-    checkIfNodesHasChildDirs(treeFileNode, true);
+
     
     // 默认选中“此电脑”
     setCurrPathFileNode(computerNode);
@@ -258,13 +267,15 @@ void initFileNodes() {
 int getFileNodePath(struct FileNode* node, wchar_t* path) {
     struct FileNode* currNode = node;
     wmemset(path, L'\0', MAX_PATH);
-    wchar_t tmp[MAX_PATH] = {0};
     int count = 0;
     
-    while (currNode) {
+    // 收集路径片段（从叶到根）
+    wchar_t* parts[32];
+    int numParts = 0;
+    
+    while (currNode && numParts < 32) {
         wchar_t* filename = NULL;
         
-        // 特殊识别用户目录节点（通过指针比较，确保唯一性）
         if (currNode->name == userProfileNodeName) {
             filename = userProfilePath;
         }
@@ -290,18 +301,25 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
         }
         
         if (filename && filename[0] != L'\0') {
-            if (count > 0) {
-                swprintf_s(tmp, MAX_PATH, L"%ls\\%ls", filename, path);
-                wcscpy_s(path, MAX_PATH, tmp);
-            }
-            else {
-                wcscpy_s(path, MAX_PATH, filename);
-            }
+            parts[numParts++] = filename;
             count++;
         }
         
         currNode = currNode->parent;
     }
+    
+    // 反向拼接（从根到叶）
+    int pos = 0;
+    for (int i = numParts - 1; i >= 0; i--) {
+        int len = wcslen(parts[i]);
+        if (pos + len + 1 >= MAX_PATH) break;
+        if (pos > 0) {
+            path[pos++] = L'\\';
+        }
+        memcpy(&path[pos], parts[i], len * sizeof(wchar_t));
+        pos += len;
+    }
+    path[pos] = L'\0';
 
     return count;
 }

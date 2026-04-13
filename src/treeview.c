@@ -107,7 +107,6 @@ static void updateTreeItems() {
 
 static void treeItemExpand(HTREEITEM treeItem, struct FileNode* node) {
     buildChildNodes(node, true);
-    checkIfNodesHasChildDirs(node->children, false);
     updateTreeItemsDeep(treeItem, node);
 }
 
