@@ -253,7 +253,7 @@ void initFileNodes() {
     userNode->sibling = computerNode;
     
     // 构建“此电脑”的子项（驱动器）
-    buildChildNodes(computerNode, true);
+    // buildChildNodes(computerNode, true); // 5df279fb9664Ff0c65394e3a61d252a08f7d
     
     treeFileNode = desktopNode;
     currPathFileNode = NULL;

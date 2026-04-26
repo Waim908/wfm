@@ -8,45 +8,43 @@ HWND hwndTreeview = NULL;
 
 static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNode) {
     HTREEITEM child = TreeView_GetChild(hwndTreeview, parentItem);
-    
+
     while (child != NULL) {
         HTREEITEM itemToDelete = child;
         child = TreeView_GetNextSibling(hwndTreeview, child);
         TreeView_DeleteItem(hwndTreeview, itemToDelete);
     }
-    
+
     if (parentNode->children) {
         TVINSERTSTRUCT tvis;
         tvis.hParent = parentItem;
         tvis.hInsertAfter = TVI_LAST;
         tvis.itemex.mask = TVIF_CHILDREN | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_TEXT | TVIF_STATE;
-        
+
         wchar_t parentPath[MAX_PATH] = {0};
         if (getFileNodePath(parentNode, parentPath)) wcscat_s(parentPath, MAX_PATH, L"\\");
         wchar_t path[MAX_PATH] = {0};
-        
+
         HIMAGELIST himlBig, himlSmall;
         Shell_GetImageLists(&himlBig, &himlSmall);
         TreeView_SetImageList(hwndTreeview, himlSmall, TVSIL_NORMAL);
-        
+
         struct FileNode* node = parentNode->children;
         do {
             swprintf_s(path, MAX_PATH, L"%ls%ls", parentPath, node->name);
-            
-            struct FileInfo fi = {0};
-            getFileInfo(path, node->type, false, &fi);
+
+            int iconIndex = getTreeIcon(path, node->type);
 
             tvis.itemex.cChildren = node->hasChildDirs ? 1 : 0;
             tvis.itemex.state = node->children ? TVIS_EXPANDED : 0;
             tvis.itemex.stateMask = TVIS_EXPANDED;
             tvis.itemex.pszText = node->name;
             tvis.itemex.cchTextMax = wcslen(node->name);
-            tvis.itemex.iImage = fi.icon;
-            tvis.itemex.iSelectedImage = fi.icon;
+            tvis.itemex.iImage = iconIndex;
+            tvis.itemex.iSelectedImage = iconIndex;
             tvis.itemex.lParam = (LPARAM)node;
 
-            HTREEITEM handle = TreeView_InsertItem(hwndTreeview, &tvis);
-            updateTreeItemsDeep(handle, node);
+            TreeView_InsertItem(hwndTreeview, &tvis);
         }
         while ((node = node->sibling) != NULL);
     }
@@ -54,12 +52,12 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
 
 static void updateTreeItems() {
     TreeView_DeleteAllItems(hwndTreeview);
-    
+
     TVINSERTSTRUCT tvis;
     tvis.hParent = NULL;
     tvis.hInsertAfter = TVI_ROOT;
     tvis.itemex.mask = TVIF_CHILDREN | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_TEXT | TVIF_STATE;
-    
+
     struct FileNode* node = treeFileNode;
     do {
         ITEMIDLIST* pidl = NULL;
@@ -74,7 +72,6 @@ static void updateTreeItems() {
                 SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidl);
                 break;
             case TYPE_USERPROFILE: {
-                // 获取 %USERPROFILE% 路径并转换为 PIDL
                 wchar_t userProfilePath[MAX_PATH];
                 if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROFILE, NULL, 0, userProfilePath))) {
                     pidl = ILCreateFromPathW(userProfilePath);
@@ -84,7 +81,7 @@ static void updateTreeItems() {
             default:
                 break;
         }
-        
+
         SHFILEINFO sfi = {0};
         HIMAGELIST himl = (HIMAGELIST)SHGetFileInfo((LPCWSTR)pidl, 0, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_PIDL);
         CoTaskMemFree(pidl);
@@ -100,7 +97,7 @@ static void updateTreeItems() {
         tvis.itemex.lParam = (LPARAM)node;
 
         HTREEITEM handle = TreeView_InsertItem(hwndTreeview, &tvis);
-        updateTreeItemsDeep(handle, node);      
+        (void)handle; // top-level items stored, handle not needed further
     }
     while ((node = node->sibling) != NULL);
 }
@@ -149,12 +146,12 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
         }
     }
 
-    return 0;   
+    return 0;
 }
 
 void createTreeview() {
     hwndTreeview = CreateWindowEx(0, WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS |                              TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
-                                  
-    updateTreeItems();                            
-    UpdateWindow(hwndTreeview);                               
+
+    updateTreeItems();
+    UpdateWindow(hwndTreeview);
 }

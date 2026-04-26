@@ -98,6 +98,26 @@ static inline bool hasFileExtension(wchar_t* path, wchar_t* targetExt) {
     return ext && wcsicmp(ext, targetExt) == 0;
 }
 
+static inline int getTreeIcon(wchar_t* path, enum FileType type) {
+    SHFILEINFO sfi = {0};
+    DWORD flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+
+    if (type == TYPE_DIR) {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    else if (type == TYPE_DRIVE) {
+        wchar_t drivePath[4] = {0};
+        swprintf_s(drivePath, 4, L"%lc:\\", path[0]);
+        SHGetFileInfo(drivePath, 0, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    else {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    return sfi.iIcon;
+}
+
 static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon, struct FileInfo* result) {
     SHFILEINFO sfi = {0};
     result->icon = 0;

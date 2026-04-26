@@ -43,6 +43,24 @@
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
 
+#define ICON_UP          0
+#define ICON_COPY        1
+#define ICON_CUT         2
+#define ICON_PASTE       3
+#define ICON_DELETE      4
+#define ICON_NEW_FOLDER  5
+#define ICON_NEW_FILE    6
+#define ICON_GO          7
+#define ICON_REFRESH     8
+#define ICON_SEARCH      9
+#define ICON_NAV_ARROW   10
+#define NUM_UI_ICONS     11
+
+extern HICON uiIcons[NUM_UI_ICONS];
+
+void preloadIcons();
+void freeUIcons();
+
 #ifndef IDC_STATIC
 #define IDC_STATIC -1
 #endif

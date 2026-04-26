@@ -45,21 +45,13 @@ void createToolButtons() {
 
     HIMAGELIST hImageList = ImageList_Create(16, 16, ILC_COLOR32, NUM_BUTTONS, 0);
     
-    HICON hiUp = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_UP), IMAGE_ICON, 16, 16, 0);
-    HICON hiCopy = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_COPY), IMAGE_ICON, 16, 16, 0);
-    HICON hiCut = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_CUT), IMAGE_ICON, 16, 16, 0);
-    HICON hiPaste = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_PASTE), IMAGE_ICON, 16, 16, 0);
-    HICON hiDelete = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_DELETE), IMAGE_ICON, 16, 16, 0);
-    HICON hiNewFolder = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_NEW_FOLDER), IMAGE_ICON, 16, 16, 0);
-    HICON hiNewFile = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_NEW_FILE), IMAGE_ICON, 16, 16, 0);
-    
-    ImageList_AddIcon(hImageList, hiUp);
-    ImageList_AddIcon(hImageList, hiCopy);
-    ImageList_AddIcon(hImageList, hiCut);
-    ImageList_AddIcon(hImageList, hiPaste);
-    ImageList_AddIcon(hImageList, hiDelete);
-    ImageList_AddIcon(hImageList, hiNewFolder);
-    ImageList_AddIcon(hImageList, hiNewFile);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_UP]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_COPY]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_CUT]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_PASTE]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_DELETE]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FOLDER]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FILE]);
     
     SendMessage(hwndToolbar, TB_SETIMAGELIST, 0, (LPARAM)hImageList);
 

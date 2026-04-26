@@ -14,6 +14,40 @@ HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
 HFONT hGuiFont = NULL;
 struct LC_STR lc_str = {0};
+HICON uiIcons[NUM_UI_ICONS] = {0};
+
+struct IconMapping {
+    int iconId;
+    int resourceId;
+};
+
+static const struct IconMapping iconMap[] = {
+    {ICON_UP, IDI_UP},
+    {ICON_COPY, IDI_COPY},
+    {ICON_CUT, IDI_CUT},
+    {ICON_PASTE, IDI_PASTE},
+    {ICON_DELETE, IDI_DELETE},
+    {ICON_NEW_FOLDER, IDI_NEW_FOLDER},
+    {ICON_NEW_FILE, IDI_NEW_FILE},
+    {ICON_GO, IDI_GO},
+    {ICON_REFRESH, IDI_REFRESH},
+    {ICON_SEARCH, IDI_SEARCH},
+    {ICON_NAV_ARROW, IDI_NAV_ARROW},
+};
+
+void preloadIcons() {
+    for (int i = 0; i < NUM_UI_ICONS; i++) {
+        uiIcons[iconMap[i].iconId] = (HICON)LoadImage(
+            globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
+            IMAGE_ICON, 16, 16, 0);
+    }
+}
+
+void freeUIcons() {
+    for (int i = 0; i < NUM_UI_ICONS; i++) {
+        if (uiIcons[i]) DestroyIcon(uiIcons[i]);
+    }
+}
 
 void GetWindowRectInParent(HWND hwnd, RECT* rect) {
     GetWindowRect(hwnd, rect);
@@ -256,6 +290,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     loadLCStrings(localeName);
     
     globalHInstance = hInstance;
+    preloadIcons();
 
     NONCLIENTMETRICS ncm = {0};
     ncm.cbSize = sizeof(ncm);

@@ -286,8 +286,7 @@ static void addArrowAddrButton(struct FileNode* node) {
 
     SetWindowLongPtr(button->hwnd, GWL_STYLE, GetWindowLongPtr(button->hwnd, GWL_STYLE) | BS_ICON);
 
-    HICON hiNavArrow = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_NAV_ARROW), IMAGE_ICON, 16, 16, 0);
-    SendMessageW(button->hwnd, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiNavArrow);
+    SendMessageW(button->hwnd, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_NAV_ARROW]);
     button->width = 16;
 }
 
@@ -346,23 +345,20 @@ void updateAddrButtons() {
 }
 
 static void createNavButtons() {
-    hwndGoButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+    hwndGoButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                   0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiGo = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_GO), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndGoButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiGo);
+    SendMessage(hwndGoButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_GO]);
     SetWindowPos(hwndGoButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
-    
-    hwndRefreshButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+
+    hwndRefreshButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                        0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiRefresh = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_REFRESH), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndRefreshButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiRefresh);
+    SendMessage(hwndRefreshButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_REFRESH]);
     SetWindowPos(hwndRefreshButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
-    
-    hwndSearchButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+
+    hwndSearchButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                       0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiSearch = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_SEARCH), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndSearchButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiSearch);
-    SetWindowPos(hwndSearchButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);      
+    SendMessage(hwndSearchButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_SEARCH]);
+    SetWindowPos(hwndSearchButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
 }
 
 void createNavbar() {
