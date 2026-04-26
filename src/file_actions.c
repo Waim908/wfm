@@ -13,7 +13,8 @@ enum FileAction {
     ACTION_NONE,
     ACTION_DELETE,
     ACTION_COPY,
-    ACTION_MOVE
+    ACTION_MOVE,
+    ACTION_ISO_EXTRACT
 };
 
 struct ActionData {
@@ -52,7 +53,7 @@ static void freeActionData() {
     if (clipboardIsCut) clearClipboard();
     
     if (actionData) {
-        if (actionData->action == ACTION_DELETE) {
+        if (actionData->action == ACTION_DELETE || actionData->action == ACTION_ISO_EXTRACT) {
             for (int i = 0; i < actionData->numSrcPaths; i++) {
                 MEMFREE(actionData->srcPaths[i]);
             }
@@ -97,6 +98,11 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
                     SetWindowText(hwndLabel, lc_str.msg_moving_files);
                     break;
                 }
+                case ACTION_ISO_EXTRACT: {
+                    SetWindowText(hwndDlg, lc_str.extracting_files);
+                    SetWindowText(hwndLabel, lc_str.msg_extracting_files);
+                    break;
+                }
                 case ACTION_NONE:
                     return (INT_PTR)FALSE;
             }
@@ -130,39 +136,125 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
     return (INT_PTR)FALSE;
 }
 
+static void extractSingleISOFile(void* handle, bool isCDImage, iso9660_stat_t* isoStat, wchar_t* dstPath) {
+    char filename[MAX_PATH] = {0};
+    WideCharToMultiByte(CP_ACP, 0, dstPath, -1, filename, MAX_PATH, NULL, NULL);
+    
+    FILE* outFile = fopen(filename, "wb");
+    if (!outFile) return;
+    
+    const uint32_t isoBlocks = CEILING(isoStat->total_size, ISO_BLOCKSIZE);
+    for (int i = 0; i < isoBlocks; i++) {
+        char buffer[ISO_BLOCKSIZE] = {0};
+        const lsn_t lsn = isoStat->lsn + i;
+
+        if (isCDImage) {
+            if (cdio_read_data_sectors((CdIo_t*)handle, buffer, lsn, ISO_BLOCKSIZE, 1) != 0) goto end;
+        }
+        else if (iso9660_iso_seek_read((iso9660_t*)handle, buffer, lsn, 1) != ISO_BLOCKSIZE) goto end;
+
+        fwrite(buffer, ISO_BLOCKSIZE, 1, outFile);
+        if (ferror(outFile)) goto end;
+    }
+    
+    fflush(outFile);
+    ftruncate(fileno(outFile), isoStat->total_size);
+    
+end:    
+    if (outFile) fclose(outFile);
+}
+
+static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wchar_t* dstPath) {
+    CdioISO9660FileList_t* isoFileList = isCDImage ? iso9660_fs_readdir((CdIo_t*)handle, srcPath) : 
+                                                     iso9660_ifs_readdir((iso9660_t*)handle, srcPath);
+    if (!isoFileList) return;
+    
+    CdioListNode_t* isoNode;
+    char srcName[MAX_PATH] = {0};
+    wchar_t dstName[MAX_PATH] = {0};
+    char fullSrcPath[MAX_PATH] = {0};
+    wchar_t fullDstPath[MAX_PATH] = {0};
+    
+    int jolietLevel = isCDImage ? cdio_get_joliet_level((CdIo_t*)handle) : iso9660_ifs_get_joliet_level((iso9660_t*)handle);
+    
+    _CDIO_LIST_FOREACH(isoNode, isoFileList) {
+        iso9660_stat_t* isoStat = (iso9660_stat_t*)_cdio_list_node_data(isoNode);
+        if (strcmp(isoStat->filename, ".") == 0 || strcmp(isoStat->filename, "..") == 0) continue;
+        
+        memset(srcName, 0, MAX_PATH);
+        iso9660_name_translate_ext(isoStat->filename, srcName, jolietLevel);
+        
+        joinUnixPaths(srcPath, srcName, fullSrcPath);
+        
+        MultiByteToWideChar(CP_ACP, 0, srcName, -1, dstName, MAX_PATH);
+        joinPaths(dstPath, dstName, fullDstPath);
+        
+        if (isoStat->type == _STAT_DIR) {
+            CreateDirectory(fullDstPath, NULL);
+            extractAllISOFiles(handle, isCDImage, fullSrcPath, fullDstPath);
+        }
+        else if (isoStat->type == _STAT_FILE) {
+            extractSingleISOFile(handle, isCDImage, isoStat, fullDstPath);
+        }
+    }
+
+    iso9660_filelist_free(isoFileList);
+}
+
 static DWORD WINAPI fileActionTask(void* param) {
     struct ActionData* actionData = (struct ActionData*)param;
     
-    DWORD lastTime = GetTickCount();
+    if (actionData->action == ACTION_ISO_EXTRACT) {
+        wchar_t* srcPath = actionData->srcPaths[0];
+        bool isCDImage = !hasFileExtension(srcPath, L"iso");
         
-    for (int i = 0; i < actionData->numSrcPaths && !actionData->cancel; i++) {  
-        if (actionData->action == ACTION_DELETE) {
-            SHFILEOPSTRUCT sfo = {0};
-            sfo.hwnd = hwndDlg;
-            sfo.wFunc = FO_DELETE;
-            sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
-            sfo.pTo = NULL;
-            sfo.pFrom = actionData->srcPaths[i];
+        char filename[MAX_PATH] = {0};
+        WideCharToMultiByte(CP_ACP, 0, srcPath, -1, filename, MAX_PATH, NULL, NULL);
+
+        if (isCDImage) {
+            CdIo_t* cdio = cdio_open(filename, DRIVER_UNKNOWN);
+            cdio_set_arg(cdio, "joliet-level", "1");
+            extractAllISOFiles(cdio, true, "/", actionData->dstPath);
+            cdio_destroy(cdio);
+        }
+        else {
+            iso9660_t* iso = iso9660_open_ext(filename, ISO_EXTENSION_JOLIET);
+            extractAllISOFiles(iso, false, "/", actionData->dstPath);
+            iso9660_close(iso);
+        }
+    }
+    else {
+        DWORD lastTime = GetTickCount();
             
-            int res = SHFileOperation(&sfo);
-            if (res != 0) break;
-        }
-        else if (actionData->action == ACTION_COPY || actionData->action == ACTION_MOVE) {
-            SHFILEOPSTRUCT sfo = {0};
-            sfo.hwnd = hwndDlg;
-            sfo.wFunc = actionData->action == ACTION_COPY ? FO_COPY : FO_MOVE;
-            sfo.fFlags = FOF_SILENT;
-            sfo.pTo = actionData->dstPath;
-            sfo.pFrom = actionData->srcPaths[i];
+        for (int i = 0; i < actionData->numSrcPaths && !actionData->cancel; i++) {  
+            if (actionData->action == ACTION_DELETE) {
+                SHFILEOPSTRUCT sfo = {0};
+                sfo.hwnd = hwndDlg;
+                sfo.wFunc = FO_DELETE;
+                sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+                sfo.pTo = NULL;
+                sfo.pFrom = actionData->srcPaths[i];
+                
+                int res = SHFileOperation(&sfo);
+                if (res != 0) break;
+            }
+            else if (actionData->action == ACTION_COPY || actionData->action == ACTION_MOVE) {
+                SHFILEOPSTRUCT sfo = {0};
+                sfo.hwnd = hwndDlg;
+                sfo.wFunc = actionData->action == ACTION_COPY ? FO_COPY : FO_MOVE;
+                sfo.fFlags = FOF_SILENT;
+                sfo.pTo = actionData->dstPath;
+                sfo.pFrom = actionData->srcPaths[i];
 
-            int res = SHFileOperation(&sfo);
-            if (res != 0) break;            
-        }
+                int res = SHFileOperation(&sfo);
+                if (res != 0) break;            
+            }
 
-        DWORD currTime = GetTickCount();
-        if ((currTime - lastTime) >= 3000) {
-            SendMessage(hwndDlg, MSG_NAVIGATE_REFRESH, 0, 0);
-            lastTime = currTime;
+            DWORD currTime = GetTickCount();
+            if ((currTime - lastTime) >= 3000) {
+                SendMessage(hwndDlg, MSG_NAVIGATE_REFRESH, 0, 0);
+                lastTime = currTime;
+            }
         }
     }
     
@@ -304,4 +396,27 @@ void createDesktopShortcuts(struct FileNode** nodes, int count) {
     }
     
     free(srcPaths); 
+}
+
+void extractFilesFromISOImage(wchar_t* isoPath, wchar_t* dstPath) {
+    actionData = calloc(1, sizeof(struct ActionData));
+    
+    int len = wcslen(isoPath);
+    actionData->srcPaths = calloc(1, sizeof(wchar_t*));
+    actionData->srcPaths[0] = calloc(len + 1, sizeof(wchar_t));
+    wcscpy_s(actionData->srcPaths[0], len + 1, isoPath);
+    actionData->numSrcPaths = 1;
+    
+    len = wcslen(dstPath);
+    actionData->dstPath = calloc(len + 2, sizeof(wchar_t));
+    wcscpy_s(actionData->dstPath, len + 1, dstPath);
+    actionData->dstPath[len+0] = L'\0';
+    actionData->dstPath[len+1] = L'\0';
+    
+    actionData->action = ACTION_ISO_EXTRACT;
+    
+    hwndDlg = CreateDialogParam(globalHInstance, MAKEINTRESOURCE(IDD_FILE_ACTION), hwndMain, &FileActionDialogProc, 0);     
+    SetTimer(hwndDlg, ID_EVENT_PRELOADER, PRELOADER_PERIOD, NULL);
+    CreateThread(NULL, 0, fileActionTask, actionData, 0, NULL);
+    ShowWindow(hwndDlg, SW_SHOW);
 }

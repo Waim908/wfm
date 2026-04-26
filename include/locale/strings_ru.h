@@ -12,6 +12,7 @@ static inline void loadStrings_ru() {
     lc_str.file = L"Файл";
     lc_str.folder = L"Папка";
     lc_str.local_drive = L"Локальный диск";
+    lc_str.cd_drive = L"CD привод";
     lc_str.computer = L"Компьютер";
     lc_str.desktop = L"Рабочий стол";
     lc_str.documents = L"Документы";
@@ -39,6 +40,8 @@ static inline void loadStrings_ru() {
     lc_str.new_folder = L"Новая папка";
     lc_str.new_file = L"Новый файл";
     lc_str.items = L"Предметы";
+    lc_str.load_iso_image = L"Загрузить ISO-образ";
+    lc_str.unload_iso_image = L"Выгрузить ISO-образ";
     lc_str.no_media = L"Нет СМИ";
     lc_str.alert = L"Тревога";
     lc_str.enter_folder_name = L"Введите имя папки:";
@@ -52,16 +55,20 @@ static inline void loadStrings_ru() {
     lc_str.deleting_files = L"Удаление файлов";
     lc_str.copying_files = L"Копирование файлов";
     lc_str.moving_files = L"Перемещение файлов";
+    lc_str.extracting_files = L"Извлечение файлов";
     lc_str.confirm_delete = L"Подтвердить удаление";
     lc_str.confirm_exit = L"Подтвердить выход";
     lc_str.search = L"Поиск";
     lc_str.up = L"Вверх";
 
     lc_str.fmt_file = L"%ls Файл";
+
+    lc_str.msg_invalid_iso_image_file = L"Неверный файл образа ISO!";
     
     lc_str.msg_deleting_files = L"Удаление файлов, пожалуйста, подождите...";
     lc_str.msg_copying_files = L"Копирование файлов, пожалуйста, подождите...";
     lc_str.msg_moving_files = L"Перемещение файлов, пожалуйста, подождите...";
+    lc_str.msg_extracting_files = L"Извлечение файлов, пожалуйста, подождите...";
     lc_str.msg_cancel_file_operation = L"Вы хотите отменить операцию?";
     lc_str.msg_confirm_delete_item = L"Вы уверены, что хотите удалить \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Вы уверены, что хотите удалить %d элементов?";

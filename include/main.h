@@ -17,6 +17,8 @@
 #include <process.h>
 #include <time.h>
 #include <math.h>
+#include <cdio/cdio.h>
+#include <cdio/iso9660.h>
 
 static inline void alertf(const char *fmt, ...) {
     char text[128] = {0};

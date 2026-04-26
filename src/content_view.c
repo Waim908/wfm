@@ -72,6 +72,9 @@ struct ContextMenuItem {
     wchar_t* cmdData;
 };
 
+static void onMenuItemLoadISOImageClick();
+static void onMenuItemUnloadISOImageClick();
+
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL};
 static struct ContextMenuItem cmiCut = {NULL, &onMenuItemCutClick, NULL};
@@ -83,6 +86,8 @@ static struct ContextMenuItem cmiPaste = {NULL, &onMenuItemPasteClick, NULL};
 static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcutClick, NULL};
 static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL};
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL};
+static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL};
+static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -323,6 +328,42 @@ static void createContextMenuFromRegistry(int* id) {
     RegCloseKey(hkeyContextMenu);
 }
 
+static void createCDDriveContextMenu(int* id) {
+    HMENU hSubmenu = CreatePopupMenu();
+    
+    wchar_t currentISOPath[MAX_PATH] = {0};
+    int currentISOPathLen = MAX_PATH;
+    HKEY hkey;
+    if (RegOpenKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
+        RegQueryValue(hkey, NULL, currentISOPath, (PLONG)&currentISOPathLen);
+        RegCloseKey(hkey);
+    }
+    
+    wchar_t itemText[64] = {0};
+    swprintf_s(itemText, MAX_PATH, L"%ls <%ls>", lc_str.load_iso_image, currentISOPathLen != MAX_PATH ? currentISOPath : lc_str.no_media);
+    cmiLoadISOImage.text = itemText;
+    addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
+    cmiLoadISOImage.text = NULL;
+    
+    addContextMenuItem(hSubmenu, (*id)++, &cmiUnloadISOImage, false);
+    
+    MENUITEMINFO item = {0};
+    item.cbSize = sizeof(MENUITEMINFO);
+    item.fMask = MIIM_TYPE | MIIM_ID | MIIM_SUBMENU;
+    item.fType = MFT_STRING;
+    swprintf_s(itemText, 64, L"%ls [X:]", lc_str.cd_drive);
+    item.dwTypeData = itemText;
+    item.cch = wcslen(itemText);
+    item.wID = ++(*id);    
+    
+    item.hSubMenu = hSubmenu;
+    InsertMenuItem(hContextMenu, -1, TRUE, &item);    
+    
+    item.fMask = MIIM_TYPE;
+    item.fType = MFT_SEPARATOR;
+    InsertMenuItem(hContextMenu, -1, TRUE, &item);    
+}
+
 static void createContextMenu(enum ContextMenuType type) {
     HMENU hMenu = CreatePopupMenu();
     hContextMenu = hMenu;
@@ -334,6 +375,7 @@ static void createContextMenu(enum ContextMenuType type) {
             if (selectedItems[0]->type == TYPE_FILE) {
                 addContextMenuItem(hMenu, id++, &cmiOpen, false);
                 addContextMenuItem(hMenu, id++, &cmiEdit, true);
+                createCDDriveContextMenu(&id);
                 createContextMenuFromRegistry(&id);
             }
             else addContextMenuItem(hMenu, id++, &cmiOpen, true);
@@ -348,6 +390,7 @@ static void createContextMenu(enum ContextMenuType type) {
     else {
         addContextMenuItem(hMenu, id++, &cmiPaste, false);
         addContextMenuItem(hMenu, id++, &cmiPasteShortcut, true);
+        createCDDriveContextMenu(&id);
         addContextMenuItem(hMenu, id++, &cmiNewFolder, false);
         addContextMenuItem(hMenu, id++, &cmiNewFile, false);
     }
@@ -640,6 +683,8 @@ void createContentView() {
     cmiPasteShortcut.text = lc_str.paste_shortcut;
     cmiNewFolder.text = lc_str.new_folder;
     cmiNewFile.text = lc_str.new_file;
+    cmiLoadISOImage.text = NULL;
+    cmiUnloadISOImage.text = lc_str.unload_iso_image;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
     createLVColumns();
@@ -760,6 +805,38 @@ void onMenuItemSelectAllClick() {
     ListView_SetItemState(hwndContentView, -1, 0, LVIS_SELECTED);
     ListView_SetItemState(hwndContentView, -1, LVIS_SELECTED, LVIS_SELECTED);
     SetFocus(hwndContentView);
+}
+
+static void onMenuItemLoadISOImageClick() {
+    if (numSelectedItems != 1) {
+        MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
+        return;
+    }
+
+    wchar_t currentISOPath[MAX_PATH] = {0};
+    HKEY hkey;
+    getFileNodePath(selectedItems[0], currentISOPath);
+
+    if (!isPathExists(currentISOPath) || !(hasFileExtension(currentISOPath, L"iso") ||
+                                           hasFileExtension(currentISOPath, L"bin") ||
+                                           hasFileExtension(currentISOPath, L"cue"))) {
+        MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
+        return;
+    }
+
+    if (RegCreateKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
+        RegSetValue(hkey, NULL, REG_SZ, currentISOPath, (wcslen(currentISOPath) + 1) * sizeof(wchar_t));
+        RegCloseKey(hkey);
+    }
+
+    clearDirectory(L"X:");
+    extractFilesFromISOImage(currentISOPath, L"X:\\");
+}
+
+static void onMenuItemUnloadISOImageClick() {
+    clearDirectory(L"X:");
+    RegDeleteKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath");
+    navigateRefresh();
 }
 
 static int compareType(const void* a, const void* b) {
