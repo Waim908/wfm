@@ -292,9 +292,29 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                     break;
                 case TYPE_FILE:
                 case TYPE_DIR:
-                case TYPE_DRIVE:
                     filename = currNode->name;
                     break;
+                case TYPE_DRIVE: {
+                    // 对于驱动器，需要添加反斜杠形成 C:\ 格式
+                    static wchar_t drivePath[MAX_PATH];
+                    wchar_t* name = currNode->name;
+                    if (name[0] != L'\0' && name[1] == L':') {
+                        // 检查 name 是否已经包含反斜杠
+                        if (name[2] == L'\\' || name[2] == L'/') {
+                            filename = name;
+                        } else {
+                            // 构造 C:\ 格式
+                            drivePath[0] = name[0];
+                            drivePath[1] = L':';
+                            drivePath[2] = L'\\';
+                            drivePath[3] = L'\0';
+                            filename = drivePath;
+                        }
+                    } else {
+                        filename = name;
+                    }
+                    break;
+                }
                 default:
                     break;
             }
