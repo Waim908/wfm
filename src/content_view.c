@@ -184,7 +184,7 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 if (cmItem->cmdData) {
                     wchar_t command[MAX_PATH];
-                    wcscat_s(command, MAX_PATH, L"/C ");
+                    wcscpy_s(command, MAX_PATH, L"/C ");
                     wcscat_s(command, MAX_PATH, cmItem->cmdData);
                     execCommandLine(command);
                     navigateRefresh();

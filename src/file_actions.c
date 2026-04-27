@@ -1,4 +1,7 @@
 #include "main.h"
+#include "libcdio_loader.h"
+
+extern BOOL g_noLibcdio;
 
 #define ID_EVENT_PRELOADER 100
 #define PRELOADER_PERIOD 120
@@ -157,9 +160,9 @@ static void extractSingleISOFile(void* handle, bool isCDImage, iso9660_stat_t* i
         const lsn_t lsn = isoStat->lsn + i;
 
         if (isCDImage) {
-            if (cdio_read_data_sectors((CdIo_t*)handle, buffer, lsn, ISO_BLOCKSIZE, 1) != 0) goto end;
+            if (ptr_cdio_read_data_sectors((CdIo_t*)handle, buffer, lsn, ISO_BLOCKSIZE, 1) != 0) goto end;
         }
-        else if (iso9660_iso_seek_read((iso9660_t*)handle, buffer, lsn, 1) != ISO_BLOCKSIZE) goto end;
+        else if (ptr_iso9660_iso_seek_read((iso9660_t*)handle, buffer, lsn, 1) != ISO_BLOCKSIZE) goto end;
 
         fwrite(buffer, ISO_BLOCKSIZE, 1, outFile);
         if (ferror(outFile)) goto end;
@@ -173,8 +176,8 @@ end:
 }
 
 static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wchar_t* dstPath) {
-    CdioISO9660FileList_t* isoFileList = isCDImage ? iso9660_fs_readdir((CdIo_t*)handle, srcPath) : 
-                                                     iso9660_ifs_readdir((iso9660_t*)handle, srcPath);
+    CdioISO9660FileList_t* isoFileList = isCDImage ? ptr_iso9660_fs_readdir((CdIo_t*)handle, srcPath) : 
+                                                     ptr_iso9660_ifs_readdir((iso9660_t*)handle, srcPath);
     if (!isoFileList) return;
     
     CdioListNode_t* isoNode;
@@ -183,14 +186,14 @@ static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wcha
     char fullSrcPath[MAX_PATH] = {0};
     wchar_t fullDstPath[MAX_PATH] = {0};
     
-    int jolietLevel = isCDImage ? cdio_get_joliet_level((CdIo_t*)handle) : iso9660_ifs_get_joliet_level((iso9660_t*)handle);
+    int jolietLevel = isCDImage ? ptr_cdio_get_joliet_level((CdIo_t*)handle) : ptr_iso9660_ifs_get_joliet_level((iso9660_t*)handle);
     
-    _CDIO_LIST_FOREACH(isoNode, isoFileList) {
-        iso9660_stat_t* isoStat = (iso9660_stat_t*)_cdio_list_node_data(isoNode);
+    for (isoNode = ptr__cdio_list_begin(isoFileList); isoNode != NULL; ptr__cdio_list_node_next(&isoNode)) {
+        iso9660_stat_t* isoStat = (iso9660_stat_t*)ptr__cdio_list_node_data(isoNode);
         if (strcmp(isoStat->filename, ".") == 0 || strcmp(isoStat->filename, "..") == 0) continue;
         
         memset(srcName, 0, MAX_PATH);
-        iso9660_name_translate_ext(isoStat->filename, srcName, jolietLevel);
+        ptr_iso9660_name_translate_ext(isoStat->filename, srcName, jolietLevel);
         
         joinUnixPaths(srcPath, srcName, fullSrcPath);
         
@@ -206,29 +209,33 @@ static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wcha
         }
     }
 
-    iso9660_filelist_free(isoFileList);
+    ptr_iso9660_filelist_free(isoFileList);
 }
 
 static DWORD WINAPI fileActionTask(void* param) {
     struct ActionData* actionData = (struct ActionData*)param;
     
     if (actionData->action == ACTION_ISO_EXTRACT) {
-        wchar_t* srcPath = actionData->srcPaths[0];
-        bool isCDImage = !hasFileExtension(srcPath, L"iso");
-        
-        char filename[MAX_PATH] = {0};
-        WideCharToMultiByte(CP_ACP, 0, srcPath, -1, filename, MAX_PATH, NULL, NULL);
+        if (g_noLibcdio || !libcdio_is_loaded()) {
+            MessageBoxW(NULL, L"ISO extraction is disabled. Use without --nolibcdio to enable.", L"Feature Disabled", MB_OK | MB_ICONWARNING);
+        } else {
+            wchar_t* srcPath = actionData->srcPaths[0];
+            bool isCDImage = !hasFileExtension(srcPath, L"iso");
+            
+            char filename[MAX_PATH] = {0};
+            WideCharToMultiByte(CP_ACP, 0, srcPath, -1, filename, MAX_PATH, NULL, NULL);
 
-        if (isCDImage) {
-            CdIo_t* cdio = cdio_open(filename, DRIVER_UNKNOWN);
-            cdio_set_arg(cdio, "joliet-level", "1");
-            extractAllISOFiles(cdio, true, "/", actionData->dstPath);
-            cdio_destroy(cdio);
-        }
-        else {
-            iso9660_t* iso = iso9660_open_ext(filename, ISO_EXTENSION_JOLIET);
-            extractAllISOFiles(iso, false, "/", actionData->dstPath);
-            iso9660_close(iso);
+            if (isCDImage) {
+                CdIo_t* cdio = ptr_cdio_open(filename, DRIVER_UNKNOWN);
+                ptr_cdio_set_arg(cdio, "joliet-level", "1");
+                extractAllISOFiles(cdio, true, "/", actionData->dstPath);
+                ptr_cdio_destroy(cdio);
+            }
+            else {
+                iso9660_t* iso = ptr_iso9660_open_ext(filename, ISO_EXTENSION_JOLIET);
+                extractAllISOFiles(iso, false, "/", actionData->dstPath);
+                ptr_iso9660_close(iso);
+            }
         }
     }
     else {

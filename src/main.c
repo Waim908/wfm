@@ -1,4 +1,5 @@
 #include "main.h"
+#include "libcdio_loader.h"
 
 static const wchar_t mainWndClass[] = L"WFM-MainWnd";
 
@@ -15,6 +16,7 @@ HWND hwndMain = NULL;
 HFONT hGuiFont = NULL;
 struct LC_STR lc_str = {0};
 HICON uiIcons[NUM_UI_ICONS] = {0};
+BOOL g_noLibcdio = FALSE;
 
 struct IconMapping {
     int iconId;
@@ -284,6 +286,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
     
+    // 解析命令行参数
+    wchar_t* navigatePath = NULL;
+    for (int i = 1; i < numArgs; i++) {
+        if (wcscmp(args[i], L"--nolibcdio") == 0) {
+            g_noLibcdio = TRUE;
+        } else {
+            // 第一个非 -- 开头的参数作为导航路径
+            if (!navigatePath) navigatePath = args[i];
+        }
+    }
+    
+    // 加载 libcdio (除非 --nolibcdio 被指定)
+    if (!g_noLibcdio) {
+        libcdio_load();
+    }
+    
     wchar_t localeName[16] = {0};
     GetSystemDefaultLocaleName(localeName, 16);
     
@@ -341,8 +359,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
     
-    if (numArgs > 1) {
-        navigateToPath(args[1]);
+    if (navigatePath) {
+        navigateToPath(navigatePath);
     }
     else navigateRefresh();
 
@@ -354,6 +372,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    libcdio_free();
     
     return (int)msg.wParam;
 }
