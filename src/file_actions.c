@@ -50,7 +50,11 @@ void clearClipboard() {
 }
 
 static void freeActionData() {
-    if (clipboardIsCut) clearClipboard();
+    if (clipboardIsCut) {
+        clearClipboard();
+        actionData->srcPaths = NULL;
+        actionData->numSrcPaths = 0;
+    }
     
     if (actionData) {
         if (actionData->action == ACTION_DELETE || actionData->action == ACTION_ISO_EXTRACT) {
@@ -60,6 +64,10 @@ static void freeActionData() {
             
             actionData->numSrcPaths = 0;
             MEMFREE(actionData->srcPaths);
+        }
+        else if (actionData->action == ACTION_COPY) {
+            actionData->srcPaths = NULL;
+            actionData->numSrcPaths = 0;
         }
         
         MEMFREE(actionData->dstPath);
