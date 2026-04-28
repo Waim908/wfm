@@ -126,7 +126,7 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
     SHFILEINFO sfi = {0};
     result->icon = 0;
     
-    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
+    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? 0 : SHGFI_SMALLICON);
     
     if (type == TYPE_DIR) {
         // 目录使用 USEFILEATTRIBUTES 即可

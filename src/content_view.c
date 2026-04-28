@@ -18,6 +18,32 @@ static int extCacheCount = 0;
 static int folderIconCached = 0;
 static int folderIconIndex = 0;
 
+// exe/lnk 文件图标缓存（按路径缓存自定义ImageList索引）
+#define EXE_ICON_CACHE_SIZE 64
+static struct {
+    wchar_t path[MAX_PATH];
+    int iconIndex;
+} exeIconCache[EXE_ICON_CACHE_SIZE];
+static int exeIconCacheCount = 0;
+static HIMAGELIST currentImageList = NULL;
+
+static int findExeIconCache(wchar_t* path) {
+    if (!path || !currentImageList) return -1;
+    for (int i = 0; i < exeIconCacheCount; i++) {
+        if (wcsicmp(exeIconCache[i].path, path) == 0) {
+            return exeIconCache[i].iconIndex;
+        }
+    }
+    return -1;
+}
+
+static int addExeIconCache(wchar_t* path, int iconIndex) {
+    if (!path || exeIconCacheCount >= EXE_ICON_CACHE_SIZE) return iconIndex;
+    wcsncpy_s(exeIconCache[exeIconCacheCount].path, MAX_PATH, path, MAX_PATH - 1);
+    exeIconCache[exeIconCacheCount].iconIndex = iconIndex;
+    return exeIconCacheCount++, iconIndex;
+}
+
 // 快速查找扩展名图标缓存
 static int findExtIconCache(wchar_t* ext) {
     if (!ext) return -1;
@@ -427,10 +453,18 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     // 获取扩展名
                     wchar_t* ext = wcsrchr(item->node->name, L'.');
                     
-                    // exe 和 lnk 文件不使用缓存，每个文件可能有不同图标
-                    bool skipCache = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+                    // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
+                    bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
                     
-                    int cachedIcon = skipCache ? -1 : findExtIconCache(ext);
+                    int cachedIcon = -1;
+                    if (!isExeOrLnk) {
+                        cachedIcon = findExtIconCache(ext);
+                    } else {
+                        // exe/lnk 使用路径缓存（自定义ImageList索引）
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        cachedIcon = findExeIconCache(path);
+                    }
                     
                     if (cachedIcon >= 0) {
                         item->icon = cachedIcon;
@@ -454,12 +488,36 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     else {
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
-                        struct FileInfo fi = {0};
-                        getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                        item->icon = fi.icon;
-                        wcscpy_s(item->type, 80, fi.typeName);
-                        // 非 exe/lnk 文件缓存扩展名图标
-                        if (ext && !skipCache) addExtIconCache(ext, fi.icon);
+                        
+                        if (isExeOrLnk && currentImageList) {
+                            // exe/lnk: 使用 ExtractIcon 提取真实图标
+                            HICON hIcon = ExtractIconW(globalHInstance, path, 0);
+                            if (hIcon) {
+                                // 添加到ListView的ImageList
+                                int newIcon = ImageList_ReplaceIcon(currentImageList, -1, hIcon);
+                                DestroyIcon(hIcon);
+                                if (newIcon != -1) {
+                                    item->icon = addExeIconCache(path, newIcon);
+                                    wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
+                                } else {
+                                    struct FileInfo fi = {0};
+                                    getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                                    item->icon = fi.icon;
+                                    wcscpy_s(item->type, 80, fi.typeName);
+                                }
+                            } else {
+                                struct FileInfo fi = {0};
+                                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                                item->icon = fi.icon;
+                                wcscpy_s(item->type, 80, fi.typeName);
+                            }
+                        } else {
+                            struct FileInfo fi = {0};
+                            getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                            item->icon = fi.icon;
+                            wcscpy_s(item->type, 80, fi.typeName);
+                            if (ext && !isExeOrLnk) addExtIconCache(ext, fi.icon);
+                        }
                     }
                     
                     // 格式化文件大小和日期
@@ -921,10 +979,17 @@ void refreshContentView() {
     HIMAGELIST himlBig, himlSmall;
     Shell_GetImageLists(&himlBig, &himlSmall);
     
+    // 清除exe图标缓存（因为ImageList会变化）
+    exeIconCacheCount = 0;
+    
     if (viewStyle == STYLE_LARGE_ICON) {
+        currentImageList = himlBig;
         ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
     }
-    else ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
+    else {
+        currentImageList = himlSmall;
+        ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
+    }
 
     if (sortColumnIdx != -1) sortItems();
     ListView_SetItemCountEx(hwndContentView, numItems, 0);
