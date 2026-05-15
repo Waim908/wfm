@@ -97,7 +97,11 @@ static void updateTreeItems() {
         tvis.itemex.lParam = (LPARAM)node;
 
         HTREEITEM handle = TreeView_InsertItem(hwndTreeview, &tvis);
-        (void)handle; // top-level items stored, handle not needed further
+
+        // 对于已有子节点的项，直接在UI上创建子项
+        if (node->children) {
+            updateTreeItemsDeep(handle, node);
+        }
     }
     while ((node = node->sibling) != NULL);
 }

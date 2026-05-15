@@ -235,7 +235,6 @@ void initFileNodes() {
 
     // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
-    desktopNode->hasChildDirs = true;
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
     documentsNode->hasChildDirs = true;
     
@@ -253,7 +252,7 @@ void initFileNodes() {
     userNode->sibling = computerNode;
     
     // 构建“此电脑”的子项（驱动器）
-    // buildChildNodes(computerNode, true); // 5df279fb9664Ff0c65394e3a61d252a08f7d
+    buildChildNodes(computerNode, true);
     
     treeFileNode = desktopNode;
     currPathFileNode = NULL;
