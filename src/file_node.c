@@ -294,21 +294,15 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                     filename = currNode->name;
                     break;
                 case TYPE_DRIVE: {
-                    // 对于驱动器，需要添加反斜杠形成 C:\ 格式
+                    // 对于驱动器，只返回盘号如 C:，路径拼接逻辑会添加分隔符
                     static wchar_t drivePath[MAX_PATH];
                     wchar_t* name = currNode->name;
                     if (name[0] != L'\0' && name[1] == L':') {
-                        // 检查 name 是否已经包含反斜杠
-                        if (name[2] == L'\\' || name[2] == L'/') {
-                            filename = name;
-                        } else {
-                            // 构造 C:\ 格式
-                            drivePath[0] = name[0];
-                            drivePath[1] = L':';
-                            drivePath[2] = L'\\';
-                            drivePath[3] = L'\0';
-                            filename = drivePath;
-                        }
+                        // 移除可能存在的尾部反斜杠，只保留 C: 格式
+                        drivePath[0] = name[0];
+                        drivePath[1] = L':';
+                        drivePath[2] = L'\0';
+                        filename = drivePath;
                     } else {
                         filename = name;
                     }
@@ -332,7 +326,24 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
     for (int i = numParts - 1; i >= 0; i--) {
         int len = wcslen(parts[i]);
         if (pos + len + 1 >= MAX_PATH) break;
-        if (pos > 0) {
+        
+        bool needsSeparator = false;
+        // 如果前面已有内容且不是以反斜杠结尾，需要分隔符
+        if (pos > 0 && path[pos-1] != L'\\') {
+            needsSeparator = true;
+        }
+        // 如果当前部分是驱动器号（如 C:），即使 pos>0 也不需要前导分隔符
+        // 但驱动器后需要添加反斜杠
+        if (len >= 2 && parts[i][1] == L':') {
+            // 驱动器号后添加反斜杠
+            if (pos + len + 2 >= MAX_PATH) break;
+            memcpy(&path[pos], parts[i], len * sizeof(wchar_t));
+            pos += len;
+            path[pos++] = L'\\';
+            continue;
+        }
+        
+        if (needsSeparator) {
             path[pos++] = L'\\';
         }
         memcpy(&path[pos], parts[i], len * sizeof(wchar_t));
