@@ -35,7 +35,13 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
 
             int iconIndex = getTreeIcon(path, node->type);
 
-            tvis.itemex.cChildren = node->hasChildDirs ? 1 : 0;
+            bool isExpandable = node->hasChildDirs;
+            // 用户和文档节点不显示展开/折叠按钮，和桌面一样
+            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+                isExpandable = false;
+            }
+
+            tvis.itemex.cChildren = isExpandable ? 1 : 0;
             tvis.itemex.state = node->children ? TVIS_EXPANDED : 0;
             tvis.itemex.stateMask = TVIS_EXPANDED;
             tvis.itemex.pszText = node->name;
@@ -87,7 +93,13 @@ static void updateTreeItems() {
         CoTaskMemFree(pidl);
         TreeView_SetImageList(hwndTreeview, himl, TVSIL_NORMAL);
 
-        tvis.itemex.cChildren = node->hasChildDirs ? 1 : 0;
+        bool isExpandable = node->hasChildDirs;
+        // 用户和文档节点不显示展开/折叠按钮，和桌面一样
+        if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+            isExpandable = false;
+        }
+
+        tvis.itemex.cChildren = isExpandable ? 1 : 0;
         tvis.itemex.state = node->children ? TVIS_EXPANDED : 0;
         tvis.itemex.stateMask = TVIS_EXPANDED;
         tvis.itemex.pszText = node->name;
@@ -121,6 +133,10 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
         case TVN_ITEMEXPANDING: {
             NMTREEVIEW* nmtv = (NMTREEVIEW*)nmhdr;
             struct FileNode* node = (struct FileNode*)nmtv->itemNew.lParam;
+            // 用户和文档节点不允许展开/折叠，和桌面一样
+            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+                return TRUE; // 阻止展开
+            }
             if (nmtv->action == TVE_EXPAND) treeItemExpand(nmtv->itemNew.hItem, node);
             break;
         }
