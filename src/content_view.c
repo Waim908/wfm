@@ -18,7 +18,7 @@ static int extCacheCount = 0;
 static int folderIconCached = 0;
 static int folderIconIndex = 0;
 
-// exe/lnk 文件图标缓存（按路径缓存自定义ImageList索引）
+// exe/lnk 文件图标缓存（按路径缓存图标索引）
 #define EXE_ICON_CACHE_SIZE 64
 static struct {
     wchar_t path[MAX_PATH];
@@ -26,7 +26,6 @@ static struct {
 } exeIconCache[EXE_ICON_CACHE_SIZE];
 static int exeIconCacheCount = 0;
 static HIMAGELIST currentImageList = NULL;
-static HIMAGELIST customImageList = NULL;  // 自定义ImageList，用于存放提取的exe图标
 
 static int findExeIconCache(wchar_t* path) {
     if (!path || !currentImageList) return -1;
@@ -62,36 +61,6 @@ static void addExtIconCache(wchar_t* ext, int icon) {
     wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
     extIconCache[extCacheCount].icon = icon;
     extCacheCount++;
-}
-
-// 创建自定义ImageList（合并系统图标和提取的exe图标）
-static void createCustomImageList(HIMAGELIST sysImageList) {
-    if (customImageList) {
-        ImageList_Destroy(customImageList);
-        customImageList = NULL;
-    }
-    
-    if (!sysImageList) return;
-    
-    // 获取系统ImageList的图标尺寸
-    int cx, cy;
-    ImageList_GetIconSize(sysImageList, &cx, &cy);
-    
-    // 获取系统ImageList中的图标数量
-    int imageCount = ImageList_GetImageCount(sysImageList);
-    
-    // 创建新的ImageList，预留额外空间给exe图标
-    customImageList = ImageList_Create(cx, cy, ILC_COLOR32 | ILC_MASK, imageCount + 64, 16);
-    ImageList_SetBkColor(customImageList, CLR_NONE);
-    
-    // 复制系统图标（逐个复制）
-    for (int i = 0; i < imageCount; i++) {
-        HICON hIcon = ImageList_GetIcon(sysImageList, i, ILD_TRANSPARENT);
-        if (hIcon) {
-            ImageList_AddIcon(customImageList, hIcon);
-            DestroyIcon(hIcon);
-        }
-    }
 }
 
 enum Msg {
@@ -210,14 +179,10 @@ void clearContentView() {
     }
     numItems = 0;
     
-    // 清理图标缓存和自定义ImageList
+    // 清理图标缓存
     extCacheCount = 0;
     folderIconCached = 0;
     exeIconCacheCount = 0;
-    if (customImageList) {
-        ImageList_Destroy(customImageList);
-        customImageList = NULL;
-    }
     
     freeMenuItems();
 }
@@ -500,7 +465,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     if (!isExeOrLnk) {
                         cachedIcon = findExtIconCache(ext);
                     } else {
-                        // exe/lnk 使用路径缓存（自定义ImageList索引）
+                        // exe/lnk 使用路径缓存
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
                         cachedIcon = findExeIconCache(path);
@@ -508,79 +473,21 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     
                     if (cachedIcon >= 0) {
                         item->icon = cachedIcon;
-                        // 设置类型名称
-                        wcscpy_s(item->type, 80, lc_str.file);
-                        if (ext) {
-                            wchar_t* extStr = ext + 1;
-                            if (wcsicmp(extStr, L"exe") == 0) {
-                                wcscpy_s(item->type, 80, lc_str.application);
-                            }
-                            else if (wcsicmp(extStr, L"lnk") == 0) {
-                                wcscpy_s(item->type, 80, lc_str.shortcut);
-                            }
-                            else {
-                                wchar_t value[30] = {0};
-                                strToUpper(extStr, value);
-                                swprintf_s(item->type, 80, lc_str.fmt_file, value);
-                            }
-                        }
                     }
                     else {
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
                         
-                        if (isExeOrLnk && customImageList) {
-                            // exe/lnk: 使用 ExtractIcon 提取真实图标
-                            HICON hIcon = ExtractIconW(globalHInstance, path, 0);
-                            if (hIcon) {
-                                // 添加到自定义ImageList（不影响系统ImageList）
-                                int newIcon = ImageList_AddIcon(customImageList, hIcon);
-                                DestroyIcon(hIcon);
-                                if (newIcon != -1) {
-                                    item->icon = addExeIconCache(path, newIcon);
-                                    wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
-                                } else {
-                                    // Fallback到系统图标
-                                    struct FileInfo fi = {0};
-                                    getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                                    // 将系统图标复制到自定义ImageList
-                                    HIMAGELIST sysList;
-                                    HIMAGELIST himlBig, himlSmall;
-                                    Shell_GetImageLists(&himlBig, &himlSmall);
-                                    sysList = viewStyle == STYLE_LARGE_ICON ? himlBig : himlSmall;
-                                    HICON sysIcon = ImageList_GetIcon(sysList, fi.icon, ILD_TRANSPARENT);
-                                    if (sysIcon) {
-                                        item->icon = ImageList_AddIcon(customImageList, sysIcon);
-                                        DestroyIcon(sysIcon);
-                                    } else {
-                                        item->icon = fi.icon;
-                                    }
-                                    wcscpy_s(item->type, 80, fi.typeName);
-                                }
-                            } else {
-                                // ExtractIcon失败，使用系统图标
-                                struct FileInfo fi = {0};
-                                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                                HIMAGELIST sysList;
-                                HIMAGELIST himlBig, himlSmall;
-                                Shell_GetImageLists(&himlBig, &himlSmall);
-                                sysList = viewStyle == STYLE_LARGE_ICON ? himlBig : himlSmall;
-                                HICON sysIcon = ImageList_GetIcon(sysList, fi.icon, ILD_TRANSPARENT);
-                                if (sysIcon) {
-                                    item->icon = ImageList_AddIcon(customImageList, sysIcon);
-                                    DestroyIcon(sysIcon);
-                                } else {
-                                    item->icon = fi.icon;
-                                }
-                                wcscpy_s(item->type, 80, fi.typeName);
-                            }
+                        struct FileInfo fi = {0};
+                        getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                        item->icon = fi.icon;
+                        
+                        if (isExeOrLnk) {
+                            addExeIconCache(path, fi.icon);
+                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
                         } else {
-                            // 非exe/lnk文件，直接使用系统图标索引
-                            struct FileInfo fi = {0};
-                            getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                            item->icon = fi.icon;
                             wcscpy_s(item->type, 80, fi.typeName);
-                            if (ext && !isExeOrLnk) addExtIconCache(ext, fi.icon);
+                            if (ext) addExtIconCache(ext, fi.icon);
                         }
                     }
                     
@@ -1040,33 +947,21 @@ void refreshContentView() {
         child = child->sibling;
     }
 
+    // 清除图标缓存
+    exeIconCacheCount = 0;
+    folderIconCached = 0;
+    extCacheCount = 0;
+    
     HIMAGELIST himlBig, himlSmall;
     Shell_GetImageLists(&himlBig, &himlSmall);
     
-    // 清除exe图标缓存和自定义ImageList（因为每次刷新需要重建）
-    exeIconCacheCount = 0;
-    
-    HIMAGELIST sysImageList;
     if (viewStyle == STYLE_LARGE_ICON) {
         currentImageList = himlBig;
-        sysImageList = himlBig;
+        ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
     }
     else {
         currentImageList = himlSmall;
-        sysImageList = himlSmall;
-    }
-    
-    // 创建自定义ImageList，复制系统图标，用于安全地添加exe图标
-    createCustomImageList(sysImageList);
-    
-    // 使用自定义ImageList（如果创建成功）否则使用系统ImageList
-    HIMAGELIST listToUse = customImageList ? customImageList : sysImageList;
-    
-    if (viewStyle == STYLE_LARGE_ICON) {
-        ListView_SetImageList(hwndContentView, listToUse, LVSIL_NORMAL);
-    }
-    else {
-        ListView_SetImageList(hwndContentView, listToUse, LVSIL_SMALL);
+        ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
     }
 
     if (sortColumnIdx != -1) sortItems();
