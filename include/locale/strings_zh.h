@@ -60,6 +60,7 @@ static inline void loadStrings_zh() {
     lc_str.confirm_exit = L"确认退出";
     lc_str.search = L"搜索";
     lc_str.up = L"向上";
+    lc_str.show_icon = L"显示图标";
 
     lc_str.fmt_file = L"%ls 文件";
 

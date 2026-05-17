@@ -100,6 +100,7 @@ struct ContextMenuItem {
 
 static void onMenuItemLoadISOImageClick();
 static void onMenuItemUnloadISOImageClick();
+static void onMenuItemShowIconClick();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL};
@@ -114,6 +115,7 @@ static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, N
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL};
 static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL};
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
+static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -130,6 +132,12 @@ static struct ContextMenuItem* menuItems = NULL;
 static int numMenuItems = 0;
 
 static struct SearchData* searchData;
+
+// Icon viewer dialog globals
+static HWND hwndIconViewer = NULL;
+static HICON hIconLarge = NULL;
+static HICON hIconSmall = NULL;
+static wchar_t iconViewerTitle[MAX_PATH] = {0};
 
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
@@ -185,6 +193,16 @@ void clearContentView() {
     exeIconCacheCount = 0;
     
     freeMenuItems();
+    
+    // Cleanup icon viewer resources
+    if (hIconLarge) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+    }
+    if (hIconSmall) {
+        DestroyIcon(hIconSmall);
+        hIconSmall = NULL;
+    }
 }
 
 static void execCommandLine(wchar_t *command) {
@@ -406,6 +424,7 @@ static void createContextMenu(enum ContextMenuType type) {
             if (selectedItems[0]->type == TYPE_FILE) {
                 addContextMenuItem(hMenu, id++, &cmiOpen, false);
                 addContextMenuItem(hMenu, id++, &cmiEdit, true);
+                addContextMenuItem(hMenu, id++, &cmiShowIcon, true);
                 createCDDriveContextMenu(&id);
                 createContextMenuFromRegistry(&id);
             }
@@ -714,6 +733,7 @@ void createContentView() {
     cmiNewFile.text = lc_str.new_file;
     cmiLoadISOImage.text = NULL;
     cmiUnloadISOImage.text = lc_str.unload_iso_image;
+    cmiShowIcon.text = lc_str.show_icon;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
     createLVColumns();
@@ -866,6 +886,157 @@ static void onMenuItemUnloadISOImageClick() {
     clearDirectory(L"X:");
     RegDeleteKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath");
     navigateRefresh();
+}
+
+// Icon viewer dialog
+static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            break;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            if (hIconLarge) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                int cx = rc.right - rc.left;
+                int cy = rc.bottom - rc.top;
+                
+                // Draw icon centered and scaled to fit window
+                int iconCx = min(cx - 20, 256);
+                int iconCy = min(cy - 20, 256);
+                
+                // Maintain aspect ratio - make it square
+                int size = min(iconCx, iconCy);
+                
+                // Center the icon
+                int x = (cx - size) / 2;
+                int y = (cy - size) / 2;
+                
+                DrawIconEx(hdc, x, y, hIconLarge, size, size, 0, NULL, DI_NORMAL);
+            }
+            
+            EndPaint(hwnd, &ps);
+            break;
+        }
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH hBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+            FillRect(hdc, &rc, hBrush);
+            return 1;
+        }
+        case WM_CLOSE: {
+            // Destroy icon resource
+            if (hIconLarge) {
+                DestroyIcon(hIconLarge);
+                hIconLarge = NULL;
+            }
+            hwndIconViewer = NULL;
+            DestroyWindow(hwnd);
+            break;
+        }
+        case WM_DESTROY: {
+            // DO NOT call PostQuitMessage here - that would kill the main app
+            // Just clean up, the window is already being destroyed by WM_CLOSE
+            break;
+        }
+        default:
+            return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+
+static void registerIconViewerClass() {
+    WNDCLASSEX wc = {0};
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = IconViewerWndProc;
+    wc.hInstance = globalHInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    wc.lpszClassName = L"IconViewerClass";
+    RegisterClassEx(&wc);
+}
+
+static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
+    // Try to extract 256x256 icon using PrivateExtractIconsW
+    UINT iconCount = PrivateExtractIconsW(filePath, 0, 256, 256, &hIconLarge, NULL, 1, 0);
+    
+    // Fallback to SHGetFileInfo if PrivateExtractIcons failed
+    if (iconCount == 0 || !hIconLarge) {
+        SHFILEINFO sfi = {0};
+        DWORD flags = SHGFI_ICON | SHGFI_LARGEICON;
+        
+        if (!SHGetFileInfo(filePath, 0, &sfi, sizeof(SHFILEINFO), flags) || !sfi.hIcon) {
+            MessageBox(hwndMain, L"无法提取文件图标", lc_str.alert, MB_OK);
+            return;
+        }
+        hIconLarge = sfi.hIcon;
+    }
+    
+    // Build window title
+    wmemset(iconViewerTitle, 0, MAX_PATH);
+    swprintf_s(iconViewerTitle, MAX_PATH, L"%ls - %ls", fileName, lc_str.show_icon);
+    
+    // Register window class if not already registered
+    WNDCLASSEX wcCheck = {0};
+    if (!GetClassInfoEx(globalHInstance, L"IconViewerClass", &wcCheck)) {
+        registerIconViewerClass();
+    }
+    
+    // Calculate window size to fit 256x256 icon with padding
+    int winWidth = 300;
+    int winHeight = 330;
+    
+    // Center window on screen
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int x = (screenWidth - winWidth) / 2;
+    int y = (screenHeight - winHeight) / 2;
+    
+    // Create window
+    hwndIconViewer = CreateWindowEx(
+        0,
+        L"IconViewerClass",
+        iconViewerTitle,
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
+        x, y, winWidth, winHeight,
+        hwndMain,
+        NULL,
+        globalHInstance,
+        NULL
+    );
+    
+    if (!hwndIconViewer) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+        MessageBox(hwndMain, L"无法创建图标查看窗口", lc_str.alert, MB_OK);
+        return;
+    }
+    
+    ShowWindow(hwndIconViewer, SW_SHOW);
+    UpdateWindow(hwndIconViewer);
+}
+
+static void onMenuItemShowIconClick() {
+    if (numSelectedItems != 1 || !selectedItems[0]) return;
+    
+    struct FileNode* node = selectedItems[0];
+    if (!node || !node->name) return;
+    
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(node, path);
+    
+    if (!isPathExists(path)) {
+        MessageBox(hwndMain, L"文件不存在", lc_str.alert, MB_OK);
+        return;
+    }
+    
+    showIconInNewWindow(path, node->name);
 }
 
 static int compareType(const void* a, const void* b) {

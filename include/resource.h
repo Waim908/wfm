@@ -31,6 +31,9 @@
 #define IDI_PRELOADER_7 207
 #define IDI_PRELOADER_8 208
 
+#define IDD_ICON_VIEWER 209
+#define IDC_ICON_IMAGE 210
+
 #define ID_EDIT_CUT 301
 #define ID_EDIT_COPY 302
 #define ID_EDIT_PASTE 303
@@ -42,6 +45,7 @@
 #define ID_FILE_EXIT 309
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
+#define ID_SHOW_ICON 312
 
 #define ICON_UP          0
 #define ICON_COPY        1
@@ -129,6 +133,7 @@ struct LC_STR {
     wchar_t* confirm_exit;
     wchar_t* search;
     wchar_t* up;
+    wchar_t* show_icon;
     
     wchar_t* fmt_file;
     

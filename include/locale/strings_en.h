@@ -60,6 +60,7 @@ static inline void loadStrings_en() {
     lc_str.confirm_exit = L"Confirm Exit";
     lc_str.search = L"Search";
     lc_str.up = L"Up";
+    lc_str.show_icon = L"Show Icon";
     
     lc_str.fmt_file = L"%ls File";
 

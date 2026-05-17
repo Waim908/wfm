@@ -60,6 +60,7 @@ static inline void loadStrings_ru() {
     lc_str.confirm_exit = L"Подтвердить выход";
     lc_str.search = L"Поиск";
     lc_str.up = L"Вверх";
+    lc_str.show_icon = L"Показать значок";
 
     lc_str.fmt_file = L"%ls Файл";
 

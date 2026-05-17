@@ -59,6 +59,7 @@ static inline void loadStrings_pt() {
     lc_str.confirm_exit = L"Confirmar Saída";
     lc_str.search = L"Pesquisar";
     lc_str.up = L"Acima";
+    lc_str.show_icon = L"Mostrar Ícone";
 
     lc_str.fmt_file = L"Arquivo %ls";
 
