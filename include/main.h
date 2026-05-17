@@ -47,6 +47,7 @@ static inline void timetToFileTime(time_t t, LPFILETIME result) {
 #include "file_actions.h"
 #include "file_utils.h"
 #include "input_dialog.h"
+#include "bookmarks.h"
 #include "strings.h"
 
 #define MEMFREE(x) \

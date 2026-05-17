@@ -28,5 +28,6 @@ void onMenuItemPasteShortcutClick();
 void onMenuItemNewFolderClick();
 void onMenuItemNewFileClick();
 void onMenuItemSelectAllClick();
+void onBookmarkButtonClick();
 
 #endif

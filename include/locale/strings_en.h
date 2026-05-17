@@ -61,7 +61,12 @@ static inline void loadStrings_en() {
     lc_str.search = L"Search";
     lc_str.up = L"Up";
     lc_str.show_icon = L"Show Icon";
-    
+    lc_str.bookmarks = L"Bookmarks";
+    lc_str.add_bookmark = L"Add to Bookmarks";
+    lc_str.remove_bookmark = L"Remove Bookmark";
+    lc_str.bookmark_exists = L"This path is already in bookmarks";
+    lc_str.bookmark_path_not_found = L"Bookmarked path does not exist: %ls";
+
     lc_str.fmt_file = L"%ls File";
 
     lc_str.msg_invalid_iso_image_file = L"Invalid ISO Image file!";

@@ -11,7 +11,9 @@ enum FileType {
     TYPE_DESKTOP,
     TYPE_PERSONAL,
     TYPE_USERPROFILE,
-    TYPE_COMPUTER
+    TYPE_COMPUTER,
+    TYPE_BOOKMARK_ROOT,
+    TYPE_BOOKMARK_ITEM
 };
 
 struct FileInfo {

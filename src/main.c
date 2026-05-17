@@ -309,6 +309,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     
     globalHInstance = hInstance;
     preloadIcons();
+    
+    loadBookmarks();
 
     NONCLIENTMETRICS ncm = {0};
     ncm.cbSize = sizeof(ncm);

@@ -134,6 +134,11 @@ struct LC_STR {
     wchar_t* search;
     wchar_t* up;
     wchar_t* show_icon;
+    wchar_t* bookmarks;
+    wchar_t* add_bookmark;
+    wchar_t* remove_bookmark;
+    wchar_t* bookmark_exists;
+    wchar_t* bookmark_path_not_found;
     
     wchar_t* fmt_file;
     

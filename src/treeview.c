@@ -1,6 +1,8 @@
 #include "main.h"
+#include "bookmarks.h"
 
 extern struct FileNode* treeFileNode;
+extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 
@@ -116,6 +118,9 @@ static void updateTreeItems() {
         }
     }
     while ((node = node->sibling) != NULL);
+    
+    // Add bookmarks section
+    buildBookmarkTree();
 }
 
 static void treeItemExpand(HTREEITEM treeItem, struct FileNode* node) {
@@ -132,7 +137,18 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
     switch (nmhdr->code) {
         case TVN_ITEMEXPANDING: {
             NMTREEVIEW* nmtv = (NMTREEVIEW*)nmhdr;
-            struct FileNode* node = (struct FileNode*)nmtv->itemNew.lParam;
+            LPARAM lParam = nmtv->itemNew.lParam;
+            
+            // Handle bookmark root expanding
+            if (lParam == TYPE_BOOKMARK_ROOT) {
+                // If no bookmarks, prevent expand
+                if (g_bookmarkCount == 0) {
+                    return TRUE;
+                }
+                return 0;
+            }
+            
+            struct FileNode* node = (struct FileNode*)lParam;
             // 用户和文档节点不允许展开/折叠，和桌面一样
             if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
                 return TRUE; // 阻止展开
@@ -159,8 +175,116 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
                 item.hItem = tvhti.hItem;
                 item.mask = TVIF_PARAM;
                 TreeView_GetItem(hwndTreeview, &item);
-                struct FileNode* node = (struct FileNode*)item.lParam;
+                
+                LPARAM lParam = item.lParam;
+                
+                // Handle bookmark item click
+                if (lParam == TYPE_BOOKMARK_ROOT) {
+                    return 0;
+                }
+                
+                if ((lParam & 0xFFFF) == TYPE_BOOKMARK_ITEM) {
+                    int bookmarkIndex = (int)(lParam >> 16);
+                    if (bookmarkIndex >= 0 && bookmarkIndex < g_bookmarkCount) {
+                        // Check if path exists
+                        if (!isPathExists(g_bookmarks[bookmarkIndex].path)) {
+                            wchar_t msg[MAX_PATH + 128];
+                            swprintf_s(msg, MAX_PATH + 128, lc_str.bookmark_path_not_found, g_bookmarks[bookmarkIndex].path);
+                            MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+                        navigateToPath(g_bookmarks[bookmarkIndex].path);
+                    }
+                    return 0;
+                }
+                
+                struct FileNode* node = (struct FileNode*)lParam;
                 navigateToFileNode(node);
+            }
+            break;
+        }
+        case NM_RCLICK: {
+            TVHITTESTINFO tvhti;
+            POINT pt;
+            GetCursorPos(&pt);
+            
+            // Get the item at cursor
+            tvhti.pt = pt;
+            ScreenToClient(hwndTreeview, &tvhti.pt);
+            TreeView_HitTest(hwndTreeview, &tvhti);
+
+            if (tvhti.hItem != NULL && (tvhti.flags & TVHT_ONITEM)) {
+                TVITEM item;
+                item.hItem = tvhti.hItem;
+                item.mask = TVIF_PARAM;
+                TreeView_GetItem(hwndTreeview, &item);
+                
+                LPARAM lParam = item.lParam;
+                
+                // Select the item
+                TreeView_SelectItem(hwndTreeview, tvhti.hItem);
+                
+                // Show context menu at cursor position (screen coordinates)
+                HMENU hMenu = CreatePopupMenu();
+                
+                if (lParam == TYPE_BOOKMARK_ROOT) {
+                    // For bookmark root, allow adding current path
+                    AppendMenuW(hMenu, MF_STRING, 1, lc_str.add_bookmark);
+                } else if ((lParam & 0xFFFF) == TYPE_BOOKMARK_ITEM) {
+                    AppendMenuW(hMenu, MF_STRING, 2, lc_str.remove_bookmark);
+                } else {
+                    // For regular file nodes, allow adding to bookmarks
+                    struct FileNode* node = (struct FileNode*)lParam;
+                    if (node && node->type == TYPE_DIR) {
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(node, path);
+                        
+                        // Check if already bookmarked
+                        if (findBookmark(path) >= 0) {
+                            AppendMenuW(hMenu, MF_STRING, 3, lc_str.remove_bookmark);
+                        } else {
+                            AppendMenuW(hMenu, MF_STRING, 1, lc_str.add_bookmark);
+                        }
+                    }
+                }
+                
+                // Check if menu has any items
+                int menuItemCount = GetMenuItemCount(hMenu);
+                if (menuItemCount > 0) {
+                    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwndMain, NULL);
+                    
+                    if (cmd == 1) {
+                        // Add bookmark - use current navigation path
+                        if (currPathFileNode) {
+                            wchar_t path[MAX_PATH] = {0};
+                            getFileNodePath(currPathFileNode, path);
+                            
+                            if (findBookmark(path) >= 0) {
+                                MessageBox(hwndMain, lc_str.bookmark_exists, lc_str.alert, MB_OK | MB_ICONWARNING);
+                            } else {
+                                addBookmark(path);
+                                buildBookmarkTree();
+                            }
+                        }
+                    } else if (cmd == 2) {
+                        // Remove bookmark
+                        int bookmarkIndex = (int)(lParam >> 16);
+                        removeBookmark(bookmarkIndex);
+                        buildBookmarkTree();
+                    } else if (cmd == 3) {
+                        // Remove bookmark for current path
+                        if (currPathFileNode) {
+                            wchar_t path[MAX_PATH] = {0};
+                            getFileNodePath(currPathFileNode, path);
+                            int idx = findBookmark(path);
+                            if (idx >= 0) {
+                                removeBookmark(idx);
+                                buildBookmarkTree();
+                            }
+                        }
+                    }
+                }
+                DestroyMenu(hMenu);
             }
             break;
         }
@@ -170,7 +294,7 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
 }
 
 void createTreeview() {
-    hwndTreeview = CreateWindowEx(0, WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS |                              TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
+    hwndTreeview = CreateWindowEx(0, WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
 
     updateTreeItems();
     UpdateWindow(hwndTreeview);

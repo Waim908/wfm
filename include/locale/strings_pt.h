@@ -60,6 +60,11 @@ static inline void loadStrings_pt() {
     lc_str.search = L"Pesquisar";
     lc_str.up = L"Acima";
     lc_str.show_icon = L"Mostrar Ícone";
+    lc_str.bookmarks = L"Favoritos";
+    lc_str.add_bookmark = L"Adicionar aos Favoritos";
+    lc_str.remove_bookmark = L"Remover Favorito";
+    lc_str.bookmark_exists = L"Este caminho já está nos favoritos";
+    lc_str.bookmark_path_not_found = L"Caminho favorito não existe: %ls";
 
     lc_str.fmt_file = L"Arquivo %ls";
 

@@ -856,6 +856,10 @@ void onMenuItemSelectAllClick() {
     SetFocus(hwndContentView);
 }
 
+void onBookmarkButtonClick() {
+    addCurrentPathToBookmark();
+}
+
 static void onMenuItemLoadISOImageClick() {
     if (numSelectedItems != 1) {
         MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
