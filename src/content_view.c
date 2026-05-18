@@ -173,8 +173,18 @@ static void freeMenuItems() {
 
 void clearContentView() {    
     ListView_SetItemCountEx(hwndContentView, 0, 0);
-    ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);    
-    
+    // 删除所有现有列（在非REPORT视图下清除列，避免残留）
+    HWND hHeader = ListView_GetHeader(hwndContentView);
+    if (hHeader) {
+        int numCols = Header_GetItemCount(hHeader);
+        for (int i = numCols - 1; i >= 0; i--) {
+            ListView_DeleteColumn(hwndContentView, i);
+        }
+    } else {
+        // 无法获取表头时，尝试删除搜索模式添加的第4列
+        ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);
+    }
+
     if (items) {
         for (int i = 0; i < numItems; i++) {
             if (items[i].path) {
@@ -279,9 +289,10 @@ void updateSelectedItems() {
     numSelectedItems = 0;
 
     int i = ListView_GetNextItem(hwndContentView, -1, LVNI_SELECTED);
-    while (i != -1) {       
+    while (i != -1 && items && i < numItems) {       
         int index = numSelectedItems++;
         selectedItems = realloc(selectedItems, numSelectedItems * sizeof(struct FileNode*));
+        if (!selectedItems) break;
         selectedItems[index] = items[i].node;
         i = ListView_GetNextItem(hwndContentView, i, LVNI_SELECTED);
     }
@@ -455,6 +466,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         case LVN_GETDISPINFO: {
             NMLVDISPINFO* nmlvdi = (NMLVDISPINFO*)nmhdr;
             UINT mask = nmlvdi->item.mask;
+            if (!items || nmlvdi->item.iItem < 0 || nmlvdi->item.iItem >= numItems) break;
             struct ListItem* item = &items[nmlvdi->item.iItem];
             
             if (!item->loaded) {
@@ -587,7 +599,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         case NM_DBLCLK: {
             NMITEMACTIVATE* nmia = (NMITEMACTIVATE*)nmhdr;
             if (nmia->iItem == -1 || nmia->iSubItem != 0) break;
-
+            
+            if (!items || nmia->iItem >= numItems) break;
             struct ListItem* item = &items[nmia->iItem];            
             openFileNode(item->node);
             break;
@@ -690,6 +703,8 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     }
 
     SetWindowLongPtr(hwndContentView, GWL_STYLE, wndstyle);
+    // 强制 ListView 识别样式变更并重新布局
+    SetWindowPos(hwndContentView, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
     viewStyle = newViewStyle;
     refreshContentView();
@@ -1098,8 +1113,10 @@ void refreshContentView() {
     }
     
     clearContentView();
-    UpdateWindow(hwndContentView);
-    
+
+    // 在REPORT视图下重建列（clearContentView已删除所有列）
+    if (viewStyle == STYLE_DETAILS) createLVColumns();
+
     struct FileNode* child = currPathFileNode->children;
     
     // 单次遍历：计数并填充
@@ -1142,5 +1159,14 @@ void refreshContentView() {
     if (sortColumnIdx != -1) sortItems();
     ListView_SetItemCountEx(hwndContentView, numItems, 0);
     
+    // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时
+    // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
+    // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
+    if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
+        ListView_Arrange(hwndContentView, LVA_DEFAULT);
+        ListView_SetItemCountEx(hwndContentView, numItems, 0);
+    }
+    
+    InvalidateRect(hwndContentView, NULL, TRUE);
     updateStatusbar();  
 }
