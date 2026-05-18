@@ -171,6 +171,7 @@ int findBookmark(const wchar_t* path) {
 }
 
 static HTREEITEM hBookmarksRoot = NULL;
+static int s_bookmarkIconIndex = -1;  // cached index of bookmark icon in shell image list
 
 void buildBookmarkTree() {
     // Clear existing items first
@@ -203,14 +204,15 @@ void buildBookmarkTree() {
         }
         tvis.itemex.stateMask = TVIS_EXPANDED;
         
-        // Get folder icon
-        SHFILEINFO sfi = {0};
+        // Use custom bookmark icon for the root node
         HIMAGELIST himlBig, himlSmall;
         Shell_GetImageLists(&himlBig, &himlSmall);
         TreeView_SetImageList(hwndTreeview, himlSmall, TVSIL_NORMAL);
-        SHGetFileInfo(L"", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-        tvis.itemex.iImage = sfi.iIcon;
-        tvis.itemex.iSelectedImage = sfi.iIcon;
+        if (s_bookmarkIconIndex < 0) {
+            s_bookmarkIconIndex = ImageList_AddIcon(himlSmall, uiIcons[ICON_BOOKMARK]);
+        }
+        tvis.itemex.iImage = s_bookmarkIconIndex;
+        tvis.itemex.iSelectedImage = s_bookmarkIconIndex;
         
         hBookmarksRoot = TreeView_InsertItem(hwndTreeview, &tvis);
     } else {
