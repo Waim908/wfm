@@ -1,4 +1,5 @@
 #include "main.h"
+#include "libcdio_loader.h"
 
 static const wchar_t mainWndClass[] = L"WFM-MainWnd";
 
@@ -12,7 +13,65 @@ extern HWND hwndTreeview;
 
 HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
+HFONT hGuiFont = NULL;
 struct LC_STR lc_str = {0};
+
+void updateGuiFont() {
+    if (hGuiFont) DeleteObject(hGuiFont);
+
+    NONCLIENTMETRICS ncm = {0};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    hGuiFont = CreateFontIndirect(&ncm.lfMessageFont);
+
+    // Update font on all controls
+    SendMessage(hwndToolbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndTreeview, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+
+    // Trigger navbar to recalculate layout with new font
+    if (hwndNavbar) {
+        InvalidateRect(hwndNavbar, NULL, TRUE);
+        SendMessage(hwndNavbar, WM_SIZE, 0, 0);
+    }
+}
+HICON uiIcons[NUM_UI_ICONS] = {0};
+BOOL g_noLibcdio = FALSE;
+
+struct IconMapping {
+    int iconId;
+    int resourceId;
+};
+
+static const struct IconMapping iconMap[] = {
+    {ICON_UP, IDI_UP},
+    {ICON_COPY, IDI_COPY},
+    {ICON_CUT, IDI_CUT},
+    {ICON_PASTE, IDI_PASTE},
+    {ICON_DELETE, IDI_DELETE},
+    {ICON_NEW_FOLDER, IDI_NEW_FOLDER},
+    {ICON_NEW_FILE, IDI_NEW_FILE},
+    {ICON_GO, IDI_GO},
+    {ICON_REFRESH, IDI_REFRESH},
+    {ICON_SEARCH, IDI_SEARCH},
+    {ICON_NAV_ARROW, IDI_NAV_ARROW},
+    {ICON_BOOKMARK, IDI_BOOKMARK},
+};
+
+void preloadIcons() {
+    for (int i = 0; i < NUM_UI_ICONS; i++) {
+        uiIcons[iconMap[i].iconId] = (HICON)LoadImage(
+            globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
+            IMAGE_ICON, 16, 16, 0);
+    }
+}
+
+void freeUIcons() {
+    for (int i = 0; i < NUM_UI_ICONS; i++) {
+        if (uiIcons[i]) DestroyIcon(uiIcons[i]);
+    }
+}
 
 void GetWindowRectInParent(HWND hwnd, RECT* rect) {
     GetWindowRect(hwnd, rect);
@@ -41,6 +100,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_NAME), lc_str.app_name);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_VERSION), lc_str.app_version);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_DEV_NAME), lc_str.app_dev_name);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_MOD_NAME), L"Modify by Waim908");
             return (INT_PTR)TRUE;
         }
     }
@@ -83,6 +143,10 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_DETAILS:
             setViewStyle(STYLE_DETAILS);
             break;                      
+        case ID_VIEW_CLEAR_ICON_CACHE:
+            clearIconCaches();
+            navigateRefresh();
+            break;
     }   
 }
 
@@ -161,7 +225,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return treeviewNotify(nmhdr);
             }
             else return 0;
-        }       
+        }
+        case WM_DPICHANGED: {
+            updateGuiFont();
+            return 0;
+        }
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -169,7 +237,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 void navigateToFileNode(struct FileNode* node) {
     if (node) {
         clearAddrButtons();
-        clearContentView();
         setCurrPathFileNode(node);
         navigateRefresh();
     }
@@ -178,7 +245,6 @@ void navigateToFileNode(struct FileNode* node) {
 void navigateToPath(wchar_t* path) {
     if (path) {
         clearAddrButtons();
-        clearContentView();   
         setCurrPathFromString(path);
         navigateRefresh();
     }
@@ -187,7 +253,6 @@ void navigateToPath(wchar_t* path) {
 void navigateUp() {
     if (currPathFileNode->parent) {
         clearAddrButtons();
-        clearContentView();
         setCurrPathFileNode(currPathFileNode->parent);
         navigateRefresh();
     }
@@ -231,6 +296,8 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_STRING, ID_VIEW_LIST, lc_str.list);
     AppendMenu(hmView, MF_STRING, ID_VIEW_DETAILS, lc_str.details);
     
+    AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
     HMENU hmHelp = CreatePopupMenu();
     AppendMenu(hmHelp, MF_STRING, ID_HELP_ABOUT, lc_str.about);
     
@@ -244,8 +311,25 @@ static void createMainMenu() {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow) {
+    SetProcessDPIAware();
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
+    
+    // 解析命令行参数
+    wchar_t* navigatePath = NULL;
+    for (int i = 1; i < numArgs; i++) {
+        if (wcscmp(args[i], L"--nolibcdio") == 0) {
+            g_noLibcdio = TRUE;
+        } else {
+            // 第一个非 -- 开头的参数作为导航路径
+            if (!navigatePath) navigatePath = args[i];
+        }
+    }
+    
+    // 加载 libcdio (除非 --nolibcdio 被指定)
+    if (!g_noLibcdio) {
+        libcdio_load();
+    }
     
     wchar_t localeName[16] = {0};
     GetSystemDefaultLocaleName(localeName, 16);
@@ -253,6 +337,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     loadLCStrings(localeName);
     
     globalHInstance = hInstance;
+    preloadIcons();
+    
+    loadBookmarks();
+    loadAutoOpenBookmark();
+
+    NONCLIENTMETRICS ncm = {0};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    hGuiFont = CreateFontIndirect(&ncm.lfMessageFont);
 
     WNDCLASSEX wcx = {0};
     wcx.cbSize = sizeof(wcx);
@@ -288,15 +381,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     createSizebar();
     createContentView();
     createStatusbar();
+
+    SendMessage(hwndToolbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndTreeview, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     
     setViewStyle(STYLE_DETAILS);
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
     
-    if (numArgs > 1) {
-        navigateToPath(args[1]);
+    if (navigatePath) {
+        navigateToPath(navigatePath);
     }
     else navigateRefresh();
+    
+    // Open auto-open bookmark after UI is ready
+    openAutoOpenBookmark();
 
     ShowWindow(hwndMain, SW_SHOW);
     UpdateWindow(hwndMain);
@@ -306,6 +407,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    libcdio_free();
     
     return (int)msg.wParam;
 }

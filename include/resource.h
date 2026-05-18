@@ -9,6 +9,7 @@
 #define IDC_APP_NAME 109
 #define IDC_APP_VERSION 110
 #define IDC_APP_DEV_NAME 111
+#define IDC_APP_MOD_NAME 123
 #define IDD_FILE_ACTION 112
 #define IDC_PRELOADER 113
 #define IDI_SEARCH 114
@@ -29,6 +30,10 @@
 #define IDI_PRELOADER_6 206
 #define IDI_PRELOADER_7 207
 #define IDI_PRELOADER_8 208
+#define IDI_BOOKMARK 209
+
+#define IDD_ICON_VIEWER 210
+#define IDC_ICON_IMAGE 211
 
 #define ID_EDIT_CUT 301
 #define ID_EDIT_COPY 302
@@ -41,6 +46,27 @@
 #define ID_FILE_EXIT 309
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
+#define ID_SHOW_ICON 312
+#define ID_VIEW_CLEAR_ICON_CACHE 313
+
+#define ICON_UP          0
+#define ICON_COPY        1
+#define ICON_CUT         2
+#define ICON_PASTE       3
+#define ICON_DELETE      4
+#define ICON_NEW_FOLDER  5
+#define ICON_NEW_FILE    6
+#define ICON_GO          7
+#define ICON_REFRESH     8
+#define ICON_SEARCH      9
+#define ICON_NAV_ARROW   10
+#define ICON_BOOKMARK    11
+#define NUM_UI_ICONS     12
+
+extern HICON uiIcons[NUM_UI_ICONS];
+
+void preloadIcons();
+void freeUIcons();
 
 #ifndef IDC_STATIC
 #define IDC_STATIC -1
@@ -110,6 +136,16 @@ struct LC_STR {
     wchar_t* confirm_exit;
     wchar_t* search;
     wchar_t* up;
+    wchar_t* show_icon;
+    wchar_t* bookmarks;
+    wchar_t* bookmark;
+    wchar_t* add_bookmark;
+    wchar_t* remove_bookmark;
+    wchar_t* bookmark_exists;
+    wchar_t* bookmark_path_not_found;
+    wchar_t* auto_open_on_start;
+    wchar_t* cancel_auto_open;
+    wchar_t* auto_open_path_not_found;
     
     wchar_t* fmt_file;
     
@@ -122,6 +158,7 @@ struct LC_STR {
     wchar_t* msg_confirm_delete_item;
     wchar_t* msg_confirm_delete_multiple_items;
     wchar_t* msg_confirm_exit_app;
+    wchar_t* clear_icon_cache;
 };
 
 extern struct LC_STR lc_str;

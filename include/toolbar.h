@@ -10,5 +10,6 @@ void onPasteButtonClick();
 void onDeleteButtonClick();
 void onNewFolderButtonClick();
 void onNewFileButtonClick();
+void onBookmarkButtonClick();
 
 #endif

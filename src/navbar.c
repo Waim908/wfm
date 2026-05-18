@@ -134,12 +134,20 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
         case WM_SIZE: {
             RECT rect;
-            GetClientRect(hwnd, &rect);     
-            
+            GetClientRect(hwnd, &rect);
+
             const int margin = 4;
             const int searchEditWidth = 160;
             const int editWrapperHeight = buttonSize - margin;
-            const int addrEditHeight = 16;
+
+            HDC hdc = GetDC(hwnd);
+            HGDIOBJ prevFont = SelectObject(hdc, hGuiFont);
+            SIZE textSize;
+            GetTextExtentPoint32W(hdc, L"Ay", 2, &textSize);
+            int addrEditHeight = textSize.cy + 4;
+            SelectObject(hdc, prevFont);
+            ReleaseDC(hwnd, hdc);
+
             const int addrEditY = (editWrapperHeight - addrEditHeight) / 2;
             
             int offsetX = rect.right - (margin + buttonSize);
@@ -275,7 +283,7 @@ static struct AddrButton* addAddrButton() {
     struct AddrButton* button = &addrButtons[index];
     button->hwnd = CreateWindowEx(0, WC_BUTTON, NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
     button->isArrow = false;
-    SendMessage(button->hwnd, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(button->hwnd, WM_SETFONT, (WPARAM)hGuiFont, 0);
     return button;
 }
 
@@ -286,8 +294,7 @@ static void addArrowAddrButton(struct FileNode* node) {
 
     SetWindowLongPtr(button->hwnd, GWL_STYLE, GetWindowLongPtr(button->hwnd, GWL_STYLE) | BS_ICON);
 
-    HICON hiNavArrow = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_NAV_ARROW), IMAGE_ICON, 16, 16, 0);
-    SendMessageW(button->hwnd, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiNavArrow);
+    SendMessageW(button->hwnd, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_NAV_ARROW]);
     button->width = 16;
 }
 
@@ -346,23 +353,20 @@ void updateAddrButtons() {
 }
 
 static void createNavButtons() {
-    hwndGoButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+    hwndGoButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                   0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiGo = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_GO), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndGoButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiGo);
+    SendMessage(hwndGoButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_GO]);
     SetWindowPos(hwndGoButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
-    
-    hwndRefreshButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+
+    hwndRefreshButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                        0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiRefresh = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_REFRESH), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndRefreshButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiRefresh);
+    SendMessage(hwndRefreshButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_REFRESH]);
     SetWindowPos(hwndRefreshButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
-    
-    hwndSearchButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON, 
+
+    hwndSearchButton = CreateWindowEx(0, WC_BUTTON, NULL, WS_VISIBLE | WS_CHILD | BS_ICON,
                                       0, 0, buttonSize, buttonSize, hwndNavbar, NULL, globalHInstance, NULL);
-    HICON hiSearch = (HICON)LoadImage(globalHInstance, MAKEINTRESOURCE(IDI_SEARCH), IMAGE_ICON, 16, 16, 0);
-    SendMessage(hwndSearchButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)hiSearch);
-    SetWindowPos(hwndSearchButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);      
+    SendMessage(hwndSearchButton, BM_SETIMAGE, IMAGE_ICON, (LPARAM)uiIcons[ICON_SEARCH]);
+    SetWindowPos(hwndSearchButton, NULL, 0, 0, buttonSize, buttonSize, SWP_NOZORDER | SWP_NOMOVE);
 }
 
 void createNavbar() {
@@ -376,7 +380,7 @@ void createNavbar() {
                                 
     hwndAddrEdit = CreateWindowEx(0, WC_EDIT, NULL, WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL | ES_LEFT,
                                   0, 0, 0, 0, hwndAddrEditWrapper, (HMENU)NULL, globalHInstance, NULL);
-    SendMessage(hwndAddrEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(hwndAddrEdit, WM_SETFONT, (WPARAM)hGuiFont, 0);
     AddrEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndAddrEdit, GWLP_WNDPROC, (LONG_PTR)AddrEditWndProc);     
     
     hwndSearchEditWrapper = CreateWindowEx(0, WC_STATIC, NULL, WS_VISIBLE | WS_CHILD | WS_BORDER, 
@@ -385,7 +389,7 @@ void createNavbar() {
                                            
     hwndSearchEdit = CreateWindowEx(0, WC_EDIT, NULL, WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL | ES_LEFT, 
                                     0, 0, 0, 0, hwndSearchEditWrapper, (HMENU)NULL, globalHInstance, NULL);
-    SendMessage(hwndSearchEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), 0);
+    SendMessage(hwndSearchEdit, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SearchEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditWndProc);           
 
     setEditMode(false);

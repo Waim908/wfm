@@ -60,14 +60,26 @@ static inline void loadStrings_zh() {
     lc_str.confirm_exit = L"确认退出";
     lc_str.search = L"搜索";
     lc_str.up = L"向上";
+    lc_str.show_icon = L"显示图标";
+    lc_str.bookmarks = L"收藏";
+    lc_str.bookmark = L"收藏";
+    lc_str.add_bookmark = L"添加到收藏";
+    lc_str.remove_bookmark = L"移除收藏";
+    lc_str.bookmark_exists = L"该路径已在收藏列表中";
+    lc_str.bookmark_path_not_found = L"收藏的路径不存在：%ls";
+    lc_str.auto_open_on_start = L"启动时打开";
+    lc_str.cancel_auto_open = L"取消启动";
+    lc_str.auto_open_path_not_found = L"启动时无法打开路径（不存在）：%ls";
+
+    lc_str.clear_icon_cache = L"清除图标缓存";
 
     lc_str.fmt_file = L"%ls 文件";
 
     lc_str.msg_invalid_iso_image_file = L"无效的 ISO 映像文件！";
+
     lc_str.msg_deleting_files = L"正在删除文件，请稍候...";
     lc_str.msg_copying_files = L"正在复制文件，请稍候...";
     lc_str.msg_moving_files = L"正在移动文件，请稍候...";
-    lc_str.msg_extracting_files = L"正在解压文件，请稍候...";
     lc_str.msg_cancel_file_operation = L"是否要取消此操作？";
     lc_str.msg_confirm_delete_item = L"确定要删除“%ls”吗？";
     lc_str.msg_confirm_delete_multiple_items = L"确定要删除 %d 个项目吗？";

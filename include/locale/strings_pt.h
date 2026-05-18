@@ -12,7 +12,6 @@ static inline void loadStrings_pt() {
     lc_str.file = L"Arquivo";
     lc_str.folder = L"Pasta";
     lc_str.local_drive = L"Unidade Local";
-    lc_str.cd_drive = L"Unidade de CD";
     lc_str.computer = L"Computador";
     lc_str.desktop = L"Desktop";
     lc_str.documents = L"Documentos";
@@ -60,10 +59,23 @@ static inline void loadStrings_pt() {
     lc_str.confirm_exit = L"Confirmar Saída";
     lc_str.search = L"Pesquisar";
     lc_str.up = L"Acima";
+    lc_str.show_icon = L"Mostrar Ícone";
+    lc_str.bookmarks = L"Favoritos";
+    lc_str.bookmark = L"Favorito";
+    lc_str.add_bookmark = L"Adicionar aos Favoritos";
+    lc_str.remove_bookmark = L"Remover Favorito";
+    lc_str.bookmark_exists = L"Este caminho já está nos favoritos";
+    lc_str.bookmark_path_not_found = L"Caminho favorito não existe: %ls";
+    lc_str.auto_open_on_start = L"Abrir na Inicialização";
+    lc_str.cancel_auto_open = L"Cancelar Inicialização";
+    lc_str.auto_open_path_not_found = L"Não foi possível abrir o caminho na inicialização (não encontrado): %ls";
+
+    lc_str.clear_icon_cache = L"Limpar Cache de Ícones";
 
     lc_str.fmt_file = L"Arquivo %ls";
-    
+
     lc_str.msg_invalid_iso_image_file = L"Arquivo de Imagem ISO inválido!";
+    
     lc_str.msg_deleting_files = L"Excluindo arquivos, aguarde...";
     lc_str.msg_copying_files = L"Copiando arquivos, aguarde...";
     lc_str.msg_moving_files = L"Movendo arquivos, aguarde...";

@@ -47,6 +47,7 @@ static inline void timetToFileTime(time_t t, LPFILETIME result) {
 #include "file_actions.h"
 #include "file_utils.h"
 #include "input_dialog.h"
+#include "bookmarks.h"
 #include "strings.h"
 
 #define MEMFREE(x) \
@@ -58,6 +59,9 @@ static inline void timetToFileTime(time_t t, LPFILETIME result) {
     } \
     while(0)
 
+extern HFONT hGuiFont;
+
+void updateGuiFont();
 void navigateToFileNode(struct FileNode* node);
 void navigateToPath(wchar_t* path);
 void navigateUp();

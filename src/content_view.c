@@ -6,6 +6,80 @@
 #define COLUMN_DATE_IDX 3
 #define COLUMN_PATH_IDX 4
 
+// 扩展名图标缓存
+#define EXT_CACHE_SIZE 128
+static struct {
+    wchar_t ext[16];
+    int icon;
+    wchar_t typeName[64];
+} extIconCache[EXT_CACHE_SIZE];
+static int extCacheCount = 0;
+
+// 目录图标缓存
+static int folderIconCached = 0;
+static int folderIconIndex = 0;
+
+// exe/lnk 文件图标缓存（按路径缓存图标索引）
+#define EXE_ICON_CACHE_SIZE 64
+static struct {
+    wchar_t path[MAX_PATH];
+    int iconIndex;
+} exeIconCache[EXE_ICON_CACHE_SIZE];
+static int exeIconCacheCount = 0;
+static HIMAGELIST currentImageList = NULL;
+
+static int findExeIconCache(wchar_t* path) {
+    if (!path || !currentImageList) return -1;
+    for (int i = 0; i < exeIconCacheCount; i++) {
+        if (wcsicmp(exeIconCache[i].path, path) == 0) {
+            return exeIconCache[i].iconIndex;
+        }
+    }
+    return -1;
+}
+
+static int addExeIconCache(wchar_t* path, int iconIndex) {
+    if (!path || exeIconCacheCount >= EXE_ICON_CACHE_SIZE) return iconIndex;
+    wcsncpy_s(exeIconCache[exeIconCacheCount].path, MAX_PATH, path, MAX_PATH - 1);
+    exeIconCache[exeIconCacheCount].iconIndex = iconIndex;
+    return exeIconCacheCount++, iconIndex;
+}
+
+// 快速查找扩展名图标缓存
+static int findExtIconCache(wchar_t* ext) {
+    if (!ext) return -1;
+    for (int i = 0; i < extCacheCount; i++) {
+        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
+            return extIconCache[i].icon;
+        }
+    }
+    return -1;
+}
+
+// 从扩展名缓存中获取类型名称
+static wchar_t* findExtTypeNameCache(wchar_t* ext) {
+    if (!ext) return NULL;
+    for (int i = 0; i < extCacheCount; i++) {
+        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
+            return extIconCache[i].typeName;
+        }
+    }
+    return NULL;
+}
+
+// 添加扩展名图标缓存
+static void addExtIconCache(wchar_t* ext, int icon, wchar_t* typeName) {
+    if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
+    wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
+    extIconCache[extCacheCount].icon = icon;
+    if (typeName) {
+        wcsncpy_s(extIconCache[extCacheCount].typeName, 64, typeName, 63);
+    } else {
+        extIconCache[extCacheCount].typeName[0] = L'\0';
+    }
+    extCacheCount++;
+}
+
 enum Msg {
     MSG_ADD_ITEM = WM_APP,
     MSG_SEARCH_DONE
@@ -43,6 +117,7 @@ struct ContextMenuItem {
 
 static void onMenuItemLoadISOImageClick();
 static void onMenuItemUnloadISOImageClick();
+static void onMenuItemShowIconClick();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL};
@@ -57,6 +132,7 @@ static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, N
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL};
 static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL};
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
+static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -74,6 +150,12 @@ static int numMenuItems = 0;
 
 static struct SearchData* searchData;
 
+// Icon viewer dialog globals
+static HWND hwndIconViewer = NULL;
+static HICON hIconLarge = NULL;
+static HICON hIconSmall = NULL;
+static wchar_t iconViewerTitle[MAX_PATH] = {0};
+
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
@@ -81,25 +163,9 @@ extern HWND hwndMain;
 HWND hwndContentView = NULL;
 
 static void fillFileInfo(struct FileNode* node, struct ListItem* item) {
-    item->size = 0;
-    memset(&item->modifiedTime, 0, sizeof(FILETIME));
-    
-    if (node->type == TYPE_FILE) {
-        LARGE_INTEGER filesize;
-        WIN32_FILE_ATTRIBUTE_DATA info = {0};
-
-        wchar_t path[MAX_PATH] = {0};
-        getFileNodePath(node, path);
-        GetFileAttributesEx(path, GetFileExInfoStandard, &info);        
-
-        if ((info.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)) {
-            filesize.LowPart = info.nFileSizeLow;
-            filesize.HighPart = info.nFileSizeHigh;
-            item->size = filesize.QuadPart;
-        }
-
-        memcpy(&item->modifiedTime, &info.ftLastWriteTime, sizeof(FILETIME));
-    }
+    // 直接使用已保存的文件属性，无需再次调用 API
+    item->size = node->size;
+    memcpy(&item->modifiedTime, &node->modifiedTime, sizeof(FILETIME));
 }
 
 static void updateStatusbar() {
@@ -124,8 +190,18 @@ static void freeMenuItems() {
 
 void clearContentView() {    
     ListView_SetItemCountEx(hwndContentView, 0, 0);
-    ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);    
-    
+    // 删除所有现有列（在非REPORT视图下清除列，避免残留）
+    HWND hHeader = ListView_GetHeader(hwndContentView);
+    if (hHeader) {
+        int numCols = Header_GetItemCount(hHeader);
+        for (int i = numCols - 1; i >= 0; i--) {
+            ListView_DeleteColumn(hwndContentView, i);
+        }
+    } else {
+        // 无法获取表头时，尝试删除搜索模式添加的第4列
+        ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);
+    }
+
     if (items) {
         for (int i = 0; i < numItems; i++) {
             if (items[i].path) {
@@ -138,7 +214,19 @@ void clearContentView() {
     }
     numItems = 0;
     
+    // 注意：图标缓存不再在此清空，以保持跨导航的加速效果
+    // 只有在视图样式切换时才需要重建图像列表
     freeMenuItems();
+    
+    // Cleanup icon viewer resources
+    if (hIconLarge) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+    }
+    if (hIconSmall) {
+        DestroyIcon(hIconSmall);
+        hIconSmall = NULL;
+    }
 }
 
 static void execCommandLine(wchar_t *command) {
@@ -169,7 +257,7 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 if (cmItem->cmdData) {
                     wchar_t command[MAX_PATH];
-                    wcscat_s(command, MAX_PATH, L"/C ");
+                    wcscpy_s(command, MAX_PATH, L"/C ");
                     wcscat_s(command, MAX_PATH, cmItem->cmdData);
                     execCommandLine(command);
                     navigateRefresh();
@@ -215,9 +303,10 @@ void updateSelectedItems() {
     numSelectedItems = 0;
 
     int i = ListView_GetNextItem(hwndContentView, -1, LVNI_SELECTED);
-    while (i != -1) {       
+    while (i != -1 && items && i < numItems) {       
         int index = numSelectedItems++;
         selectedItems = realloc(selectedItems, numSelectedItems * sizeof(struct FileNode*));
+        if (!selectedItems) break;
         selectedItems[index] = items[i].node;
         i = ListView_GetNextItem(hwndContentView, i, LVNI_SELECTED);
     }
@@ -360,6 +449,7 @@ static void createContextMenu(enum ContextMenuType type) {
             if (selectedItems[0]->type == TYPE_FILE) {
                 addContextMenuItem(hMenu, id++, &cmiOpen, false);
                 addContextMenuItem(hMenu, id++, &cmiEdit, true);
+                addContextMenuItem(hMenu, id++, &cmiShowIcon, true);
                 createCDDriveContextMenu(&id);
                 createContextMenuFromRegistry(&id);
             }
@@ -390,27 +480,109 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         case LVN_GETDISPINFO: {
             NMLVDISPINFO* nmlvdi = (NMLVDISPINFO*)nmhdr;
             UINT mask = nmlvdi->item.mask;
+            if (!items || nmlvdi->item.iItem < 0 || nmlvdi->item.iItem >= numItems) break;
             struct ListItem* item = &items[nmlvdi->item.iItem];
             
             if (!item->loaded) {
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(item->node, path);
-                
-                struct FileInfo fi = {0};
-                getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
-
-                if (item->node->type == TYPE_FILE) {
-                    formatFileSize(item->size, item->formattedSize);
+                // 使用图标缓存优化
+                if (item->node->type == TYPE_DIR) {
+                    // 目录图标缓存
+                    if (!folderIconCached) {
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        struct FileInfo fi = {0};
+                        getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
+                        folderIconIndex = fi.icon;
+                        folderIconCached = 1;
+                        wcscpy_s(item->type, 80, lc_str.folder);
+                    }
+                    item->icon = folderIconIndex;
+                    wcscpy_s(item->type, 80, lc_str.folder);
+                }
+                else if (item->node->type == TYPE_FILE) {
+                    // 获取扩展名
+                    wchar_t* ext = wcsrchr(item->node->name, L'.');
                     
+                    // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
+                    bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+                    
+                    int cachedIcon = -1;
+                    if (!isExeOrLnk) {
+                        cachedIcon = findExtIconCache(ext);
+                        // 如果内存缓存未命中，尝试从注册表加载
+                        if (cachedIcon < 0 && ext) {
+                            int regIcon = -1;
+                            if (loadExtIconCacheFromRegistry(ext, &regIcon)) {
+                                // 同时加入内存缓存，下次更快
+                                addExtIconCache(ext, regIcon, NULL);
+                                cachedIcon = regIcon;
+                            }
+                        }
+                    } else {
+                        // exe/lnk 使用路径缓存
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        cachedIcon = findExeIconCache(path);
+                    }
+                    
+                    if (cachedIcon >= 0) {
+                        item->icon = cachedIcon;
+                        // 缓存命中时需要同时设置文件类型名称，否则类型列会显示空白
+                        if (isExeOrLnk) {
+                            // exe/lnk 的类型由扩展名决定
+                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
+                        } else if (ext) {
+                            // 从缓存获取类型名称
+                            wchar_t* cachedType = findExtTypeNameCache(ext);
+                            if (cachedType && cachedType[0] != L'\0') {
+                                wcscpy_s(item->type, 80, cachedType);
+                            } else {
+                                // 缓存项没有类型名（如从注册表加载），从扩展名生成
+                                wchar_t value[30] = {0};
+                                strToUpper(ext + 1, value);
+                                swprintf_s(item->type, 80, lc_str.fmt_file, value);
+                            }
+                        }
+                    }
+                    else {
+                        wchar_t path[MAX_PATH] = {0};
+                        getFileNodePath(item->node, path);
+                        
+                        struct FileInfo fi = {0};
+                        getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                        item->icon = fi.icon;
+                        
+                        if (isExeOrLnk) {
+                            addExeIconCache(path, fi.icon);
+                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
+                        } else {
+                            wcscpy_s(item->type, 80, fi.typeName);
+                            if (ext) {
+                                addExtIconCache(ext, fi.icon, fi.typeName);
+                                // 持久化到注册表，跨会话复用
+                                saveExtIconCacheToRegistry(ext, fi.icon);
+                            }
+                        }
+                    }
+                    
+                    // 格式化文件大小和日期
+                    formatFileSize(item->size, item->formattedSize);
                     SYSTEMTIME systemTime = {0};
                     FILETIME localFiletime;
                     if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
                         formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
                     }
                 }
-
-                item->icon = fi.icon;
-                wcscpy_s(item->type, 80, fi.typeName);
+                else {
+                    // 其他类型（驱动器等）
+                    wchar_t path[MAX_PATH] = {0};
+                    getFileNodePath(item->node, path);
+                    struct FileInfo fi = {0};
+                    getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
+                    item->icon = fi.icon;
+                    wcscpy_s(item->type, 80, fi.typeName);
+                }
+                
                 item->loaded = true;                
             }
             
@@ -470,7 +642,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         case NM_DBLCLK: {
             NMITEMACTIVATE* nmia = (NMITEMACTIVATE*)nmhdr;
             if (nmia->iItem == -1 || nmia->iSubItem != 0) break;
-
+            
+            if (!items || nmia->iItem >= numItems) break;
             struct ListItem* item = &items[nmia->iItem];            
             openFileNode(item->node);
             break;
@@ -573,9 +746,15 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     }
 
     SetWindowLongPtr(hwndContentView, GWL_STYLE, wndstyle);
+    // 强制 ListView 识别样式变更并重新布局
+    SetWindowPos(hwndContentView, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
     viewStyle = newViewStyle;
     refreshContentView();
+    // 视图样式切换时（大/小图标），图标索引在系统图像列表中不同，需要清空缓存重新获取
+    extCacheCount = 0;
+    folderIconCached = 0;
+    exeIconCacheCount = 0;
 }
 
 void createLVColumns() {
@@ -614,7 +793,9 @@ void createContentView() {
     cmiPasteShortcut.text = lc_str.paste_shortcut;
     cmiNewFolder.text = lc_str.new_folder;
     cmiNewFile.text = lc_str.new_file;
+    cmiLoadISOImage.text = NULL;
     cmiUnloadISOImage.text = lc_str.unload_iso_image;
+    cmiShowIcon.text = lc_str.show_icon;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
     createLVColumns();
@@ -737,28 +918,32 @@ void onMenuItemSelectAllClick() {
     SetFocus(hwndContentView);
 }
 
+void onBookmarkButtonClick() {
+    addCurrentPathToBookmark();
+}
+
 static void onMenuItemLoadISOImageClick() {
     if (numSelectedItems != 1) {
         MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
         return;
     }
-    
+
     wchar_t currentISOPath[MAX_PATH] = {0};
     HKEY hkey;
     getFileNodePath(selectedItems[0], currentISOPath);
-    
-    if (!isPathExists(currentISOPath) || !(hasFileExtension(currentISOPath, L"iso") || 
+
+    if (!isPathExists(currentISOPath) || !(hasFileExtension(currentISOPath, L"iso") ||
                                            hasFileExtension(currentISOPath, L"bin") ||
                                            hasFileExtension(currentISOPath, L"cue"))) {
         MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
         return;
     }
-    
+
     if (RegCreateKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
         RegSetValue(hkey, NULL, REG_SZ, currentISOPath, (wcslen(currentISOPath) + 1) * sizeof(wchar_t));
         RegCloseKey(hkey);
     }
-    
+
     clearDirectory(L"X:");
     extractFilesFromISOImage(currentISOPath, L"X:\\");
 }
@@ -767,6 +952,157 @@ static void onMenuItemUnloadISOImageClick() {
     clearDirectory(L"X:");
     RegDeleteKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath");
     navigateRefresh();
+}
+
+// Icon viewer dialog
+static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            break;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            if (hIconLarge) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                int cx = rc.right - rc.left;
+                int cy = rc.bottom - rc.top;
+                
+                // Draw icon centered and scaled to fit window
+                int iconCx = min(cx - 20, 256);
+                int iconCy = min(cy - 20, 256);
+                
+                // Maintain aspect ratio - make it square
+                int size = min(iconCx, iconCy);
+                
+                // Center the icon
+                int x = (cx - size) / 2;
+                int y = (cy - size) / 2;
+                
+                DrawIconEx(hdc, x, y, hIconLarge, size, size, 0, NULL, DI_NORMAL);
+            }
+            
+            EndPaint(hwnd, &ps);
+            break;
+        }
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH hBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+            FillRect(hdc, &rc, hBrush);
+            return 1;
+        }
+        case WM_CLOSE: {
+            // Destroy icon resource
+            if (hIconLarge) {
+                DestroyIcon(hIconLarge);
+                hIconLarge = NULL;
+            }
+            hwndIconViewer = NULL;
+            DestroyWindow(hwnd);
+            break;
+        }
+        case WM_DESTROY: {
+            // DO NOT call PostQuitMessage here - that would kill the main app
+            // Just clean up, the window is already being destroyed by WM_CLOSE
+            break;
+        }
+        default:
+            return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+
+static void registerIconViewerClass() {
+    WNDCLASSEX wc = {0};
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = IconViewerWndProc;
+    wc.hInstance = globalHInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    wc.lpszClassName = L"IconViewerClass";
+    RegisterClassEx(&wc);
+}
+
+static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
+    // Try to extract 256x256 icon using PrivateExtractIconsW
+    UINT iconCount = PrivateExtractIconsW(filePath, 0, 256, 256, &hIconLarge, NULL, 1, 0);
+    
+    // Fallback to SHGetFileInfo if PrivateExtractIcons failed
+    if (iconCount == 0 || !hIconLarge) {
+        SHFILEINFO sfi = {0};
+        DWORD flags = SHGFI_ICON | SHGFI_LARGEICON;
+        
+        if (!SHGetFileInfo(filePath, 0, &sfi, sizeof(SHFILEINFO), flags) || !sfi.hIcon) {
+            MessageBox(hwndMain, L"无法提取文件图标", lc_str.alert, MB_OK);
+            return;
+        }
+        hIconLarge = sfi.hIcon;
+    }
+    
+    // Build window title
+    wmemset(iconViewerTitle, 0, MAX_PATH);
+    swprintf_s(iconViewerTitle, MAX_PATH, L"%ls - %ls", fileName, lc_str.show_icon);
+    
+    // Register window class if not already registered
+    WNDCLASSEX wcCheck = {0};
+    if (!GetClassInfoEx(globalHInstance, L"IconViewerClass", &wcCheck)) {
+        registerIconViewerClass();
+    }
+    
+    // Calculate window size to fit 256x256 icon with padding
+    int winWidth = 300;
+    int winHeight = 330;
+    
+    // Center window on screen
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int x = (screenWidth - winWidth) / 2;
+    int y = (screenHeight - winHeight) / 2;
+    
+    // Create window
+    hwndIconViewer = CreateWindowEx(
+        0,
+        L"IconViewerClass",
+        iconViewerTitle,
+        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
+        x, y, winWidth, winHeight,
+        hwndMain,
+        NULL,
+        globalHInstance,
+        NULL
+    );
+    
+    if (!hwndIconViewer) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+        MessageBox(hwndMain, L"无法创建图标查看窗口", lc_str.alert, MB_OK);
+        return;
+    }
+    
+    ShowWindow(hwndIconViewer, SW_SHOW);
+    UpdateWindow(hwndIconViewer);
+}
+
+static void onMenuItemShowIconClick() {
+    if (numSelectedItems != 1 || !selectedItems[0]) return;
+    
+    struct FileNode* node = selectedItems[0];
+    if (!node || !node->name) return;
+    
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(node, path);
+    
+    if (!isPathExists(path)) {
+        MessageBox(hwndMain, L"文件不存在", lc_str.alert, MB_OK);
+        return;
+    }
+    
+    showIconInNewWindow(path, node->name);
 }
 
 static int compareType(const void* a, const void* b) {
@@ -799,6 +1135,15 @@ static int compareDate(const void* a, const void* b) {
     return res;
 }
 
+void clearIconCaches() {
+    // 清空内存中的图标缓存
+    extCacheCount = 0;
+    folderIconCached = 0;
+    exeIconCacheCount = 0;
+    
+    // 清空注册表中的持久化图标缓存
+    RegDeleteTree(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH);
+}
 void sortItems() {
     switch (sortColumnIdx) {
         case COLUMN_NAME_IDX:
@@ -823,17 +1168,67 @@ void refreshContentView() {
         return;
     }
     
-    clearContentView();
-    UpdateWindow(hwndContentView);
+    // 清空项目数据（保留列，避免在详细信息视图中删除/重建列导致的闪烁）
+    ListView_SetItemCountEx(hwndContentView, 0, 0);
     
+    if (items) {
+        for (int i = 0; i < numItems; i++) {
+            if (items[i].path) {
+                free(items[i].path);
+                items[i].path = NULL;
+            }
+        }
+        free(items);
+        items = NULL;
+    }
+    numItems = 0;
+    freeMenuItems();
+    
+    // 清理图标查看器资源
+    if (hIconLarge) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+    }
+    if (hIconSmall) {
+        DestroyIcon(hIconSmall);
+        hIconSmall = NULL;
+    }
+    
+    // 仅在非详细信息视图中删除列（避免列闪烁）
+    if (viewStyle != STYLE_DETAILS) {
+        HWND hHeader = ListView_GetHeader(hwndContentView);
+        if (hHeader) {
+            int numCols = Header_GetItemCount(hHeader);
+            for (int i = numCols - 1; i >= 0; i--) {
+                ListView_DeleteColumn(hwndContentView, i);
+            }
+        } else {
+            ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);
+        }
+    }
+    
+    // 详细信息视图：保留列（避免删除/重建导致的闪烁），仅在首次进入时创建
+    if (viewStyle == STYLE_DETAILS) {
+        HWND hHeader = ListView_GetHeader(hwndContentView);
+        if (!hHeader || Header_GetItemCount(hHeader) == 0) {
+            createLVColumns();
+        }
+    }
+
     struct FileNode* child = currPathFileNode->children;
     
-    numItems = getChildNodeCount(currPathFileNode);
-    items = calloc(numItems, sizeof(struct ListItem));
-    int index = 0;
+    // 单次遍历：计数并填充
+    int capacity = 64;
+    numItems = 0;
+    items = malloc(capacity * sizeof(struct ListItem));
     
     while (child) {
-        struct ListItem* item = &items[index++];
+        if (numItems >= capacity) {
+            capacity *= 2;
+            items = realloc(items, capacity * sizeof(struct ListItem));
+        }
+        struct ListItem* item = &items[numItems++];
+        memset(item, 0, sizeof(struct ListItem));
         item->node = child;
         item->loaded = false;
 
@@ -842,16 +1237,31 @@ void refreshContentView() {
         child = child->sibling;
     }
 
+    // 图标缓存保留（不清空），以加速相邻导航
+    // 视图切换时更新图像列表
     HIMAGELIST himlBig, himlSmall;
     Shell_GetImageLists(&himlBig, &himlSmall);
     
     if (viewStyle == STYLE_LARGE_ICON) {
+        currentImageList = himlBig;
         ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
     }
-    else ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
+    else {
+        currentImageList = himlSmall;
+        ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
+    }
 
     if (sortColumnIdx != -1) sortItems();
     ListView_SetItemCountEx(hwndContentView, numItems, 0);
     
+    // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时
+    // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
+    // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
+    if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
+        ListView_Arrange(hwndContentView, LVA_DEFAULT);
+        ListView_SetItemCountEx(hwndContentView, numItems, 0);
+    }
+    
+    InvalidateRect(hwndContentView, NULL, TRUE);
     updateStatusbar();  
 }

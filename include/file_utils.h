@@ -11,7 +11,9 @@ enum FileType {
     TYPE_DESKTOP,
     TYPE_PERSONAL,
     TYPE_USERPROFILE,
-    TYPE_COMPUTER
+    TYPE_COMPUTER,
+    TYPE_BOOKMARK_ROOT,
+    TYPE_BOOKMARK_ITEM
 };
 
 struct FileInfo {
@@ -102,25 +104,59 @@ static inline bool hasFileExtension(wchar_t* path, wchar_t* targetExt) {
     return ext && wcsicmp(ext, targetExt) == 0;
 }
 
+static inline int getTreeIcon(wchar_t* path, enum FileType type) {
+    SHFILEINFO sfi = {0};
+    DWORD flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+
+    if (type == TYPE_DIR) {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    else if (type == TYPE_DRIVE) {
+        wchar_t drivePath[4] = {0};
+        swprintf_s(drivePath, 4, L"%lc:\\", path[0]);
+        SHGetFileInfo(drivePath, 0, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    else {
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    return sfi.iIcon;
+}
+
 static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon, struct FileInfo* result) {
     SHFILEINFO sfi = {0};
     result->icon = 0;
-    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? SHGFI_ICON : SHGFI_SMALLICON);
-    if (SHGetFileInfo(path, 0, &sfi, sizeof(SHFILEINFO), flags)) {
-        result->icon = sfi.iIcon;
+    
+    DWORD flags = SHGFI_SYSICONINDEX | (largeIcon ? 0 : SHGFI_SMALLICON);
+    
+    if (type == TYPE_DIR) {
+        // 目录使用 USEFILEATTRIBUTES 即可
+        flags |= SHGFI_USEFILEATTRIBUTES;
+        SHGetFileInfo(path, FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
     }
-    else {        
-        if (type == TYPE_DIR) {
-            flags |= SHGFI_USEFILEATTRIBUTES;
-            SHGetFileInfo(L"dir", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(SHFILEINFO), flags);
-            result->icon = sfi.iIcon;
+    else if (type == TYPE_DRIVE) {
+        // 驱动器路径必须以反斜杠结尾（如 "C:\"），否则无法正确获取驱动器图标
+        wchar_t drivePath[4] = {0};
+        swprintf_s(drivePath, 4, L"%lc:\\", path[0]);
+        SHGetFileInfo(drivePath, 0, &sfi, sizeof(SHFILEINFO), flags);
+    }
+    else {
+        // 检查是否为 exe 或 lnk 文件，这些需要实际访问文件获取内嵌图标
+        wchar_t* ext = wcsrchr(path, L'.');
+        bool needRealAccess = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+        
+        if (needRealAccess) {
+            // exe/lnk 需要访问文件获取真实图标
+            SHGetFileInfo(path, 0, &sfi, sizeof(SHFILEINFO), flags);
         }
-        else if (type == TYPE_FILE) {
+        else {
+            // 其他文件类型使用 USEFILEATTRIBUTES 快速获取
             flags |= SHGFI_USEFILEATTRIBUTES;
             SHGetFileInfo(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(SHFILEINFO), flags);
-            result->icon = sfi.iIcon;
-        }       
+        }
     }
+    result->icon = sfi.iIcon;
     
     switch (type) {
         case TYPE_DIR:
