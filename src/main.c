@@ -87,6 +87,13 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
                   EndDialog(hwndDlg, (INT_PTR) LOWORD(wParam));
                   return (INT_PTR) TRUE;
                 }
+                case IDC_APP_URL: {
+                    if (HIWORD(wParam) == STN_CLICKED) {
+                        ShellExecuteW(NULL, L"open", L"https://github.com/Waim908/wfm", NULL, NULL, SW_SHOW);
+                        return (INT_PTR) TRUE;
+                    }
+                    break;
+                }
             }
             break;
         }
@@ -100,8 +107,27 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_NAME), lc_str.app_name);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_VERSION), lc_str.app_version);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_DEV_NAME), lc_str.app_dev_name);
-            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_MOD_NAME), L"Modify by Waim908");
+            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_MOD_NAME), lc_str.app_mod_name);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_URL), lc_str.app_url);
             return (INT_PTR)TRUE;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wParam;
+            HWND hwndCtrl = (HWND)lParam;
+            if (GetDlgCtrlID(hwndCtrl) == IDC_APP_URL) {
+                SetTextColor(hdc, RGB(0, 0, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                return (INT_PTR)GetStockObject(HOLLOW_BRUSH);
+            }
+            break;
+        }
+        case WM_SETCURSOR: {
+            if ((HWND)wParam == GetDlgItem(hwndDlg, IDC_APP_URL)) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                SetWindowLongPtr(hwndDlg, DWLP_MSGRESULT, TRUE);
+                return TRUE;
+            }
+            break;
         }
     }
 

@@ -7,6 +7,8 @@ static inline void loadStrings_ru() {
     lc_str.app_name = APP_NAME;
     lc_str.app_version = L"Версия " APP_VERSION;
     lc_str.app_dev_name = L"от " APP_DEV_NAME;
+    lc_str.app_mod_name = L"Модификация от Waim908";
+    lc_str.app_url = L"https://github.com/Waim908/wfm";
     lc_str.application = L"Приложение";
     lc_str.shortcut = L"Ярлык";
     lc_str.file = L"Файл";

@@ -10,6 +10,7 @@
 #define IDC_APP_VERSION 110
 #define IDC_APP_DEV_NAME 111
 #define IDC_APP_MOD_NAME 123
+#define IDC_APP_URL 124
 #define IDD_FILE_ACTION 112
 #define IDC_PRELOADER 113
 #define IDI_SEARCH 114
@@ -73,7 +74,7 @@ void freeUIcons();
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5"
+#define APP_VERSION L"1.5-1"
 #define APP_DEV_NAME L"BrunoSX"
 
 #ifndef RESOURCE_H
@@ -83,6 +84,8 @@ struct LC_STR {
     wchar_t* app_name;
     wchar_t* app_version;
     wchar_t* app_dev_name;
+    wchar_t* app_mod_name;
+    wchar_t* app_url;
     wchar_t* application;
     wchar_t* shortcut;
     wchar_t* file;

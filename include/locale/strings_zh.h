@@ -7,6 +7,8 @@ static inline void loadStrings_zh() {
     lc_str.app_name = APP_NAME;
     lc_str.app_version = L"版本 " APP_VERSION;
     lc_str.app_dev_name = L"作者：" APP_DEV_NAME;
+    lc_str.app_mod_name = L"修改者：Waim908";
+    lc_str.app_url = L"https://github.com/Waim908/wfm";
     lc_str.application = L"应用程序";
     lc_str.shortcut = L"快捷方式";
     lc_str.file = L"文件";

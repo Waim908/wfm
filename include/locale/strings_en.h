@@ -7,6 +7,8 @@ static inline void loadStrings_en() {
     lc_str.app_name = APP_NAME;
     lc_str.app_version = L"Version " APP_VERSION;
     lc_str.app_dev_name = L"by " APP_DEV_NAME;
+    lc_str.app_mod_name = L"Modify by Waim908";
+    lc_str.app_url = L"https://github.com/Waim908/wfm";
     lc_str.application = L"Application";
     lc_str.shortcut = L"Shortcut";
     lc_str.file = L"File";
