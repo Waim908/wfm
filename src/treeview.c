@@ -347,6 +347,8 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
 void createTreeview() {
     hwndTreeview = CreateWindowEx(0, WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
 
+    // 初始化私有图像列表（替代共享系统列表，避免图标污染问题）
+
     updateTreeItems();
     UpdateWindow(hwndTreeview);
 }

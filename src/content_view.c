@@ -197,11 +197,8 @@ void clearContentView() {
     }
     numItems = 0;
     
-    // 清理图标缓存
-    extCacheCount = 0;
-    folderIconCached = 0;
-    exeIconCacheCount = 0;
-    
+    // 注意：图标缓存不再在此清空，以保持跨导航的加速效果
+    // 只有在视图样式切换时才需要重建图像列表
     freeMenuItems();
     
     // Cleanup icon viewer resources
@@ -495,6 +492,15 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     int cachedIcon = -1;
                     if (!isExeOrLnk) {
                         cachedIcon = findExtIconCache(ext);
+                        // 如果内存缓存未命中，尝试从注册表加载
+                        if (cachedIcon < 0 && ext) {
+                            int regIcon = -1;
+                            if (loadExtIconCacheFromRegistry(ext, &regIcon)) {
+                                // 同时加入内存缓存，下次更快
+                                addExtIconCache(ext, regIcon);
+                                cachedIcon = regIcon;
+                            }
+                        }
                     } else {
                         // exe/lnk 使用路径缓存
                         wchar_t path[MAX_PATH] = {0};
@@ -518,7 +524,11 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                             wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
                         } else {
                             wcscpy_s(item->type, 80, fi.typeName);
-                            if (ext) addExtIconCache(ext, fi.icon);
+                            if (ext) {
+                                addExtIconCache(ext, fi.icon);
+                                // 持久化到注册表，跨会话复用
+                                saveExtIconCacheToRegistry(ext, fi.icon);
+                            }
                         }
                     }
                     
@@ -708,6 +718,10 @@ void setViewStyle(enum ViewStyle newViewStyle) {
 
     viewStyle = newViewStyle;
     refreshContentView();
+    // 视图样式切换时（大/小图标），图标索引在系统图像列表中不同，需要清空缓存重新获取
+    extCacheCount = 0;
+    folderIconCached = 0;
+    exeIconCacheCount = 0;
 }
 
 void createLVColumns() {
@@ -1139,11 +1153,8 @@ void refreshContentView() {
         child = child->sibling;
     }
 
-    // 清除图标缓存
-    exeIconCacheCount = 0;
-    folderIconCached = 0;
-    extCacheCount = 0;
-    
+    // 图标缓存保留（不清空），以加速相邻导航
+    // 视图切换时更新图像列表
     HIMAGELIST himlBig, himlSmall;
     Shell_GetImageLists(&himlBig, &himlSmall);
     
