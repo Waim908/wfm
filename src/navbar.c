@@ -134,12 +134,20 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
         case WM_SIZE: {
             RECT rect;
-            GetClientRect(hwnd, &rect);     
-            
+            GetClientRect(hwnd, &rect);
+
             const int margin = 4;
             const int searchEditWidth = 160;
             const int editWrapperHeight = buttonSize - margin;
-            const int addrEditHeight = 16;
+
+            HDC hdc = GetDC(hwnd);
+            HGDIOBJ prevFont = SelectObject(hdc, hGuiFont);
+            SIZE textSize;
+            GetTextExtentPoint32W(hdc, L"Ay", 2, &textSize);
+            int addrEditHeight = textSize.cy + 4;
+            SelectObject(hdc, prevFont);
+            ReleaseDC(hwnd, hdc);
+
             const int addrEditY = (editWrapperHeight - addrEditHeight) / 2;
             
             int offsetX = rect.right - (margin + buttonSize);

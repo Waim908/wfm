@@ -7,7 +7,7 @@ ifdef USE_LIBCDIO
 LDFLAGS+=./libcdio.dll
 CFLAGS+=-DUSE_LIBCDIO
 endif
-CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0600 -Wall
+CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall
 
 # Detect OS and set compiler/toolchain accordingly
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)

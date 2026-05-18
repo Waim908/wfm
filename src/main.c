@@ -15,6 +15,27 @@ HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
 HFONT hGuiFont = NULL;
 struct LC_STR lc_str = {0};
+
+void updateGuiFont() {
+    if (hGuiFont) DeleteObject(hGuiFont);
+
+    NONCLIENTMETRICS ncm = {0};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    hGuiFont = CreateFontIndirect(&ncm.lfMessageFont);
+
+    // Update font on all controls
+    SendMessage(hwndToolbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndTreeview, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+
+    // Trigger navbar to recalculate layout with new font
+    if (hwndNavbar) {
+        InvalidateRect(hwndNavbar, NULL, TRUE);
+        SendMessage(hwndNavbar, WM_SIZE, 0, 0);
+    }
+}
 HICON uiIcons[NUM_UI_ICONS] = {0};
 BOOL g_noLibcdio = FALSE;
 
@@ -200,7 +221,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return treeviewNotify(nmhdr);
             }
             else return 0;
-        }       
+        }
+        case WM_DPICHANGED: {
+            updateGuiFont();
+            return 0;
+        }
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
