@@ -2,4 +2,5 @@
 /libcdio
 *.exe
 *.exe.dat
+*.zip
 wine-10.10-custom/

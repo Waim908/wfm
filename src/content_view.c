@@ -11,6 +11,7 @@
 static struct {
     wchar_t ext[16];
     int icon;
+    wchar_t typeName[64];
 } extIconCache[EXT_CACHE_SIZE];
 static int extCacheCount = 0;
 
@@ -55,11 +56,27 @@ static int findExtIconCache(wchar_t* ext) {
     return -1;
 }
 
+// 从扩展名缓存中获取类型名称
+static wchar_t* findExtTypeNameCache(wchar_t* ext) {
+    if (!ext) return NULL;
+    for (int i = 0; i < extCacheCount; i++) {
+        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
+            return extIconCache[i].typeName;
+        }
+    }
+    return NULL;
+}
+
 // 添加扩展名图标缓存
-static void addExtIconCache(wchar_t* ext, int icon) {
+static void addExtIconCache(wchar_t* ext, int icon, wchar_t* typeName) {
     if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
     wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
     extIconCache[extCacheCount].icon = icon;
+    if (typeName) {
+        wcsncpy_s(extIconCache[extCacheCount].typeName, 64, typeName, 63);
+    } else {
+        extIconCache[extCacheCount].typeName[0] = L'\0';
+    }
     extCacheCount++;
 }
 
@@ -497,7 +514,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                             int regIcon = -1;
                             if (loadExtIconCacheFromRegistry(ext, &regIcon)) {
                                 // 同时加入内存缓存，下次更快
-                                addExtIconCache(ext, regIcon);
+                                addExtIconCache(ext, regIcon, NULL);
                                 cachedIcon = regIcon;
                             }
                         }
@@ -510,6 +527,22 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     
                     if (cachedIcon >= 0) {
                         item->icon = cachedIcon;
+                        // 缓存命中时需要同时设置文件类型名称，否则类型列会显示空白
+                        if (isExeOrLnk) {
+                            // exe/lnk 的类型由扩展名决定
+                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
+                        } else if (ext) {
+                            // 从缓存获取类型名称
+                            wchar_t* cachedType = findExtTypeNameCache(ext);
+                            if (cachedType && cachedType[0] != L'\0') {
+                                wcscpy_s(item->type, 80, cachedType);
+                            } else {
+                                // 缓存项没有类型名（如从注册表加载），从扩展名生成
+                                wchar_t value[30] = {0};
+                                strToUpper(ext + 1, value);
+                                swprintf_s(item->type, 80, lc_str.fmt_file, value);
+                            }
+                        }
                     }
                     else {
                         wchar_t path[MAX_PATH] = {0};
@@ -525,7 +558,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         } else {
                             wcscpy_s(item->type, 80, fi.typeName);
                             if (ext) {
-                                addExtIconCache(ext, fi.icon);
+                                addExtIconCache(ext, fi.icon, fi.typeName);
                                 // 持久化到注册表，跨会话复用
                                 saveExtIconCacheToRegistry(ext, fi.icon);
                             }
