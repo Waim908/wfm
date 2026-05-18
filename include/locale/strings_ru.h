@@ -71,6 +71,8 @@ static inline void loadStrings_ru() {
     lc_str.cancel_auto_open = L"Отменить запуск";
     lc_str.auto_open_path_not_found = L"Не удалось открыть путь при запуске (не найден): %ls";
 
+    lc_str.clear_icon_cache = L"Очистить Кэш Иконок";
+
     lc_str.fmt_file = L"%ls Файл";
 
     lc_str.msg_invalid_iso_image_file = L"Неверный файл образа ISO!";

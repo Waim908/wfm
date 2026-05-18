@@ -71,6 +71,8 @@ static inline void loadStrings_en() {
     lc_str.cancel_auto_open = L"Cancel Startup";
     lc_str.auto_open_path_not_found = L"Cannot open path on startup (not found): %ls";
 
+    lc_str.clear_icon_cache = L"Clear Icon Cache";
+
     lc_str.fmt_file = L"%ls File";
 
     lc_str.msg_invalid_iso_image_file = L"Invalid ISO Image file!";

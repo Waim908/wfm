@@ -47,6 +47,7 @@
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
 #define ID_SHOW_ICON 312
+#define ID_VIEW_CLEAR_ICON_CACHE 313
 
 #define ICON_UP          0
 #define ICON_COPY        1
@@ -157,6 +158,7 @@ struct LC_STR {
     wchar_t* msg_confirm_delete_item;
     wchar_t* msg_confirm_delete_multiple_items;
     wchar_t* msg_confirm_exit_app;
+    wchar_t* clear_icon_cache;
 };
 
 extern struct LC_STR lc_str;

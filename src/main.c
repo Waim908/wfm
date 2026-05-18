@@ -143,6 +143,10 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_DETAILS:
             setViewStyle(STYLE_DETAILS);
             break;                      
+        case ID_VIEW_CLEAR_ICON_CACHE:
+            clearIconCaches();
+            navigateRefresh();
+            break;
     }   
 }
 
@@ -233,7 +237,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 void navigateToFileNode(struct FileNode* node) {
     if (node) {
         clearAddrButtons();
-        clearContentView();
         setCurrPathFileNode(node);
         navigateRefresh();
     }
@@ -242,7 +245,6 @@ void navigateToFileNode(struct FileNode* node) {
 void navigateToPath(wchar_t* path) {
     if (path) {
         clearAddrButtons();
-        clearContentView();   
         setCurrPathFromString(path);
         navigateRefresh();
     }
@@ -251,7 +253,6 @@ void navigateToPath(wchar_t* path) {
 void navigateUp() {
     if (currPathFileNode->parent) {
         clearAddrButtons();
-        clearContentView();
         setCurrPathFileNode(currPathFileNode->parent);
         navigateRefresh();
     }
@@ -295,6 +296,8 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_STRING, ID_VIEW_LIST, lc_str.list);
     AppendMenu(hmView, MF_STRING, ID_VIEW_DETAILS, lc_str.details);
     
+    AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
     HMENU hmHelp = CreatePopupMenu();
     AppendMenu(hmHelp, MF_STRING, ID_HELP_ABOUT, lc_str.about);
     

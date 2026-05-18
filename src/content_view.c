@@ -1102,6 +1102,15 @@ static int compareDate(const void* a, const void* b) {
     return res;
 }
 
+void clearIconCaches() {
+    // 清空内存中的图标缓存
+    extCacheCount = 0;
+    folderIconCached = 0;
+    exeIconCacheCount = 0;
+    
+    // 清空注册表中的持久化图标缓存
+    RegDeleteTree(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH);
+}
 void sortItems() {
     switch (sortColumnIdx) {
         case COLUMN_NAME_IDX:
@@ -1126,10 +1135,52 @@ void refreshContentView() {
         return;
     }
     
-    clearContentView();
-
-    // 在REPORT视图下重建列（clearContentView已删除所有列）
-    if (viewStyle == STYLE_DETAILS) createLVColumns();
+    // 清空项目数据（保留列，避免在详细信息视图中删除/重建列导致的闪烁）
+    ListView_SetItemCountEx(hwndContentView, 0, 0);
+    
+    if (items) {
+        for (int i = 0; i < numItems; i++) {
+            if (items[i].path) {
+                free(items[i].path);
+                items[i].path = NULL;
+            }
+        }
+        free(items);
+        items = NULL;
+    }
+    numItems = 0;
+    freeMenuItems();
+    
+    // 清理图标查看器资源
+    if (hIconLarge) {
+        DestroyIcon(hIconLarge);
+        hIconLarge = NULL;
+    }
+    if (hIconSmall) {
+        DestroyIcon(hIconSmall);
+        hIconSmall = NULL;
+    }
+    
+    // 仅在非详细信息视图中删除列（避免列闪烁）
+    if (viewStyle != STYLE_DETAILS) {
+        HWND hHeader = ListView_GetHeader(hwndContentView);
+        if (hHeader) {
+            int numCols = Header_GetItemCount(hHeader);
+            for (int i = numCols - 1; i >= 0; i--) {
+                ListView_DeleteColumn(hwndContentView, i);
+            }
+        } else {
+            ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);
+        }
+    }
+    
+    // 详细信息视图：保留列（避免删除/重建导致的闪烁），仅在首次进入时创建
+    if (viewStyle == STYLE_DETAILS) {
+        HWND hHeader = ListView_GetHeader(hwndContentView);
+        if (!hHeader || Header_GetItemCount(hHeader) == 0) {
+            createLVColumns();
+        }
+    }
 
     struct FileNode* child = currPathFileNode->children;
     

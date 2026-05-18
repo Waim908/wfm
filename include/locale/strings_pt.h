@@ -70,6 +70,8 @@ static inline void loadStrings_pt() {
     lc_str.cancel_auto_open = L"Cancelar Inicialização";
     lc_str.auto_open_path_not_found = L"Não foi possível abrir o caminho na inicialização (não encontrado): %ls";
 
+    lc_str.clear_icon_cache = L"Limpar Cache de Ícones";
+
     lc_str.fmt_file = L"Arquivo %ls";
 
     lc_str.msg_invalid_iso_image_file = L"Arquivo de Imagem ISO inválido!";

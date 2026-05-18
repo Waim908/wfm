@@ -71,6 +71,8 @@ static inline void loadStrings_zh() {
     lc_str.cancel_auto_open = L"取消启动";
     lc_str.auto_open_path_not_found = L"启动时无法打开路径（不存在）：%ls";
 
+    lc_str.clear_icon_cache = L"清除图标缓存";
+
     lc_str.fmt_file = L"%ls 文件";
 
     lc_str.msg_invalid_iso_image_file = L"无效的 ISO 映像文件！";
