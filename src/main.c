@@ -35,6 +35,7 @@ static const struct IconMapping iconMap[] = {
     {ICON_REFRESH, IDI_REFRESH},
     {ICON_SEARCH, IDI_SEARCH},
     {ICON_NAV_ARROW, IDI_NAV_ARROW},
+    {ICON_BOOKMARK, IDI_BOOKMARK},
 };
 
 void preloadIcons() {
@@ -311,6 +312,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     preloadIcons();
     
     loadBookmarks();
+    loadAutoOpenBookmark();
 
     NONCLIENTMETRICS ncm = {0};
     ncm.cbSize = sizeof(ncm);
@@ -365,6 +367,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         navigateToPath(navigatePath);
     }
     else navigateRefresh();
+    
+    // Open auto-open bookmark after UI is ready
+    openAutoOpenBookmark();
 
     ShowWindow(hwndMain, SW_SHOW);
     UpdateWindow(hwndMain);

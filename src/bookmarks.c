@@ -3,6 +3,7 @@
 
 struct Bookmark g_bookmarks[MAX_BOOKMARKS];
 int g_bookmarkCount = 0;
+int g_autoOpenBookmarkIndex = -1;  // -1 means no auto-open bookmark
 
 extern HWND hwndTreeview;
 extern HINSTANCE globalHInstance;
@@ -58,6 +59,81 @@ void saveBookmarks() {
     }
     
     RegCloseKey(hkey);
+}
+
+void loadAutoOpenBookmark() {
+    g_autoOpenBookmarkIndex = -1;
+    
+    HKEY hkey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, AUTOOPEN_REGISTRY_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
+        return;
+    }
+    
+    wchar_t valueData[MAX_PATH] = {0};
+    DWORD valueDataLen = MAX_PATH * sizeof(wchar_t);
+    DWORD type = 0;
+    
+    LONG result = RegQueryValueEx(hkey, L"Path", NULL, &type, (LPBYTE)valueData, &valueDataLen);
+    if (result == ERROR_SUCCESS && type == REG_SZ && valueDataLen > 0) {
+        // Find matching bookmark index
+        g_autoOpenBookmarkIndex = findBookmark(valueData);
+    }
+    
+    RegCloseKey(hkey);
+}
+
+void saveAutoOpenBookmark() {
+    HKEY hkey;
+    
+    // Delete existing key
+    RegDeleteTree(HKEY_CURRENT_USER, AUTOOPEN_REGISTRY_PATH);
+    
+    if (g_autoOpenBookmarkIndex < 0 || g_autoOpenBookmarkIndex >= g_bookmarkCount) {
+        return;
+    }
+    
+    // Create new key and save the path
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, AUTOOPEN_REGISTRY_PATH, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS) {
+        return;
+    }
+    
+    RegSetValueEx(hkey, L"Path", 0, REG_SZ, (const BYTE*)g_bookmarks[g_autoOpenBookmarkIndex].path, (wcslen(g_bookmarks[g_autoOpenBookmarkIndex].path) + 1) * sizeof(wchar_t));
+    
+    RegCloseKey(hkey);
+}
+
+void setAutoOpenBookmark(int index) {
+    if (index < 0 || index >= g_bookmarkCount) return;
+    
+    // Toggle: if already set, clear it; otherwise set it
+    if (g_autoOpenBookmarkIndex == index) {
+        g_autoOpenBookmarkIndex = -1;
+    } else {
+        g_autoOpenBookmarkIndex = index;
+    }
+    
+    saveAutoOpenBookmark();
+    buildBookmarkTree();
+}
+
+void openAutoOpenBookmark() {
+    extern HWND hwndMain;
+    
+    if (g_autoOpenBookmarkIndex < 0 || g_autoOpenBookmarkIndex >= g_bookmarkCount) {
+        return;
+    }
+    
+    if (isPathExists(g_bookmarks[g_autoOpenBookmarkIndex].path)) {
+        navigateToPath(g_bookmarks[g_autoOpenBookmarkIndex].path);
+    } else {
+        // Show error for non-existent path
+        wchar_t msg[MAX_PATH + 128];
+        swprintf_s(msg, MAX_PATH + 128, lc_str.auto_open_path_not_found, g_bookmarks[g_autoOpenBookmarkIndex].path);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONWARNING);
+        // Clear the invalid auto-open setting
+        g_autoOpenBookmarkIndex = -1;
+        RegDeleteTree(HKEY_CURRENT_USER, AUTOOPEN_REGISTRY_PATH);
+    }
 }
 
 void addBookmark(const wchar_t* path) {
@@ -162,9 +238,16 @@ void buildBookmarkTree() {
         DWORD dwAttrib = GetFileAttributes(g_bookmarks[i].path);
         BOOL pathExists = (dwAttrib != INVALID_FILE_ATTRIBUTES);
         
-        // Use full path as display text
-        tvis.itemex.pszText = g_bookmarks[i].path;
-        tvis.itemex.cchTextMax = wcslen(g_bookmarks[i].path);
+        // Build display text: [启动] path for auto-open bookmark
+        wchar_t displayText[MAX_PATH + 32];
+        if (i == g_autoOpenBookmarkIndex) {
+            swprintf_s(displayText, MAX_PATH + 32, L"[启动] %ls", g_bookmarks[i].path);
+        } else {
+            wcsncpy_s(displayText, MAX_PATH + 32, g_bookmarks[i].path, MAX_PATH + 31);
+        }
+        
+        tvis.itemex.pszText = displayText;
+        tvis.itemex.cchTextMax = wcslen(displayText);
         tvis.itemex.lParam = (LPARAM)(TYPE_BOOKMARK_ITEM | (i << 16));
         
         if (pathExists) {

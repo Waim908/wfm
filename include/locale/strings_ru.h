@@ -62,10 +62,14 @@ static inline void loadStrings_ru() {
     lc_str.up = L"Вверх";
     lc_str.show_icon = L"Показать значок";
     lc_str.bookmarks = L"Закладки";
+    lc_str.bookmark = L"Закладка";
     lc_str.add_bookmark = L"Добавить в закладки";
     lc_str.remove_bookmark = L"Удалить закладку";
     lc_str.bookmark_exists = L"Этот путь уже в закладках";
     lc_str.bookmark_path_not_found = L"Путь закладки не существует: %ls";
+    lc_str.auto_open_on_start = L"Открыть при запуске";
+    lc_str.cancel_auto_open = L"Отменить запуск";
+    lc_str.auto_open_path_not_found = L"Не удалось открыть путь при запуске (не найден): %ls";
 
     lc_str.fmt_file = L"%ls Файл";
 

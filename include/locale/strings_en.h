@@ -62,10 +62,14 @@ static inline void loadStrings_en() {
     lc_str.up = L"Up";
     lc_str.show_icon = L"Show Icon";
     lc_str.bookmarks = L"Bookmarks";
+    lc_str.bookmark = L"Bookmark";
     lc_str.add_bookmark = L"Add to Bookmarks";
     lc_str.remove_bookmark = L"Remove Bookmark";
     lc_str.bookmark_exists = L"This path is already in bookmarks";
     lc_str.bookmark_path_not_found = L"Bookmarked path does not exist: %ls";
+    lc_str.auto_open_on_start = L"Open on Startup";
+    lc_str.cancel_auto_open = L"Cancel Startup";
+    lc_str.auto_open_path_not_found = L"Cannot open path on startup (not found): %ls";
 
     lc_str.fmt_file = L"%ls File";
 

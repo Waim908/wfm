@@ -62,10 +62,14 @@ static inline void loadStrings_zh() {
     lc_str.up = L"向上";
     lc_str.show_icon = L"显示图标";
     lc_str.bookmarks = L"收藏";
+    lc_str.bookmark = L"收藏";
     lc_str.add_bookmark = L"添加到收藏";
     lc_str.remove_bookmark = L"移除收藏";
     lc_str.bookmark_exists = L"该路径已在收藏列表中";
     lc_str.bookmark_path_not_found = L"收藏的路径不存在：%ls";
+    lc_str.auto_open_on_start = L"启动时打开";
+    lc_str.cancel_auto_open = L"取消启动";
+    lc_str.auto_open_path_not_found = L"启动时无法打开路径（不存在）：%ls";
 
     lc_str.fmt_file = L"%ls 文件";
 

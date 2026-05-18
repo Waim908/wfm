@@ -158,7 +158,14 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
         }
         case TVN_ITEMEXPANDED: {
             NMTREEVIEW* nmtv = (NMTREEVIEW*)nmhdr;
-            struct FileNode* node = (struct FileNode*)nmtv->itemNew.lParam;
+            LPARAM lParam = nmtv->itemNew.lParam;
+            
+            // Don't process bookmark items as FileNode
+            if (lParam == TYPE_BOOKMARK_ROOT || (lParam & 0xFFFF) == TYPE_BOOKMARK_ITEM) {
+                break;
+            }
+            
+            struct FileNode* node = (struct FileNode*)lParam;
             if (nmtv->action == TVE_COLLAPSE) {
                 treeItemCollapse(nmtv->itemNew.hItem, node);
             }
@@ -231,7 +238,17 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
                     // For bookmark root, allow adding current path
                     AppendMenuW(hMenu, MF_STRING, 1, lc_str.add_bookmark);
                 } else if ((lParam & 0xFFFF) == TYPE_BOOKMARK_ITEM) {
-                    AppendMenuW(hMenu, MF_STRING, 2, lc_str.remove_bookmark);
+                    int bookmarkIndex = (int)(lParam >> 16);
+                    if (bookmarkIndex >= 0 && bookmarkIndex < g_bookmarkCount) {
+                        // Show toggle text based on current state
+                        if (g_autoOpenBookmarkIndex == bookmarkIndex) {
+                            AppendMenuW(hMenu, MF_STRING, 3, lc_str.cancel_auto_open);
+                        } else {
+                            AppendMenuW(hMenu, MF_STRING, 3, lc_str.auto_open_on_start);
+                        }
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                        AppendMenuW(hMenu, MF_STRING, 2, lc_str.remove_bookmark);
+                    }
                 } else {
                     // For regular file nodes, allow adding to bookmarks
                     struct FileNode* node = (struct FileNode*)lParam;
@@ -240,8 +257,16 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
                         getFileNodePath(node, path);
                         
                         // Check if already bookmarked
-                        if (findBookmark(path) >= 0) {
-                            AppendMenuW(hMenu, MF_STRING, 3, lc_str.remove_bookmark);
+                        int bookmarkIdx = findBookmark(path);
+                        if (bookmarkIdx >= 0) {
+                            // Show auto-open toggle based on current state
+                            if (g_autoOpenBookmarkIndex == bookmarkIdx) {
+                                AppendMenuW(hMenu, MF_STRING, 3, lc_str.cancel_auto_open);
+                            } else {
+                                AppendMenuW(hMenu, MF_STRING, 3, lc_str.auto_open_on_start);
+                            }
+                            AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                            AppendMenuW(hMenu, MF_STRING, 4, lc_str.remove_bookmark);
                         } else {
                             AppendMenuW(hMenu, MF_STRING, 1, lc_str.add_bookmark);
                         }
@@ -269,15 +294,41 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
                     } else if (cmd == 2) {
                         // Remove bookmark
                         int bookmarkIndex = (int)(lParam >> 16);
+                        // If removing auto-open bookmark, clear it first
+                        if (g_autoOpenBookmarkIndex == bookmarkIndex) {
+                            g_autoOpenBookmarkIndex = -1;
+                            saveAutoOpenBookmark();
+                        }
                         removeBookmark(bookmarkIndex);
                         buildBookmarkTree();
                     } else if (cmd == 3) {
-                        // Remove bookmark for current path
+                        // Toggle auto-open for bookmark
+                        int bookmarkIndex = (int)(lParam >> 16);
+                        if (bookmarkIndex >= 0 && bookmarkIndex < g_bookmarkCount) {
+                            setAutoOpenBookmark(bookmarkIndex);
+                        } else {
+                            // Could be from directory context menu
+                            if (currPathFileNode) {
+                                wchar_t path[MAX_PATH] = {0};
+                                getFileNodePath(currPathFileNode, path);
+                                int idx = findBookmark(path);
+                                if (idx >= 0) {
+                                    setAutoOpenBookmark(idx);
+                                }
+                            }
+                        }
+                    } else if (cmd == 4) {
+                        // Remove bookmark for current path (from directory context menu)
                         if (currPathFileNode) {
                             wchar_t path[MAX_PATH] = {0};
                             getFileNodePath(currPathFileNode, path);
                             int idx = findBookmark(path);
                             if (idx >= 0) {
+                                // If removing auto-open bookmark, clear it first
+                                if (g_autoOpenBookmarkIndex == idx) {
+                                    g_autoOpenBookmarkIndex = -1;
+                                    saveAutoOpenBookmark();
+                                }
                                 removeBookmark(idx);
                                 buildBookmarkTree();
                             }
