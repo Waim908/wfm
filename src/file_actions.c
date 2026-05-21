@@ -194,7 +194,13 @@ static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wcha
     
     int jolietLevel = isCDImage ? ptr_cdio_get_joliet_level((CdIo_t*)handle) : ptr_iso9660_ifs_get_joliet_level((iso9660_t*)handle);
     
-    for (isoNode = ptr__cdio_list_begin(isoFileList); isoNode != NULL; ptr__cdio_list_node_next(&isoNode)) {
+    // 使用与原版相同的遍历方式
+    _CDIO_LIST_FOREACH(isoNode, isoFileList) {
+        // 检查取消标志
+        if (actionData && actionData->cancel) {
+            break;
+        }
+        
         iso9660_stat_t* isoStat = (iso9660_stat_t*)ptr__cdio_list_node_data(isoNode);
         if (strcmp(isoStat->filename, ".") == 0 || strcmp(isoStat->filename, "..") == 0) continue;
         
@@ -224,6 +230,8 @@ static DWORD WINAPI fileActionTask(void* param) {
     if (actionData->action == ACTION_ISO_EXTRACT) {
         if (g_noLibcdio || !libcdio_is_loaded()) {
             MessageBoxW(NULL, L"ISO extraction is disabled. Use without --nolibcdio to enable.", L"Feature Disabled", MB_OK | MB_ICONWARNING);
+            SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
+            return 0;
         } else {
             wchar_t* srcPath = actionData->srcPaths[0];
             bool isCDImage = !hasFileExtension(srcPath, L"iso");
@@ -233,12 +241,22 @@ static DWORD WINAPI fileActionTask(void* param) {
 
             if (isCDImage) {
                 CdIo_t* cdio = ptr_cdio_open(filename, DRIVER_UNKNOWN);
+                if (!cdio) {
+                    MessageBoxW(NULL, L"Failed to open CD image file.", L"Error", MB_OK | MB_ICONERROR);
+                    SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
+                    return 0;
+                }
                 ptr_cdio_set_arg(cdio, "joliet-level", "1");
                 extractAllISOFiles(cdio, true, "/", actionData->dstPath);
                 ptr_cdio_destroy(cdio);
             }
             else {
                 iso9660_t* iso = ptr_iso9660_open_ext(filename, ISO_EXTENSION_JOLIET);
+                if (!iso) {
+                    MessageBoxW(NULL, L"Failed to open ISO file.", L"Error", MB_OK | MB_ICONERROR);
+                    SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
+                    return 0;
+                }
                 extractAllISOFiles(iso, false, "/", actionData->dstPath);
                 ptr_iso9660_close(iso);
             }
