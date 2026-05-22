@@ -2,7 +2,7 @@ OBJS=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj
 INCLUDE_DIR=-I./include -I./include/libcdio
 EXE_NAME=wfm.exe
 
-LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -Wl,--subsystem,windows
+LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -lcomdlg32 -Wl,--subsystem,windows
 ifdef USE_LIBCDIO
 LDFLAGS+=./libcdio.dll
 CFLAGS+=-DUSE_LIBCDIO

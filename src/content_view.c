@@ -155,6 +155,7 @@ static HWND hwndIconViewer = NULL;
 static HICON hIconLarge = NULL;
 static HICON hIconSmall = NULL;
 static wchar_t iconViewerTitle[MAX_PATH] = {0};
+static wchar_t iconViewerFileName[MAX_PATH] = {0};
 
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
@@ -971,34 +972,83 @@ void onMenuItemLocateISOImageClick() {
 
 static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     if (!hIcon || !filePath) return FALSE;
+
     ICONINFO ii = {0};
     if (!GetIconInfo(hIcon, &ii)) return FALSE;
+
+    // Get color bitmap dimensions
     BITMAP bmColor = {0};
-    if (ii.hbmColor) GetObjectW(ii.hbmColor, sizeof(BITMAP), &bmColor);
+    int colorHeight = 0;
+    if (ii.hbmColor) {
+        GetObjectW(ii.hbmColor, sizeof(BITMAP), &bmColor);
+        colorHeight = bmColor.bmHeight;
+        if (colorHeight < 0) colorHeight = -colorHeight; // top-down DIB
+    }
+
     int width = bmColor.bmWidth;
-    int height = bmColor.bmHeight;
-    int iconHeight = ii.hbmColor ? (height / 2) : height;
-    if (width <= 0 || iconHeight <= 0) {
+    if (width <= 0) {
         if (ii.hbmColor) DeleteObject(ii.hbmColor);
         if (ii.hbmMask) DeleteObject(ii.hbmMask);
         return FALSE;
     }
+
+    // Determine icon height.
+    // For modern alpha icons: hbmColor height == icon_height.
+    // For older non-alpha icons: hbmColor height == 2*icon_height (combined XOR+AND).
+    // hbmMask height always equals the actual icon height per MSDN.
+    int iconHeight = 0;
+    int colorStartScan = 0;  // starting row in hbmColor for color data
+
+    if (ii.hbmMask) {
+        BITMAP bmMask = {0};
+        GetObjectW(ii.hbmMask, sizeof(BITMAP), &bmMask);
+        iconHeight = bmMask.bmHeight;
+        // If hbmColor is a combined DDB (height == 2 * iconHeight),
+        // the XOR color data is in the top half.
+        if (iconHeight > 0 && colorHeight == iconHeight * 2) {
+            colorStartScan = iconHeight;
+        }
+    } else if (ii.hbmColor && colorHeight > 0) {
+        // Modern alpha icons: hbmColor IS the color bitmap
+        iconHeight = colorHeight;
+    } else {
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        return FALSE;
+    }
+
+    if (iconHeight <= 0) {
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        return FALSE;
+    }
+
+    // Extract color bits (XOR bitmap)
     HDC hdc = GetDC(NULL);
     BYTE* colorBits = NULL;
     int colorSize = width * iconHeight * 4;
+
     if (ii.hbmColor) {
         BITMAPINFO bmi = {0};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -iconHeight;
+        bmi.bmiHeader.biHeight = iconHeight;
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
         colorBits = (BYTE*)malloc(colorSize);
-        if (colorBits) GetDIBits(hdc, ii.hbmColor, 0, iconHeight, colorBits, &bmi, DIB_RGB_COLORS);
+        if (colorBits) {
+            if (!GetDIBits(hdc, ii.hbmColor, colorStartScan, iconHeight, colorBits, &bmi, DIB_RGB_COLORS)) {
+                free(colorBits);
+                colorBits = NULL;
+            }
+        }
     }
+
+    // Extract mask bits (AND bitmap)
     BYTE* maskBits = NULL;
     int maskSize = 0;
+
     if (ii.hbmMask) {
         BITMAP bmMask = {0};
         GetObjectW(ii.hbmMask, sizeof(BITMAP), &bmMask);
@@ -1013,21 +1063,38 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
             maskBmi.bmiHeader.biPlanes = 1;
             maskBmi.bmiHeader.biBitCount = 1;
             maskBmi.bmiHeader.biCompression = BI_RGB;
-            GetDIBits(hdc, ii.hbmMask, 0, maskHeight, maskBits, &maskBmi, DIB_RGB_COLORS);
+            if (!GetDIBits(hdc, ii.hbmMask, 0, maskHeight, maskBits, &maskBmi, DIB_RGB_COLORS)) {
+                free(maskBits);
+                maskBits = NULL;
+                maskSize = 0;
+            }
         }
+    } else {
+        // Generate zero mask for alpha icons (all pixels visible)
+        maskSize = ((width + 31) / 32) * 4 * iconHeight;
+        maskBits = (BYTE*)calloc(1, maskSize);
     }
+
     ReleaseDC(NULL, hdc);
+
+    // Write ICO file
     BOOL result = FALSE;
     HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD written;
-        DWORD dataOffset = 6 + 16;
+        int actualColorSize = colorBits ? colorSize : 0;
+        int actualMaskSize = maskBits ? maskSize : 0;
         DWORD dibSize = sizeof(BITMAPINFOHEADER);
-        DWORD totalImageSize = dibSize + colorSize + maskSize;
+        DWORD totalImageSize = dibSize + actualColorSize + actualMaskSize;
+        DWORD dataOffset = 6 + 16;
+
+        // ICO header
         WORD reserved = 0, type = 1, count = 1;
         WriteFile(hFile, &reserved, 2, &written, NULL);
         WriteFile(hFile, &type, 2, &written, NULL);
         WriteFile(hFile, &count, 2, &written, NULL);
+
+        // Directory entry
         BYTE w = (width >= 256) ? 0 : (BYTE)width;
         BYTE h = (iconHeight >= 256) ? 0 : (BYTE)iconHeight;
         BYTE colors = 0, res = 0;
@@ -1040,6 +1107,8 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         WriteFile(hFile, &bpp, 2, &written, NULL);
         WriteFile(hFile, &totalImageSize, 4, &written, NULL);
         WriteFile(hFile, &dataOffset, 4, &written, NULL);
+
+        // Image data: BITMAPINFOHEADER + XOR bitmap + AND mask
         BITMAPINFOHEADER bih = {0};
         bih.biSize = sizeof(BITMAPINFOHEADER);
         bih.biWidth = width;
@@ -1048,26 +1117,32 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         bih.biBitCount = 32;
         bih.biCompression = BI_RGB;
         WriteFile(hFile, &bih, sizeof(bih), &written, NULL);
-        if (colorBits) WriteFile(hFile, colorBits, colorSize, &written, NULL);
-        if (maskBits) WriteFile(hFile, maskBits, maskSize, &written, NULL);
+
+        if (colorBits) WriteFile(hFile, colorBits, actualColorSize, &written, NULL);
+        if (maskBits) WriteFile(hFile, maskBits, actualMaskSize, &written, NULL);
+
         CloseHandle(hFile);
         result = TRUE;
     }
+
+    // Cleanup
     free(colorBits);
     free(maskBits);
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
     if (ii.hbmMask) DeleteObject(ii.hbmMask);
+
     return result;
 }
-
-// Icon viewer dialog
 static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            CreateWindowW(L"BUTTON", lc_str.save_icon,
+            HWND hBtn = CreateWindowW(L"BUTTON", lc_str.save_icon,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                85, 300, 130, 26,
+                70, 325, 160, 28,
                 hwnd, (HMENU)IDC_SAVE_ICON, globalHInstance, NULL);
+            if (hBtn && hGuiFont) {
+                SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+            }
             break;
         }
         case WM_PAINT: {
@@ -1099,7 +1174,8 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         }
         case WM_COMMAND: {
             if (LOWORD(wParam) == IDC_SAVE_ICON && HIWORD(wParam) == BN_CLICKED) {
-                wchar_t filePath[MAX_PATH] = L"icon.ico";
+                wchar_t filePath[MAX_PATH] = {0};
+                swprintf_s(filePath, MAX_PATH, L"%ls.ico", iconViewerFileName);
                 OPENFILENAMEW ofn = {0};
                 ofn.lStructSize = sizeof(ofn);
                 ofn.hwndOwner = hwnd;
@@ -1177,6 +1253,7 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     // Build window title
     wmemset(iconViewerTitle, 0, MAX_PATH);
     swprintf_s(iconViewerTitle, MAX_PATH, L"%ls - %ls", fileName, lc_str.show_icon);
+    wcscpy_s(iconViewerFileName, MAX_PATH, fileName);
     
     // Register window class if not already registered
     WNDCLASSEX wcCheck = {0};
@@ -1186,7 +1263,7 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     
     // Calculate window size to fit 256x256 icon with padding
     int winWidth = 300;
-    int winHeight = 370;
+    int winHeight = 400;
     
     // Center window on screen
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
