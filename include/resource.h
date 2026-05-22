@@ -35,6 +35,7 @@
 
 #define IDD_ICON_VIEWER 210
 #define IDC_ICON_IMAGE 211
+#define IDC_SAVE_ICON 212
 
 #define ID_EDIT_CUT 301
 #define ID_EDIT_COPY 302
@@ -169,6 +170,7 @@ struct LC_STR {
     wchar_t* unmount_iso;
     wchar_t* msg_no_mounted_image;
     wchar_t* msg_image_dir_not_found;
+    wchar_t* save_icon;
 };
 
 extern struct LC_STR lc_str;

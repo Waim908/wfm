@@ -1,0 +1,1 @@
+7z a -tzip wfm.zip wfm.exe libcdio.dll del-reg.bat

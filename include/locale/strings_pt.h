@@ -78,6 +78,7 @@ static inline void loadStrings_pt() {
     lc_str.unmount_iso = L"Desmontar";
     lc_str.msg_no_mounted_image = L"Nenhum arquivo de imagem montado";
     lc_str.msg_image_dir_not_found = L"Diretório do arquivo de imagem não encontrado";
+    lc_str.save_icon = L"Salvar Ícone";
 
     lc_str.fmt_file = L"Arquivo %ls";
 
