@@ -362,12 +362,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
             if (!navigatePath) navigatePath = args[i];
         }
     }
-    
-    // 加载 libcdio (除非 --nolibcdio 被指定)
-    if (!g_noLibcdio) {
-        libcdio_load();
-    }
-    
     wchar_t localeName[16] = {0};
     GetSystemDefaultLocaleName(localeName, 16);
     

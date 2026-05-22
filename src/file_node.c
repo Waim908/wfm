@@ -71,32 +71,8 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             
             struct FileNode* child = allocFileNode(name, TYPE_DRIVE);
             child->parent = parent;
-            
-            // 检查驱动器是否真的有子目录，而不是默认设为 true
-            child->hasChildDirs = false; // 默认设为 false
-            
-            // 检查驱动器是否准备好（例如，如果是 CD/DVD 驱动器，可能没有光盘）
-            DWORD dwAttrib = GetFileAttributes(drive);
-            if (dwAttrib != INVALID_FILE_ATTRIBUTES) {
-                // 检查驱动器是否包含子目录
-                wchar_t searchPath[MAX_PATH] = {0};
-                wcscpy_s(searchPath, MAX_PATH, drive);
-                wcscat_s(searchPath, MAX_PATH, L"*");
-                
-                WIN32_FIND_DATA wfd = {0};
-                HANDLE handle = FindFirstFile(searchPath, &wfd);
-                if (handle != INVALID_HANDLE_VALUE) {
-                    do {
-                        if (wcscmp(wfd.cFileName, L".") == 0 || wcscmp(wfd.cFileName, L"..") == 0) continue;
-                        if (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            child->hasChildDirs = true;
-                            break;
-                        }               
-                    }
-                    while (FindNextFile(handle, &wfd));
-                    FindClose(handle);
-                }
-            }
+            // 延迟检查：不在启动时做磁盘IO，展开时再验证
+            child->hasChildDirs = true;
             
             if (!firstChild) firstChild = child;
             if (lastChild) lastChild->sibling = child;

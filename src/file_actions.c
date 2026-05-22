@@ -228,8 +228,13 @@ static DWORD WINAPI fileActionTask(void* param) {
     struct ActionData* actionData = (struct ActionData*)param;
     
     if (actionData->action == ACTION_ISO_EXTRACT) {
-        if (g_noLibcdio || !libcdio_is_loaded()) {
+        if (g_noLibcdio) {
             MessageBoxW(NULL, L"ISO extraction is disabled. Use without --nolibcdio to enable.", L"Feature Disabled", MB_OK | MB_ICONWARNING);
+            SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
+            return 0;
+        }
+        if (!libcdio_is_loaded() && !libcdio_load()) {
+            MessageBoxW(NULL, L"Failed to load libcdio.dll", L"Error", MB_OK | MB_ICONERROR);
             SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
             return 0;
         } else {
