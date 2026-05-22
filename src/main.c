@@ -154,11 +154,11 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_HELP_ABOUT:
             DialogBox(globalHInstance, MAKEINTRESOURCE(IDD_ABOUT), hwndMain, &AboutDialogProc);
             break;
-        case ID_FILE_EXIT:
-            DestroyWindow(hwndMain);
-            break;
         case ID_VIEW_LARGEICONS:
             setViewStyle(STYLE_LARGE_ICON);
+            break;
+        case ID_FILE_EXIT:
+            DestroyWindow(hwndMain);
             break;
         case ID_VIEW_SMALLICONS:
             setViewStyle(STYLE_SMALL_ICON);
@@ -173,7 +173,13 @@ void mainMenuCommand(WPARAM wParam) {
             clearIconCaches();
             navigateRefresh();
             break;
-    }   
+        case ID_MOUNT_LOCATE_ISO:
+            onMenuItemLocateISOImageClick();
+            break;
+        case ID_MOUNT_UNMOUNT_ISO:
+            onMenuItemUnloadISOImageClick();
+            break;
+    }
 }
 
 void resizeControls() {
@@ -324,6 +330,10 @@ static void createMainMenu() {
     
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
+    HMENU hmMount = CreatePopupMenu();
+    AppendMenu(hmMount, MF_STRING, ID_MOUNT_LOCATE_ISO, lc_str.locate_iso);
+    AppendMenu(hmMount, MF_STRING, ID_MOUNT_UNMOUNT_ISO, lc_str.unmount_iso);
+
     HMENU hmHelp = CreatePopupMenu();
     AppendMenu(hmHelp, MF_STRING, ID_HELP_ABOUT, lc_str.about);
     
@@ -331,6 +341,7 @@ static void createMainMenu() {
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmFile, lc_str.file);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmEdit, lc_str.edit);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmView, lc_str.view);
+    AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmMount, lc_str.mount);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmHelp, lc_str.help);
     
     SetMenu(hwndMain, hmMain);

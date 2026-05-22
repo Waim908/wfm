@@ -74,6 +74,11 @@ static inline void loadStrings_ru() {
     lc_str.auto_open_path_not_found = L"Не удалось открыть путь при запуске (не найден): %ls";
 
     lc_str.clear_icon_cache = L"Очистить Кэш Иконок";
+    lc_str.mount = L"Монтировать";
+    lc_str.locate_iso = L"Найти файл образа";
+    lc_str.unmount_iso = L"Размонтировать";
+    lc_str.msg_no_mounted_image = L"Нет смонтированного образа";
+    lc_str.msg_image_dir_not_found = L"Папка файла образа не найдена";
 
     lc_str.fmt_file = L"%ls Файл";
 

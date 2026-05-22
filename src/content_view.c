@@ -116,7 +116,7 @@ struct ContextMenuItem {
 };
 
 static void onMenuItemLoadISOImageClick();
-static void onMenuItemUnloadISOImageClick();
+void onMenuItemUnloadISOImageClick();
 static void onMenuItemShowIconClick();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
@@ -948,10 +948,25 @@ static void onMenuItemLoadISOImageClick() {
     extractFilesFromISOImage(currentISOPath, L"X:\\");
 }
 
-static void onMenuItemUnloadISOImageClick() {
+void onMenuItemUnloadISOImageClick() {
     clearDirectory(L"X:");
     RegDeleteKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath");
     navigateRefresh();
+}
+
+void onMenuItemLocateISOImageClick() {
+    wchar_t currentISOPath[MAX_PATH] = {0};
+    if (!getCurrentISOPath(currentISOPath)) {
+        MessageBox(NULL, lc_str.msg_no_mounted_image, lc_str.alert, MB_OK);
+        return;
+    }
+    wchar_t parentDir[MAX_PATH] = {0};
+    getParentDirFromPath(currentISOPath, parentDir);
+    if (!isPathExists(parentDir)) {
+        MessageBox(NULL, lc_str.msg_image_dir_not_found, lc_str.alert, MB_OK);
+        return;
+    }
+    navigateToPath(parentDir);
 }
 
 // Icon viewer dialog

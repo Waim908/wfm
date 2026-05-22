@@ -29,6 +29,8 @@ void onMenuItemNewFolderClick();
 void onMenuItemNewFileClick();
 void onMenuItemSelectAllClick();
 void onBookmarkButtonClick();
+void onMenuItemUnloadISOImageClick();
+void onMenuItemLocateISOImageClick();
 void clearIconCaches();
 
 #endif

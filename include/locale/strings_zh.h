@@ -74,6 +74,11 @@ static inline void loadStrings_zh() {
     lc_str.auto_open_path_not_found = L"启动时无法打开路径（不存在）：%ls";
 
     lc_str.clear_icon_cache = L"清除图标缓存";
+    lc_str.mount = L"挂载";
+    lc_str.locate_iso = L"定位到映像文件";
+    lc_str.unmount_iso = L"取消挂载";
+    lc_str.msg_no_mounted_image = L"没有挂载的映像文件";
+    lc_str.msg_image_dir_not_found = L"映像文件所在目录不存在";
 
     lc_str.fmt_file = L"%ls 文件";
 

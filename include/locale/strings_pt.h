@@ -73,6 +73,11 @@ static inline void loadStrings_pt() {
     lc_str.auto_open_path_not_found = L"Não foi possível abrir o caminho na inicialização (não encontrado): %ls";
 
     lc_str.clear_icon_cache = L"Limpar Cache de Ícones";
+    lc_str.mount = L"Montar";
+    lc_str.locate_iso = L"Localizar Arquivo de Imagem";
+    lc_str.unmount_iso = L"Desmontar";
+    lc_str.msg_no_mounted_image = L"Nenhum arquivo de imagem montado";
+    lc_str.msg_image_dir_not_found = L"Diretório do arquivo de imagem não encontrado";
 
     lc_str.fmt_file = L"Arquivo %ls";
 
