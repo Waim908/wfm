@@ -37,3 +37,8 @@ void saveExtIconCacheToRegistry(const wchar_t* ext, int iconIndex);
 int loadExtIconCacheFromRegistry(const wchar_t* ext, int* outIconIndex);
 
 #endif
+
+// Language persistence
+#define LANGUAGE_REGISTRY_PATH L"SOFTWARE\\Winlator\\WFM\\Language"
+void saveLanguageToRegistry(const wchar_t* lang);
+int  loadLanguageFromRegistry(wchar_t* lang, DWORD langSize);

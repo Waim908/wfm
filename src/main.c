@@ -38,6 +38,7 @@ void updateGuiFont() {
 }
 HICON uiIcons[NUM_UI_ICONS] = {0};
 BOOL g_noLibcdio = FALSE;
+static wchar_t g_currentLang[8] = {0};  // en, zh, pt, ru
 
 struct IconMapping {
     int iconId;
@@ -134,6 +135,9 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
     return (INT_PTR)FALSE;
 }
 
+static void createMainMenu(void);
+static void switchLanguage(const wchar_t* lang);
+
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
         case ID_EDIT_CUT:
@@ -179,6 +183,10 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_MOUNT_UNMOUNT_ISO:
             onMenuItemUnloadISOImageClick();
             break;
+        case ID_LANG_EN: switchLanguage(L"en"); break;
+        case ID_LANG_ZH: switchLanguage(L"zh"); break;
+        case ID_LANG_PT: switchLanguage(L"pt"); break;
+        case ID_LANG_RU: switchLanguage(L"ru"); break;
     }
 }
 
@@ -310,6 +318,31 @@ void openFileNode(struct FileNode* node) {
     else navigateToFileNode(node);
 }
 
+// Switch language: save to registry, reload strings, recreate menu
+static void switchLanguage(const wchar_t* lang) {
+    wcscpy_s(g_currentLang, 8, lang);
+    saveLanguageToRegistry(lang);
+    wchar_t langCopy[8] = {0};
+    wcscpy_s(langCopy, 8, lang);
+    loadLCStrings(langCopy);
+    
+    // Recreate the main menu with new strings
+    createMainMenu();
+    
+    // Refresh toolbar button texts
+    createToolButtons();
+    
+    // Refresh content view and tree
+    extern void navigateRefresh(void);
+    navigateRefresh();
+    
+    // Prompt restart
+    MessageBoxW(hwndMain, 
+        L"Language changed. Please restart the application.\n\n\u8bed\u8a00\u5df2\u5207\u6362\uff0c\u8bf7\u91cd\u542f\u7a0b\u5e8f\u3002",
+        L"WFM", MB_OK | MB_ICONINFORMATION);
+    DestroyWindow(hwndMain);
+}
+
 static void createMainMenu() {
     HMENU hmFile = CreatePopupMenu();
     AppendMenu(hmFile, MF_STRING, ID_FILE_EXIT, lc_str.exit);
@@ -336,12 +369,20 @@ static void createMainMenu() {
 
     HMENU hmHelp = CreatePopupMenu();
     AppendMenu(hmHelp, MF_STRING, ID_HELP_ABOUT, lc_str.about);
+
+    // Language submenu (the word "Language" itself is NOT translated)
+    HMENU hmLang = CreatePopupMenu();
+    AppendMenu(hmLang, MF_STRING, ID_LANG_EN, L"English");
+    AppendMenu(hmLang, MF_STRING, ID_LANG_ZH, L"\u4e2d\u6587");
+    AppendMenu(hmLang, MF_STRING, ID_LANG_PT, L"Portugu\u00eas");
+    AppendMenu(hmLang, MF_STRING, ID_LANG_RU, L"\u0420\u0443\u0441\u0441\u043a\u0438\u0439");
     
     HMENU hmMain = CreateMenu();
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmFile, lc_str.file);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmEdit, lc_str.edit);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmView, lc_str.view);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmMount, lc_str.mount);
+    AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmLang, L"Language");
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmHelp, lc_str.help);
     
     SetMenu(hwndMain, hmMain);
@@ -362,8 +403,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
             if (!navigatePath) navigatePath = args[i];
         }
     }
+    // Language: registry > system locale
     wchar_t localeName[16] = {0};
-    GetSystemDefaultLocaleName(localeName, 16);
+    if (!loadLanguageFromRegistry(localeName, sizeof(localeName))) {
+        GetSystemDefaultLocaleName(localeName, 16);
+    }
+    wcscpy_s(g_currentLang, 8, localeName);
     
     loadLCStrings(localeName);
     

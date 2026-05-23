@@ -52,6 +52,10 @@
 #define ID_VIEW_CLEAR_ICON_CACHE 313
 #define ID_MOUNT_LOCATE_ISO  314
 #define ID_MOUNT_UNMOUNT_ISO  315
+#define ID_LANG_EN  316
+#define ID_LANG_ZH  317
+#define ID_LANG_PT  318
+#define ID_LANG_RU  319
 
 #define ICON_UP          0
 #define ICON_COPY        1
@@ -77,7 +81,7 @@ void freeUIcons();
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5-1"
+#define APP_VERSION L"1.5-2"
 #define APP_DEV_NAME L"BrunoSX"
 
 #ifndef RESOURCE_H
@@ -170,6 +174,7 @@ struct LC_STR {
     wchar_t* unmount_iso;
     wchar_t* msg_no_mounted_image;
     wchar_t* msg_image_dir_not_found;
+    wchar_t* msg_x_drive_not_found;
     wchar_t* save_icon;
 };
 

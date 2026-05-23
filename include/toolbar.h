@@ -2,6 +2,7 @@
 #define TOOLBAR_H
 
 void createToolbar();
+void createToolButtons(void);
 void toolbarCommand(int command);
 void onUpButtonClick();
 void onCopyButtonClick();

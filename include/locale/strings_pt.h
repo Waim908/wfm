@@ -77,6 +77,7 @@ static inline void loadStrings_pt() {
     lc_str.locate_iso = L"Localizar Arquivo de Imagem";
     lc_str.unmount_iso = L"Desmontar";
     lc_str.msg_no_mounted_image = L"Nenhum arquivo de imagem montado";
+    lc_str.msg_x_drive_not_found = L"Drive X: n\u00e3o encontrado. Adicione a unidade X: no winecfg e defina como CD-ROM";
     lc_str.msg_image_dir_not_found = L"Diretório do arquivo de imagem não encontrado";
     lc_str.save_icon = L"Salvar Ícone";
 

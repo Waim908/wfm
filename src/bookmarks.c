@@ -317,3 +317,28 @@ void addCurrentPathToBookmark() {
         buildBookmarkTree();
     }
 }
+
+//=============================================================================
+// 语言持久化
+//=============================================================================
+
+void saveLanguageToRegistry(const wchar_t* lang) {
+    HKEY hkey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, LANGUAGE_REGISTRY_PATH, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS) {
+        return;
+    }
+    RegSetValueExW(hkey, L"lang", 0, REG_SZ, (const BYTE*)lang, (DWORD)((wcslen(lang) + 1) * sizeof(wchar_t)));
+    RegCloseKey(hkey);
+}
+
+int loadLanguageFromRegistry(wchar_t* lang, DWORD langSize) {
+    HKEY hkey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, LANGUAGE_REGISTRY_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
+        return 0;
+    }
+    DWORD type = 0;
+    DWORD dataSize = langSize;
+    LONG result = RegQueryValueExW(hkey, L"lang", NULL, &type, (LPBYTE)lang, &dataSize);
+    RegCloseKey(hkey);
+    return (result == ERROR_SUCCESS && type == REG_SZ) ? 1 : 0;
+}

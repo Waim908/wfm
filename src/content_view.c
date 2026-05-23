@@ -917,6 +917,11 @@ static void onMenuItemLoadISOImageClick() {
         return;
     }
 
+    if (GetDriveTypeW(L"X:\\") == DRIVE_NO_ROOT_DIR) {
+        MessageBox(hwndMain, lc_str.msg_x_drive_not_found, lc_str.alert, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
     if (RegCreateKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
         RegSetValue(hkey, NULL, REG_SZ, currentISOPath, (wcslen(currentISOPath) + 1) * sizeof(wchar_t));
         RegCloseKey(hkey);

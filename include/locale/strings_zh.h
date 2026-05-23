@@ -78,6 +78,7 @@ static inline void loadStrings_zh() {
     lc_str.locate_iso = L"定位到映像文件";
     lc_str.unmount_iso = L"取消挂载";
     lc_str.msg_no_mounted_image = L"没有挂载的映像文件";
+    lc_str.msg_x_drive_not_found = L"未找到 X: 盘，请先在 winecfg 中添加驱动器 X: 并设置为光驱类型";
     lc_str.msg_image_dir_not_found = L"映像文件所在目录不存在";
     lc_str.save_icon = L"保存图标";
 
