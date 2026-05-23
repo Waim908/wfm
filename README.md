@@ -32,7 +32,12 @@
 
 # 问题
 
+Q: 文件图标出现了混淆？
+
+A: 点击查看-> 清理图标缓存 即可
+
 Q： 禁用libcdio 挂载功能？
+
 A：在编译时加上 ```make USE_LIBCDIO=0``` 或者运行时 执行 wfm --nolibcdio PATH/Empty
 
 Q: 需要创建X挂载盘？
