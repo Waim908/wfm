@@ -973,129 +973,109 @@ void onMenuItemLocateISOImageClick() {
 static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     if (!hIcon || !filePath) return FALSE;
 
+    // Get icon dimensions via GetIconInfo
     ICONINFO ii = {0};
     if (!GetIconInfo(hIcon, &ii)) return FALSE;
 
-    // Get color bitmap dimensions
-    BITMAP bmColor = {0};
-    int colorHeight = 0;
+    int iconWidth = 0, iconHeight = 0;
+
     if (ii.hbmColor) {
-        GetObjectW(ii.hbmColor, sizeof(BITMAP), &bmColor);
-        colorHeight = bmColor.bmHeight;
-        if (colorHeight < 0) colorHeight = -colorHeight; // top-down DIB
+        BITMAP bm = {0};
+        GetObjectW(ii.hbmColor, sizeof(BITMAP), &bm);
+        iconWidth = bm.bmWidth;
+        iconHeight = bm.bmHeight;
     }
 
-    int width = bmColor.bmWidth;
-    if (width <= 0) {
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
-        if (ii.hbmMask) DeleteObject(ii.hbmMask);
-        return FALSE;
-    }
-
-    // Determine icon height.
-    // For modern alpha icons: hbmColor height == icon_height.
-    // For older non-alpha icons: hbmColor height == 2*icon_height (combined XOR+AND).
-    // hbmMask height always equals the actual icon height per MSDN.
-    int iconHeight = 0;
-    int colorStartScan = 0;  // starting row in hbmColor for color data
-
-    if (ii.hbmMask) {
+    // Fallback: use mask bitmap for dimensions
+    if (ii.hbmMask && iconWidth <= 0) {
         BITMAP bmMask = {0};
         GetObjectW(ii.hbmMask, sizeof(BITMAP), &bmMask);
+        iconWidth = bmMask.bmWidth;
         iconHeight = bmMask.bmHeight;
-        // If hbmColor is a combined DDB (height == 2 * iconHeight),
-        // the XOR color data is in the top half.
-        if (iconHeight > 0 && colorHeight == iconHeight * 2) {
-            colorStartScan = iconHeight;
-        }
-    } else if (ii.hbmColor && colorHeight > 0) {
-        // Modern alpha icons: hbmColor IS the color bitmap
-        iconHeight = colorHeight;
-    } else {
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
-        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    }
+
+    // Clean up GetIconInfo handles early — we render from the HICON
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+
+    if (iconWidth <= 0 || iconHeight <= 0) return FALSE;
+
+    // Render icon to a 32bpp top-down DIBSection
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    if (!hdcMem) {
+        ReleaseDC(NULL, hdcScreen);
         return FALSE;
     }
 
-    if (iconHeight <= 0) {
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
-        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = iconWidth;
+    bmi.bmiHeader.biHeight = -iconHeight;  // top-down for natural pixel order
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    BYTE* dibBits = NULL;
+    HBITMAP hbmDib = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, (void**)&dibBits, NULL, 0);
+    if (!hbmDib || !dibBits) {
+        DeleteDC(hdcMem);
+        ReleaseDC(NULL, hdcScreen);
         return FALSE;
     }
 
-    // Extract color bits (XOR bitmap)
-    HDC hdc = GetDC(NULL);
-    BYTE* colorBits = NULL;
-    int colorSize = width * iconHeight * 4;
+    HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmDib);
 
-    if (ii.hbmColor) {
-        BITMAPINFO bmi = {0};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = iconHeight;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        colorBits = (BYTE*)malloc(colorSize);
-        if (colorBits) {
-            if (!GetDIBits(hdc, ii.hbmColor, colorStartScan, iconHeight, colorBits, &bmi, DIB_RGB_COLORS)) {
-                free(colorBits);
-                colorBits = NULL;
-            }
-        }
+    // Fill with transparent white
+    RECT rc = {0, 0, iconWidth, iconHeight};
+    HBRUSH hBr = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(hdcMem, &rc, hBr);
+    DeleteObject(hBr);
+
+    // Render icon at full resolution
+    DrawIconEx(hdcMem, 0, 0, hIcon, iconWidth, iconHeight, 0, NULL, DI_NORMAL);
+    GdiFlush();
+
+    // Copy pixel data out of the DIBSection before destroying it
+    int colorSize = iconWidth * iconHeight * 4;
+    BYTE* colorBits = (BYTE*)malloc(colorSize);
+    if (colorBits) {
+        memcpy(colorBits, dibBits, colorSize);
     }
 
-    // Extract mask bits (AND bitmap)
-    BYTE* maskBits = NULL;
-    int maskSize = 0;
+    // Destroy the DIBSection and DC
+    SelectObject(hdcMem, hbmOld);
+    DeleteObject(hbmDib);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
 
-    if (ii.hbmMask) {
-        BITMAP bmMask = {0};
-        GetObjectW(ii.hbmMask, sizeof(BITMAP), &bmMask);
-        int maskHeight = bmMask.bmHeight;
-        maskSize = ((width + 31) / 32) * 4 * maskHeight;
-        maskBits = (BYTE*)malloc(maskSize);
-        if (maskBits) {
-            BITMAPINFO maskBmi = {0};
-            maskBmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            maskBmi.bmiHeader.biWidth = width;
-            maskBmi.bmiHeader.biHeight = -maskHeight;
-            maskBmi.bmiHeader.biPlanes = 1;
-            maskBmi.bmiHeader.biBitCount = 1;
-            maskBmi.bmiHeader.biCompression = BI_RGB;
-            if (!GetDIBits(hdc, ii.hbmMask, 0, maskHeight, maskBits, &maskBmi, DIB_RGB_COLORS)) {
-                free(maskBits);
-                maskBits = NULL;
-                maskSize = 0;
-            }
-        }
-    } else {
-        // Generate zero mask for alpha icons (all pixels visible)
-        maskSize = ((width + 31) / 32) * 4 * iconHeight;
-        maskBits = (BYTE*)calloc(1, maskSize);
+    if (!colorBits) return FALSE;
+
+    // Generate zero AND mask (all pixels visible; alpha is in the color data)
+    int maskSize = ((iconWidth + 31) / 32) * 4 * iconHeight;
+    BYTE* maskBits = (BYTE*)calloc(1, maskSize);
+    if (!maskBits) {
+        free(colorBits);
+        return FALSE;
     }
-
-    ReleaseDC(NULL, hdc);
 
     // Write ICO file
     BOOL result = FALSE;
     HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD written;
-        int actualColorSize = colorBits ? colorSize : 0;
-        int actualMaskSize = maskBits ? maskSize : 0;
         DWORD dibSize = sizeof(BITMAPINFOHEADER);
-        DWORD totalImageSize = dibSize + actualColorSize + actualMaskSize;
+        DWORD totalImageSize = dibSize + colorSize + maskSize;
         DWORD dataOffset = 6 + 16;
 
-        // ICO header
+        // ICO header (6 bytes)
         WORD reserved = 0, type = 1, count = 1;
         WriteFile(hFile, &reserved, 2, &written, NULL);
         WriteFile(hFile, &type, 2, &written, NULL);
         WriteFile(hFile, &count, 2, &written, NULL);
 
-        // Directory entry
-        BYTE w = (width >= 256) ? 0 : (BYTE)width;
+        // Directory entry (16 bytes)
+        BYTE w = (iconWidth >= 256) ? 0 : (BYTE)iconWidth;
         BYTE h = (iconHeight >= 256) ? 0 : (BYTE)iconHeight;
         BYTE colors = 0, res = 0;
         WORD planes = 1, bpp = 32;
@@ -1108,37 +1088,48 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         WriteFile(hFile, &totalImageSize, 4, &written, NULL);
         WriteFile(hFile, &dataOffset, 4, &written, NULL);
 
-        // Image data: BITMAPINFOHEADER + XOR bitmap + AND mask
+        // BITMAPINFOHEADER: biHeight = iconHeight * 2 (XOR + AND combined)
         BITMAPINFOHEADER bih = {0};
         bih.biSize = sizeof(BITMAPINFOHEADER);
-        bih.biWidth = width;
+        bih.biWidth = iconWidth;
         bih.biHeight = iconHeight * 2;
         bih.biPlanes = 1;
         bih.biBitCount = 32;
         bih.biCompression = BI_RGB;
         WriteFile(hFile, &bih, sizeof(bih), &written, NULL);
 
-        if (colorBits) WriteFile(hFile, colorBits, actualColorSize, &written, NULL);
-        if (maskBits) WriteFile(hFile, maskBits, actualMaskSize, &written, NULL);
+        // XOR bitmap (reverse rows: DIBSection is top-down, ICO XOR expects bottom-up)
+        int rowSize = iconWidth * 4;
+        BYTE* rowBuf = (BYTE*)malloc(rowSize);
+        if (rowBuf) {
+            for (int row = 0; row < iconHeight; row++) {
+                memcpy(rowBuf, colorBits + (iconHeight - 1 - row) * rowSize, rowSize);
+                WriteFile(hFile, rowBuf, rowSize, &written, NULL);
+            }
+            free(rowBuf);
+        } else {
+            WriteFile(hFile, colorBits, colorSize, &written, NULL);
+        }
+
+        // AND mask
+        WriteFile(hFile, maskBits, maskSize, &written, NULL);
 
         CloseHandle(hFile);
         result = TRUE;
     }
 
-    // Cleanup
     free(colorBits);
     free(maskBits);
-    if (ii.hbmColor) DeleteObject(ii.hbmColor);
-    if (ii.hbmMask) DeleteObject(ii.hbmMask);
 
     return result;
 }
+
 static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             HWND hBtn = CreateWindowW(L"BUTTON", lc_str.save_icon,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                70, 325, 160, 28,
+                70, 269, 160, 28,
                 hwnd, (HMENU)IDC_SAVE_ICON, globalHInstance, NULL);
             if (hBtn && hGuiFont) {
                 SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
@@ -1154,18 +1145,15 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 GetClientRect(hwnd, &rc);
                 int cx = rc.right - rc.left;
                 int cy = rc.bottom - rc.top;
-                
-                // Draw icon centered and scaled to fit window
+                int iconAreaCy = cy - 50;
+
                 int iconCx = min(cx - 20, 256);
-                int iconCy = min(cy - 20, 256);
-                
-                // Maintain aspect ratio - make it square
+                int iconCy = min(iconAreaCy - 10, 256);
                 int size = min(iconCx, iconCy);
-                
-                // Center the icon
                 int x = (cx - size) / 2;
-                int y = (cy - size) / 2;
-                
+                int y = (iconAreaCy - size) / 2;
+                if (y < 5) y = 5;
+
                 DrawIconEx(hdc, x, y, hIconLarge, size, size, 0, NULL, DI_NORMAL);
             }
             
@@ -1261,9 +1249,9 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
         registerIconViewerClass();
     }
     
-    // Calculate window size to fit 256x256 icon with padding
+    // Window size: compact layout
     int winWidth = 300;
-    int winHeight = 400;
+    int winHeight = 350;
     
     // Center window on screen
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
