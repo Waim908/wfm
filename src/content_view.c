@@ -79,6 +79,35 @@ static void addExtIconCache(wchar_t* ext, int icon, wchar_t* typeName) {
     }
     extCacheCount++;
 }
+// 启动时一次性从注册表枚举所有已缓存的图标索引到内存，
+// 后续 findExtIconCache 命中率接近 100%，零注册表访问。
+static void preloadIconCacheFromRegistry(void) {
+    HKEY hkey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
+        return;
+    }
+
+    DWORD index = 0;
+    while (extCacheCount < EXT_CACHE_SIZE) {
+        wchar_t extName[16] = {0};
+        DWORD extNameSize = 16;
+        DWORD iconIndex = 0;
+        DWORD dataSize = sizeof(DWORD);
+        DWORD type = 0;
+
+        LONG result = RegEnumValueW(hkey, index, extName, &extNameSize,
+                                     NULL, &type, (LPBYTE)&iconIndex, &dataSize);
+        if (result != ERROR_SUCCESS) break;
+
+        if (type == REG_DWORD && findExtIconCache(extName) < 0) {
+            addExtIconCache(extName, (int)iconIndex, NULL);
+        }
+        index++;
+    }
+
+    RegCloseKey(hkey);
+}
+
 
 enum Msg {
     MSG_ADD_ITEM = WM_APP,
@@ -799,6 +828,7 @@ void createContentView() {
     cmiShowIcon.text = lc_str.show_icon;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
+    preloadIconCacheFromRegistry();
     createLVColumns();
     UpdateWindow(hwndContentView);
 }
