@@ -6,14 +6,6 @@
 #define COLUMN_DATE_IDX 3
 #define COLUMN_PATH_IDX 4
 
-// 扩展名图标缓存
-#define EXT_CACHE_SIZE 128
-static struct {
-    wchar_t ext[16];
-    int icon;
-    wchar_t typeName[64];
-} extIconCache[EXT_CACHE_SIZE];
-static int extCacheCount = 0;
 
 // 目录图标缓存
 static int folderIconCached = 0;
@@ -45,68 +37,9 @@ static int addExeIconCache(wchar_t* path, int iconIndex) {
     return exeIconCacheCount++, iconIndex;
 }
 
-// 快速查找扩展名图标缓存
-static int findExtIconCache(wchar_t* ext) {
-    if (!ext) return -1;
-    for (int i = 0; i < extCacheCount; i++) {
-        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
-            return extIconCache[i].icon;
-        }
-    }
-    return -1;
-}
 
-// 从扩展名缓存中获取类型名称
-static wchar_t* findExtTypeNameCache(wchar_t* ext) {
-    if (!ext) return NULL;
-    for (int i = 0; i < extCacheCount; i++) {
-        if (wcsicmp(extIconCache[i].ext, ext) == 0) {
-            return extIconCache[i].typeName;
-        }
-    }
-    return NULL;
-}
 
 // 添加扩展名图标缓存
-static void addExtIconCache(wchar_t* ext, int icon, wchar_t* typeName) {
-    if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
-    wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
-    extIconCache[extCacheCount].icon = icon;
-    if (typeName) {
-        wcsncpy_s(extIconCache[extCacheCount].typeName, 64, typeName, 63);
-    } else {
-        extIconCache[extCacheCount].typeName[0] = L'\0';
-    }
-    extCacheCount++;
-}
-// 启动时一次性从注册表枚举所有已缓存的图标索引到内存，
-// 后续 findExtIconCache 命中率接近 100%，零注册表访问。
-static void preloadIconCacheFromRegistry(void) {
-    HKEY hkey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
-        return;
-    }
-
-    DWORD index = 0;
-    while (extCacheCount < EXT_CACHE_SIZE) {
-        wchar_t extName[16] = {0};
-        DWORD extNameSize = 16;
-        DWORD iconIndex = 0;
-        DWORD dataSize = sizeof(DWORD);
-        DWORD type = 0;
-
-        LONG result = RegEnumValueW(hkey, index, extName, &extNameSize,
-                                     NULL, &type, (LPBYTE)&iconIndex, &dataSize);
-        if (result != ERROR_SUCCESS) break;
-
-        if (type == REG_DWORD && findExtIconCache(extName) < 0) {
-            addExtIconCache(extName, (int)iconIndex, NULL);
-        }
-        index++;
-    }
-
-    RegCloseKey(hkey);
-}
 
 
 enum Msg {
@@ -536,63 +469,29 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
                     bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
                     
-                    int cachedIcon = -1;
-                    if (!isExeOrLnk) {
-                        cachedIcon = findExtIconCache(ext);
-                        // 如果内存缓存未命中，尝试从注册表加载
-                        if (cachedIcon < 0 && ext) {
-                            int regIcon = -1;
-                            if (loadExtIconCacheFromRegistry(ext, &regIcon)) {
-                                // 同时加入内存缓存，下次更快
-                                addExtIconCache(ext, regIcon, NULL);
-                                cachedIcon = regIcon;
-                            }
-                        }
-                    } else {
+                    if (isExeOrLnk) {
                         // exe/lnk 使用路径缓存
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
-                        cachedIcon = findExeIconCache(path);
-                    }
-                    
-                    if (cachedIcon >= 0) {
-                        item->icon = cachedIcon;
-                        // 缓存命中时需要同时设置文件类型名称，否则类型列会显示空白
-                        if (isExeOrLnk) {
-                            // exe/lnk 的类型由扩展名决定
+                        int cachedIcon = findExeIconCache(path);
+                        if (cachedIcon >= 0) {
+                            item->icon = cachedIcon;
                             wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
-                        } else if (ext) {
-                            // 从缓存获取类型名称
-                            wchar_t* cachedType = findExtTypeNameCache(ext);
-                            if (cachedType && cachedType[0] != L'\0') {
-                                wcscpy_s(item->type, 80, cachedType);
-                            } else {
-                                // 缓存项没有类型名（如从注册表加载），从扩展名生成
-                                wchar_t value[30] = {0};
-                                strToUpper(ext + 1, value);
-                                swprintf_s(item->type, 80, lc_str.fmt_file, value);
-                            }
+                        } else {
+                            struct FileInfo fi = {0};
+                            getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                            item->icon = fi.icon;
+                            addExeIconCache(path, fi.icon);
+                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
                         }
-                    }
-                    else {
+                    } else {
+                        // 非 exe/lnk：直接调 SHGetFileInfo（SHGFI_USEFILEATTRIBUTES 极快，不读文件）
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
-                        
                         struct FileInfo fi = {0};
                         getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
                         item->icon = fi.icon;
-                        
-                        if (isExeOrLnk) {
-                            addExeIconCache(path, fi.icon);
-                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
-                        } else {
-                            wcscpy_s(item->type, 80, fi.typeName);
-                            if (ext) {
-                                addExtIconCache(ext, fi.icon, fi.typeName);
-                                // 持久化到注册表，跨会话复用
-                                saveExtIconCacheToRegistry(ext, fi.icon);
-                            }
-                        }
+                        wcscpy_s(item->type, 80, fi.typeName);
                     }
                     
                     // 格式化文件大小和日期
@@ -782,7 +681,6 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     viewStyle = newViewStyle;
     refreshContentView();
     // 视图样式切换时（大/小图标），图标索引在系统图像列表中不同，需要清空缓存重新获取
-    extCacheCount = 0;
     folderIconCached = 0;
     exeIconCacheCount = 0;
 }
@@ -828,7 +726,6 @@ void createContentView() {
     cmiShowIcon.text = lc_str.show_icon;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
-    preloadIconCacheFromRegistry();
     createLVColumns();
     UpdateWindow(hwndContentView);
 }
@@ -1361,13 +1258,8 @@ static int compareDate(const void* a, const void* b) {
 }
 
 void clearIconCaches() {
-    // 清空内存中的图标缓存
-    extCacheCount = 0;
     folderIconCached = 0;
     exeIconCacheCount = 0;
-    
-    // 清空注册表中的持久化图标缓存
-    RegDeleteTree(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH);
 }
 void sortItems() {
     switch (sortColumnIdx) {
