@@ -13,6 +13,8 @@ extern HWND hwndStatusbar;
 extern HWND hwndToolbar;
 extern HWND hwndTreeview;
 
+HMENU hMenuView = NULL;
+
 HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
 HFONT hGuiFont = NULL;
@@ -365,6 +367,7 @@ static void createMainMenu() {
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_SELECT_ALL, lc_str.select_all);
     
     HMENU hmView = CreatePopupMenu();
+    hMenuView = hmView;
     AppendMenu(hmView, MF_STRING, ID_VIEW_LARGEICONS, lc_str.large_icons);
     AppendMenu(hmView, MF_STRING, ID_VIEW_SMALLICONS, lc_str.small_icons);
     AppendMenu(hmView, MF_STRING, ID_VIEW_LIST, lc_str.list);
@@ -471,7 +474,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     
-    setViewStyle(STYLE_DETAILS);
+    setViewStyle(loadViewStyle());
+    updateViewMenuCheckmarks();
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
     

@@ -165,6 +165,7 @@ static wchar_t iconViewerFileName[MAX_PATH] = {0};
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
+extern HMENU hMenuView;
 
 HWND hwndContentView = NULL;
 
@@ -809,6 +810,8 @@ void searchFor(wchar_t* keyword) {
     CreateThread(NULL, 0, searchTask, searchData, 0, NULL);
 }
 
+static void saveViewStyle(void);
+
 void setViewStyle(enum ViewStyle newViewStyle) {
     LONG_PTR wndstyle = GetWindowLongPtr(hwndContentView, GWL_STYLE);
     wndstyle &= ~LVS_TYPEMASK;
@@ -837,6 +840,48 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     // 视图样式切换时（大/小图标），图标索引在系统图像列表中不同，需要清空缓存重新获取
     folderIconCached = 0;
     exeIconCacheCount = 0;
+
+    // 持久化视图样式到注册表
+    saveViewStyle();
+    // 更新菜单栏选中标记
+    updateViewMenuCheckmarks();
+}
+
+static void saveViewStyle(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, NULL,
+                       REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS) {
+        DWORD val = (DWORD)viewStyle;
+        RegSetValueEx(hkey, L"ViewStyle", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        RegCloseKey(hkey);
+    }
+}
+
+enum ViewStyle loadViewStyle(void) {
+    HKEY hkey;
+    DWORD val = (DWORD)STYLE_DETAILS;
+    DWORD size = sizeof(val);
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+        RegQueryValueEx(hkey, L"ViewStyle", NULL, NULL, (BYTE*)&val, &size);
+        RegCloseKey(hkey);
+    }
+    if (val > STYLE_DETAILS) val = (DWORD)STYLE_DETAILS;
+    return (enum ViewStyle)val;
+}
+
+void updateViewMenuCheckmarks(void) {
+    if (!hMenuView) return;
+    UINT first = ID_VIEW_LARGEICONS;
+    UINT last  = ID_VIEW_DETAILS;
+    UINT check;
+    switch (viewStyle) {
+        case STYLE_LARGE_ICON:  check = ID_VIEW_LARGEICONS; break;
+        case STYLE_SMALL_ICON:  check = ID_VIEW_SMALLICONS; break;
+        case STYLE_LIST:        check = ID_VIEW_LIST;       break;
+        case STYLE_DETAILS:
+        default:                check = ID_VIEW_DETAILS;    break;
+    }
+    CheckMenuRadioItem(hMenuView, first, last, check, MF_BYCOMMAND);
 }
 
 void createLVColumns() {

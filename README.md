@@ -11,6 +11,29 @@
 
 ![Screenshot](wfm2.png)
 
+# 注册表结构
+```
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM]
+"ViewStyle"=dword:00000003
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\Bookmarks]
+"Bookmark0"="Z:\\tmp"
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\ContextMenu]
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\ContextMenu\7-Zip]
+"Extract Here"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zG.exe x \"%FILE%\" -r -o\"%DIR%\" -y"
+"Extract to Folder"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zG.exe x \"%FILE%\" -r -o\"%DIR%\\\\%BASENAME%\" -y"
+"Open Archive"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zFM.exe \"%FILE%\""
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\Language]
+"lang"="zh"
+
+
+```
+
 # 实现的功能（排名不分前后）
 
 1. 右键exe的菜单功能里可以查看更清晰的文件图标
@@ -44,7 +67,7 @@ A: 点击查看-> 清理图标缓存 即可
 
 Q： 禁用libcdio 挂载功能？
 
-A：在编译时加上 ```make USE_LIBCDIO=0``` 或者运行时 执行 wfm --nolibcdio PATH/Empty
+A：在编译时加上 ```make USE_LIBCDIO=0``` 
 
 Q: 需要创建X挂载盘？
 

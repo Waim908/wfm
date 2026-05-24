@@ -32,5 +32,7 @@ void onBookmarkButtonClick();
 void onMenuItemUnloadISOImageClick();
 void onMenuItemLocateISOImageClick();
 void clearIconCaches();
+enum ViewStyle loadViewStyle(void);
+void updateViewMenuCheckmarks(void);
 
 #endif
