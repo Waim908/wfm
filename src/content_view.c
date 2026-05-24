@@ -100,6 +100,8 @@ struct ListItem {
     uint64_t size;
     wchar_t* path;
     FILETIME modifiedTime;
+    uint64_t driveTotalBytes;
+    uint64_t driveFreeBytes;
 };
 
 struct SearchData {
@@ -294,6 +296,17 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             else updateStatusbar();
             break;
         }
+        case WM_NOTIFY: {
+            // Force full redraw when SIZE column is resized
+            NMHDR* hdr = (NMHDR*)lParam;
+            if (hdr->code == HDN_ITEMCHANGEDW || hdr->code == HDN_ITEMCHANGEDA) {
+                NMHEADERW* nmh = (NMHEADERW*)hdr;
+                if (nmh->iItem == COLUMN_SIZE_IDX) {
+                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+            }
+            break;
+        }
     }
     return OrigWndProc(hwnd, msg, wParam, lParam);  
 }
@@ -477,6 +490,73 @@ static void createContextMenu(enum ContextMenuType type) {
 
 LRESULT contentViewNotify(NMHDR* nmhdr) {
     switch (nmhdr->code) {
+        case NM_CUSTOMDRAW: {
+            NMLVCUSTOMDRAW* lvcd = (NMLVCUSTOMDRAW*)nmhdr;
+            switch (lvcd->nmcd.dwDrawStage) {
+                case CDDS_PREPAINT:
+                    return CDRF_NOTIFYITEMDRAW;
+                case CDDS_ITEMPREPAINT: {
+                    int idx = (int)lvcd->nmcd.dwItemSpec;
+                    if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
+                        && items[idx].driveTotalBytes > 0) {
+                        return CDRF_NOTIFYSUBITEMDRAW;
+                    }
+                    return CDRF_DODEFAULT;
+                }
+                case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
+                    int idx = (int)lvcd->nmcd.dwItemSpec;
+                    if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
+                        && items[idx].driveTotalBytes > 0 && lvcd->iSubItem == COLUMN_SIZE_IDX) {
+                        
+                        struct ListItem* item = &items[idx];
+                        HDC hdc = lvcd->nmcd.hdc;
+                        RECT rc = lvcd->nmcd.rc;
+                        
+                        // Margin inside the cell
+                        InflateRect(&rc, -2, -1);
+                        
+                        // Background bar: light gray for free space
+                        HBRUSH hBrFree = CreateSolidBrush(RGB(230, 235, 240));
+                        FillRect(hdc, &rc, hBrFree);
+                        DeleteObject(hBrFree);
+                        
+                        // Used space bar
+                        double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
+                                       / (double)item->driveTotalBytes;
+                        if (usedPct < 0.0) usedPct = 0.0;
+                        if (usedPct > 1.0) usedPct = 1.0;
+                        int usedWidth = (int)((rc.right - rc.left) * usedPct);
+                        
+                        if (usedWidth > 0) {
+                            RECT usedRc = rc;
+                            usedRc.right = rc.left + usedWidth;
+                            
+                            // Color: blue (<80%), yellow (80-90%), red (>90%)
+                            COLORREF barColor;
+                            if (usedPct < 0.8) barColor = RGB(100, 181, 246);
+                            else if (usedPct < 0.9) barColor = RGB(255, 213, 79);
+                            else barColor = RGB(239, 154, 154);
+                            
+                            HBRUSH hBrUsed = CreateSolidBrush(barColor);
+                            FillRect(hdc, &usedRc, hBrUsed);
+                            DeleteObject(hBrUsed);
+                        }
+                        
+                        // Text overlay
+                        SetBkMode(hdc, TRANSPARENT);
+                        SetTextColor(hdc, RGB(50, 50, 50));
+                        HFONT hOldFont = SelectObject(hdc, hGuiFont);
+                        DrawTextW(hdc, item->formattedSize, -1, &rc,
+                                  DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
+                        SelectObject(hdc, hOldFont);
+                        
+                        return CDRF_SKIPDEFAULT;
+                    }
+                    return CDRF_DODEFAULT;
+                }
+            }
+            return CDRF_DODEFAULT;
+        }
         case LVN_GETDISPINFO: {
             NMLVDISPINFO* nmlvdi = (NMLVDISPINFO*)nmhdr;
             UINT mask = nmlvdi->item.mask;
@@ -565,6 +645,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
                         ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
                         if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
+                            item->driveTotalBytes = totalBytes.QuadPart;
+                            item->driveFreeBytes = freeBytesAvail.QuadPart;
                             formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
                         }
                     }
