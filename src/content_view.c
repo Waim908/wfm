@@ -94,7 +94,7 @@ struct ListItem {
     int icon;
     struct FileNode* node;
     wchar_t type[64];
-    wchar_t formattedSize[32];
+    wchar_t formattedSize[64];
     wchar_t formattedDate[32];
     bool loaded;
     uint64_t size;
@@ -560,6 +560,14 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
                     item->icon = fi.icon;
                     wcscpy_s(item->type, 80, fi.typeName);
+                    if (item->node->type == TYPE_DRIVE) {
+                        wchar_t rootPath[4] = {0};
+                        swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
+                        ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
+                        if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
+                            formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
+                        }
+                    }
                 }
                 
                 item->loaded = true;                
@@ -582,7 +590,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         nmlvdi->item.pszText = item->type;
                         break;
                     case COLUMN_SIZE_IDX:
-                        nmlvdi->item.pszText = item->node->type == TYPE_FILE ? item->formattedSize : L"";
+                        nmlvdi->item.pszText = (item->node->type == TYPE_FILE || item->node->type == TYPE_DRIVE) ? item->formattedSize : L"";
                         break;
                     case COLUMN_DATE_IDX:
                         nmlvdi->item.pszText = item->node->type == TYPE_FILE ? item->formattedDate : L"";
@@ -747,7 +755,7 @@ void createLVColumns() {
     column.pszText = lc_str.type;
     ListView_InsertColumn(hwndContentView, COLUMN_TYPE_IDX, &column);
 
-    column.cx = 60;
+    column.cx = 170;
     column.pszText = lc_str.size;
     ListView_InsertColumn(hwndContentView, COLUMN_SIZE_IDX, &column);
 

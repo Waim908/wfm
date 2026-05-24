@@ -81,6 +81,7 @@ static inline void loadStrings_zh() {
     lc_str.msg_x_drive_not_found = L"未找到 X: 盘，请先在 winecfg 中添加驱动器 X: 并设置为光驱类型";
     lc_str.msg_image_dir_not_found = L"映像文件所在目录不存在";
     lc_str.save_icon = L"保存图标";
+    lc_str.fmt_drive_space = L"可用 %ls / 共 %ls";
 
     lc_str.fmt_file = L"%ls 文件";
 

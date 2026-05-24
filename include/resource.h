@@ -176,6 +176,7 @@ struct LC_STR {
     wchar_t* msg_image_dir_not_found;
     wchar_t* msg_x_drive_not_found;
     wchar_t* save_icon;
+    wchar_t* fmt_drive_space;
 };
 
 extern struct LC_STR lc_str;

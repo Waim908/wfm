@@ -46,6 +46,31 @@ static inline void formatFileSize(uint64_t size, wchar_t* formattedSize) {
     else wcscpy_s(formattedSize, 32, L"0 bytes");
 }
 
+static inline void formatOneSize(uint64_t val, wchar_t* buf, int bufSize) {
+    static const wchar_t units[5][11] = {L"bytes", L"KB", L"MB", L"GB", L"TB"};
+    if (val > 0) {
+        int digitGroups = (int)(log10((double)val) / log10(1024.0));
+        swprintf_s(buf, bufSize, L"%.2f %ls", (double)val / pow(1024.0, digitGroups), units[digitGroups]);
+        wchar_t* lastDot = wcsrchr(buf, L'.');
+        if (lastDot) {
+            int offset = (int)(lastDot - buf);
+            if (buf[offset+1] == L'0' && buf[offset+2] == L'0') {
+                int len = wcslen(buf);
+                for (int i = 0; i < len-3; i++) buf[offset+i] = buf[offset+i+3];
+            }
+        }
+    }
+    else wcscpy_s(buf, bufSize, L"0 bytes");
+}
+
+static inline void formatDriveSpace(uint64_t totalBytes, uint64_t freeBytes, wchar_t* result, int resultSize) {
+    wchar_t freeStr[32] = {0};
+    wchar_t totalStr[32] = {0};
+    formatOneSize(freeBytes, freeStr, 32);
+    formatOneSize(totalBytes, totalStr, 32);
+    swprintf_s(result, resultSize, lc_str.fmt_drive_space, freeStr, totalStr);
+}
+
 static inline void getParentDirFromPath(wchar_t* path, wchar_t* result) {
     wchar_t* lastSlash = wcsrchr(path, L'\\');
     int len = lastSlash ? lastSlash - path + 1 : 1;
