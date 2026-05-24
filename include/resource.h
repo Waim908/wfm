@@ -81,7 +81,7 @@ void freeUIcons();
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5-mod.2.1"
+#define APP_VERSION L"1.5-mod.2.2"
 #define APP_DEV_NAME L"BrunoSX"
 
 #ifndef RESOURCE_H
@@ -175,6 +175,7 @@ struct LC_STR {
     wchar_t* msg_no_mounted_image;
     wchar_t* msg_image_dir_not_found;
     wchar_t* msg_x_drive_not_found;
+    wchar_t* msg_no_libcdio;
     wchar_t* save_icon;
     wchar_t* fmt_drive_space;
 };

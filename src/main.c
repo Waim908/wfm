@@ -1,5 +1,7 @@
 #include "main.h"
+#ifdef USE_LIBCDIO
 #include "libcdio_loader.h"
+#endif
 
 static const wchar_t mainWndClass[] = L"WFM-MainWnd";
 
@@ -37,7 +39,9 @@ void updateGuiFont() {
     }
 }
 HICON uiIcons[NUM_UI_ICONS] = {0};
+#ifdef USE_LIBCDIO
 BOOL g_noLibcdio = FALSE;
+#endif
 static wchar_t g_currentLang[8] = {0};  // en, zh, pt, ru
 
 struct IconMapping {
@@ -178,10 +182,18 @@ void mainMenuCommand(WPARAM wParam) {
             navigateRefresh();
             break;
         case ID_MOUNT_LOCATE_ISO:
+#ifdef USE_LIBCDIO
             onMenuItemLocateISOImageClick();
+#else
+            MessageBox(hwndMain, lc_str.msg_no_libcdio, lc_str.alert, MB_OK);
+#endif
             break;
         case ID_MOUNT_UNMOUNT_ISO:
+#ifdef USE_LIBCDIO
             onMenuItemUnloadISOImageClick();
+#else
+            MessageBox(hwndMain, lc_str.msg_no_libcdio, lc_str.alert, MB_OK);
+#endif
             break;
         case ID_LANG_EN: switchLanguage(L"en"); break;
         case ID_LANG_ZH: switchLanguage(L"zh"); break;
@@ -364,8 +376,12 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
     HMENU hmMount = CreatePopupMenu();
+#ifdef USE_LIBCDIO
     AppendMenu(hmMount, MF_STRING, ID_MOUNT_LOCATE_ISO, lc_str.locate_iso);
     AppendMenu(hmMount, MF_STRING, ID_MOUNT_UNMOUNT_ISO, lc_str.unmount_iso);
+#else
+    AppendMenu(hmMount, MF_STRING | MF_GRAYED, 0, lc_str.msg_no_libcdio);
+#endif
 
     HMENU hmHelp = CreatePopupMenu();
     AppendMenu(hmHelp, MF_STRING, ID_HELP_ABOUT, lc_str.about);
@@ -397,7 +413,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     wchar_t* navigatePath = NULL;
     for (int i = 1; i < numArgs; i++) {
         if (wcscmp(args[i], L"--nolibcdio") == 0) {
+#ifdef USE_LIBCDIO
             g_noLibcdio = TRUE;
+#endif
         } else {
             // 第一个非 -- 开头的参数作为导航路径
             if (!navigatePath) navigatePath = args[i];
@@ -484,7 +502,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         DispatchMessage(&msg);
     }
     
+#ifdef USE_LIBCDIO
     libcdio_free();
+#endif
     
     return (int)msg.wParam;
 }

@@ -80,6 +80,7 @@ static inline void loadStrings_en() {
     lc_str.msg_no_mounted_image = L"No mounted image file";
     lc_str.msg_x_drive_not_found = L"X: drive not found. Please add drive X: in winecfg and set it as CD-ROM type";
     lc_str.msg_image_dir_not_found = L"Image file directory not found";
+    lc_str.msg_no_libcdio = L"This version does not support libcdio";
     lc_str.save_icon = L"Save Icon";
     lc_str.fmt_drive_space = L"%ls / %ls";
 

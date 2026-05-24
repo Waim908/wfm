@@ -116,8 +116,10 @@ struct ContextMenuItem {
     wchar_t* cmdData;
 };
 
+#ifdef USE_LIBCDIO
 static void onMenuItemLoadISOImageClick();
 void onMenuItemUnloadISOImageClick();
+#endif
 static void onMenuItemShowIconClick();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
@@ -131,8 +133,10 @@ static struct ContextMenuItem cmiPaste = {NULL, &onMenuItemPasteClick, NULL};
 static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcutClick, NULL};
 static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL};
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL};
+#ifdef USE_LIBCDIO
 static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL};
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
+#endif
 static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
 
 static WNDPROC OrigWndProc;
@@ -428,12 +432,14 @@ static void createCDDriveContextMenu(int* id) {
     
     wchar_t itemText[64] = {0};
     swprintf_s(itemText, MAX_PATH, L"%ls <%ls>", lc_str.load_iso_image, currentISOPathLen != MAX_PATH ? currentISOPath : lc_str.no_media);
+#ifdef USE_LIBCDIO
     cmiLoadISOImage.text = itemText;
-    addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
     cmiLoadISOImage.text = NULL;
     
+    addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
     addContextMenuItem(hSubmenu, (*id)++, &cmiUnloadISOImage, false);
     
+#endif
     MENUITEMINFO item = {0};
     item.cbSize = sizeof(MENUITEMINFO);
     item.fMask = MIIM_TYPE | MIIM_ID | MIIM_SUBMENU;
@@ -861,8 +867,10 @@ void createContentView() {
     cmiPasteShortcut.text = lc_str.paste_shortcut;
     cmiNewFolder.text = lc_str.new_folder;
     cmiNewFile.text = lc_str.new_file;
+#ifdef USE_LIBCDIO
     cmiLoadISOImage.text = NULL;
     cmiUnloadISOImage.text = lc_str.unload_iso_image;
+#endif
     cmiShowIcon.text = lc_str.show_icon;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
@@ -990,6 +998,7 @@ void onBookmarkButtonClick() {
     addCurrentPathToBookmark();
 }
 
+#ifdef USE_LIBCDIO
 static void onMenuItemLoadISOImageClick() {
     if (numSelectedItems != 1) {
         MessageBox(NULL, lc_str.msg_invalid_iso_image_file, lc_str.alert, MB_OK);
@@ -1041,6 +1050,7 @@ void onMenuItemLocateISOImageClick() {
     }
     navigateToPath(parentDir);
 }
+#endif /* USE_LIBCDIO */
 
 static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     if (!hIcon || !filePath) return FALSE;

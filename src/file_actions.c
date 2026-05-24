@@ -1,7 +1,9 @@
 #include "main.h"
+#ifdef USE_LIBCDIO
 #include "libcdio_loader.h"
 
 extern BOOL g_noLibcdio;
+#endif
 
 #define ID_EVENT_PRELOADER 100
 #define PRELOADER_PERIOD 120
@@ -153,6 +155,7 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
     return (INT_PTR)FALSE;
 }
 
+#ifdef USE_LIBCDIO
 static void extractSingleISOFile(void* handle, bool isCDImage, iso9660_stat_t* isoStat, wchar_t* dstPath) {
     char filename[MAX_PATH] = {0};
     WideCharToMultiByte(CP_ACP, 0, dstPath, -1, filename, MAX_PATH, NULL, NULL);
@@ -224,10 +227,13 @@ static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wcha
     ptr_iso9660_filelist_free(isoFileList);
 }
 
+#endif /* USE_LIBCDIO */
+
 static DWORD WINAPI fileActionTask(void* param) {
     struct ActionData* actionData = (struct ActionData*)param;
     
     if (actionData->action == ACTION_ISO_EXTRACT) {
+#ifdef USE_LIBCDIO
         if (g_noLibcdio) {
             MessageBoxW(NULL, L"ISO extraction is disabled. Use without --nolibcdio to enable.", L"Feature Disabled", MB_OK | MB_ICONWARNING);
             SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
@@ -266,6 +272,11 @@ static DWORD WINAPI fileActionTask(void* param) {
                 ptr_iso9660_close(iso);
             }
         }
+#else
+        MessageBoxW(NULL, lc_str.msg_no_libcdio, L"WFM", MB_OK | MB_ICONWARNING);
+        SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
+        return 0;
+#endif
     }
     else {
         DWORD lastTime = GetTickCount();
@@ -468,6 +479,11 @@ void createDesktopShortcuts(struct FileNode** nodes, int count) {
 }
 
 void extractFilesFromISOImage(wchar_t* isoPath, wchar_t* dstPath) {
+#ifndef USE_LIBCDIO
+    MessageBoxW(NULL, lc_str.msg_no_libcdio, L"WFM", MB_OK | MB_ICONINFORMATION);
+    return;
+#endif
+
     actionData = calloc(1, sizeof(struct ActionData));
     if (!actionData) return;
     

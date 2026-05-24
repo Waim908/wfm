@@ -1,13 +1,17 @@
-OBJS=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/bookmarks.o obj/resource.o obj/libcdio_loader.o
-INCLUDE_DIR=-I./include -I./include/libcdio
+OBJS_BASE=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/bookmarks.o obj/resource.o
+OBJS_LIBCDIO=obj/libcdio_loader.o
+INCLUDE_DIR=-I./include
 EXE_NAME=wfm.exe
 
-LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -lcomdlg32 -Wl,--subsystem,windows
-ifdef USE_LIBCDIO
-LDFLAGS+=./libcdio.dll
-CFLAGS+=-DUSE_LIBCDIO
-endif
 CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall
+LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -lcomdlg32 -Wl,--subsystem,windows
+ifeq ($(USE_LIBCDIO),1)
+OBJS=$(OBJS_BASE) $(OBJS_LIBCDIO)
+INCLUDE_DIR+=-I./include/libcdio
+LDFLAGS+=./libcdio.dll
+CFLAGS:=-DUSE_LIBCDIO $(CFLAGS)
+endif
+OBJS?=$(OBJS_BASE)
 
 # Detect OS and set compiler/toolchain accordingly
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
