@@ -39,9 +39,6 @@ void updateGuiFont() {
     }
 }
 HICON uiIcons[NUM_UI_ICONS] = {0};
-#ifdef USE_LIBCDIO
-BOOL g_noLibcdio = FALSE;
-#endif
 static wchar_t g_currentLang[8] = {0};  // en, zh, pt, ru
 
 struct IconMapping {
@@ -375,12 +372,10 @@ static void createMainMenu() {
     
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
-    HMENU hmMount = CreatePopupMenu();
 #ifdef USE_LIBCDIO
+    HMENU hmMount = CreatePopupMenu();
     AppendMenu(hmMount, MF_STRING, ID_MOUNT_LOCATE_ISO, lc_str.locate_iso);
     AppendMenu(hmMount, MF_STRING, ID_MOUNT_UNMOUNT_ISO, lc_str.unmount_iso);
-#else
-    AppendMenu(hmMount, MF_STRING | MF_GRAYED, 0, lc_str.msg_no_libcdio);
 #endif
 
     HMENU hmHelp = CreatePopupMenu();
@@ -397,7 +392,9 @@ static void createMainMenu() {
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmFile, lc_str.file);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmEdit, lc_str.edit);
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmView, lc_str.view);
+#ifdef USE_LIBCDIO
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmMount, lc_str.mount);
+#endif
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmLang, L"Language");
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmHelp, lc_str.help);
     
@@ -409,17 +406,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
     
-    // 解析命令行参数
+    // 解析命令行参数（第一个参数作为导航路径）
     wchar_t* navigatePath = NULL;
-    for (int i = 1; i < numArgs; i++) {
-        if (wcscmp(args[i], L"--nolibcdio") == 0) {
-#ifdef USE_LIBCDIO
-            g_noLibcdio = TRUE;
-#endif
-        } else {
-            // 第一个非 -- 开头的参数作为导航路径
-            if (!navigatePath) navigatePath = args[i];
-        }
+    if (numArgs > 1) {
+        navigatePath = args[1];
     }
     // Language: registry > system locale
     wchar_t localeName[16] = {0};

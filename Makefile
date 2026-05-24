@@ -32,6 +32,16 @@ else
     RMDIR = del /q obj\*.o 2>nul || exit 0
 endif
 
+# Detect build flag changes and force recompilation when USE_LIBCDIO toggles
+CURFLAGS := $(CFLAGS) $(INCLUDE_DIR)
+SAVEDFLAGS := $(shell cat .cflags 2>/dev/null)
+
+ifneq ($(CURFLAGS),$(SAVEDFLAGS))
+  $(shell rm -rf obj)
+  $(shell echo '$(CURFLAGS)' > .cflags)
+  $(info Build flags changed, forcing clean rebuild...)
+endif
+
 all: ${EXE_NAME}
 
 ${EXE_NAME}: ${OBJS}
@@ -40,6 +50,7 @@ ${EXE_NAME}: ${OBJS}
 clean:
 	${RMDIR}
 	${RM} ${EXE_NAME}
+	${RM} .cflags
 
 obj:
 	${MKDIR} obj

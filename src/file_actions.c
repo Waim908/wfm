@@ -1,8 +1,6 @@
 #include "main.h"
 #ifdef USE_LIBCDIO
 #include "libcdio_loader.h"
-
-extern BOOL g_noLibcdio;
 #endif
 
 #define ID_EVENT_PRELOADER 100
@@ -234,11 +232,6 @@ static DWORD WINAPI fileActionTask(void* param) {
     
     if (actionData->action == ACTION_ISO_EXTRACT) {
 #ifdef USE_LIBCDIO
-        if (g_noLibcdio) {
-            MessageBoxW(NULL, L"ISO extraction is disabled. Use without --nolibcdio to enable.", L"Feature Disabled", MB_OK | MB_ICONWARNING);
-            SendMessage(hwndDlg, MSG_CLOSE, 0, 0);
-            return 0;
-        }
         if (!libcdio_is_loaded() && !libcdio_load()) {
             MessageBoxW(NULL, L"Failed to load libcdio.dll", L"Error", MB_OK | MB_ICONERROR);
             SendMessage(hwndDlg, MSG_CLOSE, 0, 0);

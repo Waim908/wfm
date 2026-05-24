@@ -330,7 +330,6 @@ void updateSelectedItems() {
 }
 
 static void addContextMenuItem(HMENU hMenu, int id, struct ContextMenuItem* cmItem, bool separate) {
-    if (!cmItem->text) return;
     MENUITEMINFO item = {0};
     item.cbSize = sizeof(MENUITEMINFO);
     item.fMask = MIIM_TYPE | MIIM_DATA | MIIM_ID;
@@ -420,7 +419,6 @@ static void createContextMenuFromRegistry(int* id) {
     RegCloseKey(hkeyContextMenu);
 }
 
-#ifdef USE_LIBCDIO
 static void createCDDriveContextMenu(int* id) {
     HMENU hSubmenu = CreatePopupMenu();
     
@@ -436,9 +434,9 @@ static void createCDDriveContextMenu(int* id) {
     swprintf_s(itemText, MAX_PATH, L"%ls <%ls>", lc_str.load_iso_image, currentISOPathLen != MAX_PATH ? currentISOPath : lc_str.no_media);
 #ifdef USE_LIBCDIO
     cmiLoadISOImage.text = itemText;
-    addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
-    
     cmiLoadISOImage.text = NULL;
+    
+    addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
     addContextMenuItem(hSubmenu, (*id)++, &cmiUnloadISOImage, false);
     
 #endif
@@ -458,8 +456,6 @@ static void createCDDriveContextMenu(int* id) {
     item.fType = MFT_SEPARATOR;
     InsertMenuItem(hContextMenu, -1, TRUE, &item);    
 }
-#endif /* USE_LIBCDIO */
-
 
 static void createContextMenu(enum ContextMenuType type) {
     HMENU hMenu = CreatePopupMenu();
@@ -473,9 +469,7 @@ static void createContextMenu(enum ContextMenuType type) {
                 addContextMenuItem(hMenu, id++, &cmiOpen, false);
                 addContextMenuItem(hMenu, id++, &cmiEdit, true);
                 addContextMenuItem(hMenu, id++, &cmiShowIcon, true);
-                #ifdef USE_LIBCDIO
                 createCDDriveContextMenu(&id);
-                #endif
                 createContextMenuFromRegistry(&id);
             }
             else addContextMenuItem(hMenu, id++, &cmiOpen, true);
@@ -490,9 +484,7 @@ static void createContextMenu(enum ContextMenuType type) {
     else {
         addContextMenuItem(hMenu, id++, &cmiPaste, false);
         addContextMenuItem(hMenu, id++, &cmiPasteShortcut, true);
-        #ifdef USE_LIBCDIO
         createCDDriveContextMenu(&id);
-        #endif
         addContextMenuItem(hMenu, id++, &cmiNewFolder, false);
         addContextMenuItem(hMenu, id++, &cmiNewFile, false);
     }
