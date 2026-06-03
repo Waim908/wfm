@@ -96,6 +96,16 @@ static inline void loadStrings_ru() {
     lc_str.msg_confirm_delete_item = L"Вы уверены, что хотите удалить \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Вы уверены, что хотите удалить %d элементов?";
     lc_str.msg_confirm_exit_app = L"Вы уверены, что хотите выйти?";
+
+    // Toolbar short strings (abbreviated for narrow buttons)
+    lc_str.tb_up = L"Вверх";
+    lc_str.tb_copy = L"Копир.";
+    lc_str.tb_cut = L"Вырез.";
+    lc_str.tb_paste = L"Вставить";
+    lc_str.tb_delete = L"Удалить";
+    lc_str.tb_new_folder = L"Папка";
+    lc_str.tb_new_file = L"Файл";
+    lc_str.tb_bookmark = L"Закладка";
 }
 
 #endif

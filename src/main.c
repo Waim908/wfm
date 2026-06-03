@@ -41,7 +41,6 @@ void updateGuiFont() {
     }
 }
 HICON uiIcons[NUM_UI_ICONS] = {0};
-static wchar_t g_currentLang[8] = {0};  // en, zh, pt, ru
 
 struct IconMapping {
     int iconId;
@@ -329,29 +328,13 @@ void openFileNode(struct FileNode* node) {
     else navigateToFileNode(node);
 }
 
-// Switch language: save to registry, reload strings, recreate menu
+// Switch language: save to registry, prompt restart (takes effect on next launch)
 static void switchLanguage(const wchar_t* lang) {
-    wcscpy_s(g_currentLang, 8, lang);
     saveLanguageToRegistry(lang);
-    wchar_t langCopy[8] = {0};
-    wcscpy_s(langCopy, 8, lang);
-    loadLCStrings(langCopy);
-    
-    // Recreate the main menu with new strings
-    createMainMenu();
-    
-    // Refresh toolbar button texts
-    createToolButtons();
-    
-    // Refresh content view and tree
-    extern void navigateRefresh(void);
-    navigateRefresh();
-    
-    // Prompt restart
-    MessageBoxW(hwndMain, 
-        L"Language changed. Please restart the application.\n\n\u8bed\u8a00\u5df2\u5207\u6362\uff0c\u8bf7\u91cd\u542f\u7a0b\u5e8f\u3002",
+
+    MessageBoxW(hwndMain,
+        L"Language setting saved. It will take effect on next launch.\n\n\u8bed\u8a00\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u4e0b\u6b21\u542f\u52a8\u65f6\u751f\u6548\u3002",
         L"WFM", MB_OK | MB_ICONINFORMATION);
-    DestroyWindow(hwndMain);
 }
 
 static void createMainMenu() {
@@ -419,8 +402,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     if (!loadLanguageFromRegistry(localeName, sizeof(localeName))) {
         GetSystemDefaultLocaleName(localeName, 16);
     }
-    wcscpy_s(g_currentLang, 8, localeName);
-    
     loadLCStrings(localeName);
     
     globalHInstance = hInstance;

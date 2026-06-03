@@ -95,6 +95,16 @@ static inline void loadStrings_zh() {
     lc_str.msg_confirm_delete_item = L"确定要删除“%ls”吗？";
     lc_str.msg_confirm_delete_multiple_items = L"确定要删除 %d 个项目吗？";
     lc_str.msg_confirm_exit_app = L"确定要退出吗？";
+
+    // Toolbar short strings
+    lc_str.tb_up = L"向上";
+    lc_str.tb_copy = L"复制";
+    lc_str.tb_cut = L"剪切";
+    lc_str.tb_paste = L"粘贴";
+    lc_str.tb_delete = L"删除";
+    lc_str.tb_new_folder = L"新建文件夹";
+    lc_str.tb_new_file = L"新建文件";
+    lc_str.tb_bookmark = L"收藏";
 }
 
 #endif

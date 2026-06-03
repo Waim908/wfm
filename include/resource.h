@@ -178,6 +178,16 @@ struct LC_STR {
     wchar_t* msg_no_libcdio;
     wchar_t* save_icon;
     wchar_t* fmt_drive_space;
+
+    // Toolbar-specific short strings (for narrow buttons)
+    wchar_t* tb_up;
+    wchar_t* tb_copy;
+    wchar_t* tb_cut;
+    wchar_t* tb_paste;
+    wchar_t* tb_delete;
+    wchar_t* tb_new_folder;
+    wchar_t* tb_new_file;
+    wchar_t* tb_bookmark;
 };
 
 extern struct LC_STR lc_str;

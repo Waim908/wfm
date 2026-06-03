@@ -35,14 +35,14 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 void createToolButtons() {
-    buttons[0].text = lc_str.up;
-    buttons[1].text = lc_str.copy;
-    buttons[2].text = lc_str.cut;
-    buttons[3].text = lc_str.paste;
-    buttons[4].text = lc_str.delete;
-    buttons[5].text = lc_str.new_folder;
-    buttons[6].text = lc_str.new_file;
-    buttons[7].text = lc_str.bookmark;
+    buttons[0].text = lc_str.tb_up;
+    buttons[1].text = lc_str.tb_copy;
+    buttons[2].text = lc_str.tb_cut;
+    buttons[3].text = lc_str.tb_paste;
+    buttons[4].text = lc_str.tb_delete;
+    buttons[5].text = lc_str.tb_new_folder;
+    buttons[6].text = lc_str.tb_new_file;
+    buttons[7].text = lc_str.tb_bookmark;
 
     SendMessage(hwndToolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
     SendMessage(hwndToolbar, TB_SETINDENT, 2, 0);

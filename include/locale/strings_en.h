@@ -96,6 +96,16 @@ static inline void loadStrings_en() {
     lc_str.msg_confirm_delete_item = L"Are you sure you want to delete \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Are you sure you want to delete %d items?";
     lc_str.msg_confirm_exit_app = L"Are you sure you want to exit?";
+
+    // Toolbar short strings
+    lc_str.tb_up = L"Up";
+    lc_str.tb_copy = L"Copy";
+    lc_str.tb_cut = L"Cut";
+    lc_str.tb_paste = L"Paste";
+    lc_str.tb_delete = L"Delete";
+    lc_str.tb_new_folder = L"New Folder";
+    lc_str.tb_new_file = L"New File";
+    lc_str.tb_bookmark = L"Bookmark";
 }
 
 #endif

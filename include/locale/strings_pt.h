@@ -95,6 +95,16 @@ static inline void loadStrings_pt() {
     lc_str.msg_confirm_delete_item = L"Tem certeza de que deseja excluir \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Tem certeza de que deseja excluir %d itens?";
     lc_str.msg_confirm_exit_app = L"Tem certeza de que deseja sair?";
+
+    // Toolbar short strings (abbreviated for narrow buttons)
+    lc_str.tb_up = L"Acima";
+    lc_str.tb_copy = L"Copiar";
+    lc_str.tb_cut = L"Cortar";
+    lc_str.tb_paste = L"Colar";
+    lc_str.tb_delete = L"Excluir";
+    lc_str.tb_new_folder = L"Pasta";
+    lc_str.tb_new_file = L"Arquivo";
+    lc_str.tb_bookmark = L"Favorito";
 }
 
 #endif
