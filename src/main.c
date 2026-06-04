@@ -14,6 +14,8 @@ extern HWND hwndToolbar;
 extern HWND hwndTreeview;
 
 HMENU hMenuView = NULL;
+HMENU hMenuLang = NULL;
+static wchar_t currentLocale[16] = {0};
 
 HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
@@ -139,6 +141,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
 
 static void createMainMenu(void);
 static void switchLanguage(const wchar_t* lang);
+static void updateLangMenuCheckmarks(void);
 
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
@@ -331,10 +334,22 @@ void openFileNode(struct FileNode* node) {
 // Switch language: save to registry, prompt restart (takes effect on next launch)
 static void switchLanguage(const wchar_t* lang) {
     saveLanguageToRegistry(lang);
+    wcscpy_s(currentLocale, 16, lang);
+    updateLangMenuCheckmarks();
 
     MessageBoxW(hwndMain,
         L"Language setting saved. It will take effect on next launch.\n\n\u8bed\u8a00\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u4e0b\u6b21\u542f\u52a8\u65f6\u751f\u6548\u3002",
         L"WFM", MB_OK | MB_ICONINFORMATION);
+}
+
+static void updateLangMenuCheckmarks(void) {
+    if (!hMenuLang) return;
+    UINT check;
+    if (wcsncmp(currentLocale, L"zh", 2) == 0)      check = ID_LANG_ZH;
+    else if (wcsncmp(currentLocale, L"pt", 2) == 0) check = ID_LANG_PT;
+    else if (wcsncmp(currentLocale, L"ru", 2) == 0) check = ID_LANG_RU;
+    else                                             check = ID_LANG_EN;
+    CheckMenuRadioItem(hMenuLang, ID_LANG_EN, ID_LANG_RU, check, MF_BYCOMMAND);
 }
 
 static void createMainMenu() {
@@ -369,6 +384,7 @@ static void createMainMenu() {
 
     // Language submenu (the word "Language" itself is NOT translated)
     HMENU hmLang = CreatePopupMenu();
+    hMenuLang = hmLang;
     AppendMenu(hmLang, MF_STRING, ID_LANG_EN, L"English");
     AppendMenu(hmLang, MF_STRING, ID_LANG_ZH, L"\u4e2d\u6587");
     AppendMenu(hmLang, MF_STRING, ID_LANG_PT, L"Portugu\u00eas");
@@ -406,6 +422,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         GetSystemDefaultLocaleName(localeName, 16);
     }
     loadLCStrings(localeName);
+    wcscpy_s(currentLocale, 16, localeName);
     
     globalHInstance = hInstance;
     preloadIcons();
@@ -446,6 +463,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     if (!hwndMain) return 0;
     
     createMainMenu();
+    updateLangMenuCheckmarks();
     createToolbar();
     createNavbar();
     createTreeview();
