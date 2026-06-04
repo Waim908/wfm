@@ -66,6 +66,16 @@ static void updateTreeItems() {
     tvis.hInsertAfter = TVI_ROOT;
     tvis.itemex.mask = TVIF_CHILDREN | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_TEXT | TVIF_STATE;
 
+    // 从"此电脑"节点获取系统图像列表（只需设置一次）
+    ITEMIDLIST* pidlComputer = NULL;
+    SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidlComputer);
+    if (pidlComputer) {
+        SHFILEINFO sfi = {0};
+        HIMAGELIST himl = (HIMAGELIST)SHGetFileInfo((LPCWSTR)pidlComputer, 0, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_PIDL);
+        if (himl) TreeView_SetImageList(hwndTreeview, himl, TVSIL_NORMAL);
+        CoTaskMemFree(pidlComputer);
+    }
+
     struct FileNode* node = treeFileNode;
     do {
         ITEMIDLIST* pidl = NULL;
@@ -91,9 +101,8 @@ static void updateTreeItems() {
         }
 
         SHFILEINFO sfi = {0};
-        HIMAGELIST himl = (HIMAGELIST)SHGetFileInfo((LPCWSTR)pidl, 0, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_PIDL);
+        SHGetFileInfo((LPCWSTR)pidl, 0, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_PIDL);
         CoTaskMemFree(pidl);
-        TreeView_SetImageList(hwndTreeview, himl, TVSIL_NORMAL);
 
         bool isExpandable = node->hasChildDirs;
         // 用户和文档节点不显示展开/折叠按钮，和桌面一样
