@@ -239,7 +239,12 @@ void clearContentView() {
     }
     numItems = 0;
     itemsCapacity = 0;
-    
+
+    // 清除搜索缓存，防止文件树重建后指针悬空
+    free(searchCache.results);
+    searchCache.results = NULL;
+    searchCache.count = 0;
+
     // 注意：图标缓存不再在此清空，以保持跨导航的加速效果
     // 只有在视图样式切换时才需要重建图像列表
     freeMenuItems();
@@ -818,20 +823,25 @@ static DWORD WINAPI searchTask(void* param) {
     batch.capacity = BATCH_SIZE;
     batch.nodes = malloc(batch.capacity * sizeof(struct FileNode*));
     batch.count = 0;
-    
+    if (!batch.nodes) { SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0); return 0; }
+
     int cacheCapacity = 1000;
     struct FileNode** cacheResults = malloc(cacheCapacity * sizeof(struct FileNode*));
     int cacheCount = 0;
-    
+    if (!cacheResults) { free(batch.nodes); SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0); return 0; }
+
     while (stackSize > 0 && numItems < 10000 && searchData->active) {
         struct FileNode* node = stack[--stackSize];
         while (node && searchData->active) {
             if (wcsstrIgnoreCase(node->name, keyword)) {
                 batch.nodes[batch.count++] = node;
-                
+
                 if (cacheCount >= cacheCapacity) {
-                    cacheCapacity *= 2;
-                    cacheResults = realloc(cacheResults, cacheCapacity * sizeof(struct FileNode*));
+                    int newCap = cacheCapacity * 2;
+                    struct FileNode** tmp = realloc(cacheResults, newCap * sizeof(struct FileNode*));
+                    if (!tmp) break;
+                    cacheResults = tmp;
+                    cacheCapacity = newCap;
                 }
                 cacheResults[cacheCount++] = node;
                 
@@ -894,6 +904,12 @@ void searchFor(wchar_t* keyword) {
     getFileNodePath(currPathFileNode, path);
     
     if (isSearchCacheValid(path, keyword)) {
+        // 先保存缓存数据到局部变量，因为clearContentView会清空缓存
+        int cachedCount = searchCache.count;
+        struct FileNode** cachedResults = searchCache.results;
+        searchCache.results = NULL;
+        searchCache.count = 0;
+
         clearContentView();
         createLVColumns();
 
@@ -903,9 +919,25 @@ void searchFor(wchar_t* keyword) {
         column.pszText = lc_str.path;
         ListView_InsertColumn(hwndContentView, COLUMN_PATH_IDX, &column);
 
-        for (int i = 0; i < searchCache.count; i++) {
-            SendMessage(hwndContentView, MSG_ADD_ITEM, 0, (LPARAM)searchCache.results[i]);
+        items = malloc(cachedCount * sizeof(struct ListItem));
+        itemsCapacity = cachedCount;
+        numItems = cachedCount;
+
+        for (int i = 0; i < cachedCount; i++) {
+            struct ListItem* item = &items[i];
+            item->node = cachedResults[i];
+            item->path = NULL;
+            item->loaded = false;
+            fillFileInfo(cachedResults[i], item);
         }
+
+        // 重新缓存（指针仍然有效，因为currPathFileNode未变）
+        searchCache.results = cachedResults;
+        searchCache.count = cachedCount;
+        searchCache.timestamp = time(NULL);
+
+        ListView_SetItemCountEx(hwndContentView, numItems, 0);
+        updateStatusbar();
         return;
     }
 
