@@ -33,4 +33,20 @@ static inline void strToUpper(wchar_t* str, wchar_t* result) {
     result[count] = L'\0';
 }
 
+static inline wchar_t* wcsstrIgnoreCase(const wchar_t* str, const wchar_t* pattern) {
+    if (!str || !pattern || !*pattern) return (wchar_t*)str;
+    
+    size_t patternLen = wcslen(pattern);
+    for (const wchar_t* p = str; *p; p++) {
+        if (towlower(*p) == towlower(*pattern)) {
+            size_t i;
+            for (i = 1; i < patternLen; i++) {
+                if (!p[i] || towlower(p[i]) != towlower(pattern[i])) break;
+            }
+            if (i == patternLen) return (wchar_t*)p;
+        }
+    }
+    return NULL;
+}
+
 #endif

@@ -81,6 +81,7 @@ static int addExeIconCache(wchar_t* path, int iconIndex) {
 
 enum Msg {
     MSG_ADD_ITEM = WM_APP,
+    MSG_ADD_ITEMS_BATCH,
     MSG_SEARCH_DONE
 };
 
@@ -108,6 +109,22 @@ struct SearchData {
     wchar_t* keyword;
     bool active;
     bool canceled;
+};
+
+struct SearchCache {
+    wchar_t path[MAX_PATH];
+    wchar_t keyword[64];
+    struct FileNode** results;
+    int count;
+    time_t timestamp;
+};
+
+static struct SearchCache searchCache = {0};
+
+struct BatchItems {
+    struct FileNode** nodes;
+    int count;
+    int capacity;
 };
 
 struct ContextMenuItem {
@@ -142,6 +159,7 @@ static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NUL
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
 static int numItems = 0;
+static int itemsCapacity = 0;
 static enum ViewStyle viewStyle = STYLE_DETAILS;
 static HMENU hContextMenu;
 static char sortColumnIdx = COLUMN_NAME_IDX;
@@ -220,6 +238,7 @@ void clearContentView() {
         items = NULL;
     }
     numItems = 0;
+    itemsCapacity = 0;
     
     // 注意：图标缓存不再在此清空，以保持跨导航的加速效果
     // 只有在视图样式切换时才需要重建图像列表
@@ -277,7 +296,13 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (searchData != NULL && searchData->active) {
                 struct FileNode* node = (struct FileNode*)lParam;
                 int index = numItems++;
-                items = realloc(items, numItems * sizeof(struct ListItem));     
+                
+                if (numItems > itemsCapacity) {
+                    int newCapacity = itemsCapacity == 0 ? 1000 : itemsCapacity * 2;
+                    items = realloc(items, newCapacity * sizeof(struct ListItem));
+                    itemsCapacity = newCapacity;
+                }
+                
                 struct ListItem* item = &items[index];
                 item->node = node;
                 item->path = NULL;
@@ -285,6 +310,32 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 fillFileInfo(node, item);
                 
+                ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL);
+                updateStatusbar();
+            }
+            break;
+        }
+        case MSG_ADD_ITEMS_BATCH: {
+            if (searchData != NULL && searchData->active) {
+                struct BatchItems* batch = (struct BatchItems*)lParam;
+                int newCount = numItems + batch->count;
+                
+                if (newCount > itemsCapacity) {
+                    int newCapacity = itemsCapacity == 0 ? 1000 : itemsCapacity * 2;
+                    if (newCapacity < newCount) newCapacity = newCount;
+                    items = realloc(items, newCapacity * sizeof(struct ListItem));
+                    itemsCapacity = newCapacity;
+                }
+                
+                for (int i = 0; i < batch->count; i++) {
+                    struct ListItem* item = &items[numItems + i];
+                    item->node = batch->nodes[i];
+                    item->path = NULL;
+                    item->loaded = false;
+                    fillFileInfo(batch->nodes[i], item);
+                }
+                
+                numItems = newCount;
                 ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL);
                 updateStatusbar();
             }
@@ -760,16 +811,34 @@ static DWORD WINAPI searchTask(void* param) {
     stack[stackSize++] = currPathFileNode->children;
     
     wchar_t keyword[64] = {0};
-    wchar_t name[64] = {0};
-    
     strToLower(searchData->keyword, keyword);
+    
+    const int BATCH_SIZE = 100;
+    struct BatchItems batch;
+    batch.capacity = BATCH_SIZE;
+    batch.nodes = malloc(batch.capacity * sizeof(struct FileNode*));
+    batch.count = 0;
+    
+    int cacheCapacity = 1000;
+    struct FileNode** cacheResults = malloc(cacheCapacity * sizeof(struct FileNode*));
+    int cacheCount = 0;
     
     while (stackSize > 0 && numItems < 10000 && searchData->active) {
         struct FileNode* node = stack[--stackSize];
         while (node && searchData->active) {
-            strToLower(node->name, name);
-            if (wcsstr(name, keyword)) {
-                SendMessage(hwndContentView, MSG_ADD_ITEM, 0, (LPARAM)node);
+            if (wcsstrIgnoreCase(node->name, keyword)) {
+                batch.nodes[batch.count++] = node;
+                
+                if (cacheCount >= cacheCapacity) {
+                    cacheCapacity *= 2;
+                    cacheResults = realloc(cacheResults, cacheCapacity * sizeof(struct FileNode*));
+                }
+                cacheResults[cacheCount++] = node;
+                
+                if (batch.count >= BATCH_SIZE) {
+                    SendMessage(hwndContentView, MSG_ADD_ITEMS_BATCH, 0, (LPARAM)&batch);
+                    batch.count = 0;
+                }
             }
             
             if (numItems >= 10000) break;
@@ -782,9 +851,37 @@ static DWORD WINAPI searchTask(void* param) {
         }
     }
     
+    if (batch.count > 0 && searchData->active) {
+        SendMessage(hwndContentView, MSG_ADD_ITEMS_BATCH, 0, (LPARAM)&batch);
+    }
+    
+    free(batch.nodes);
+    
+    if (searchData->active) {
+        free(searchCache.results);
+        searchCache.results = cacheResults;
+        searchCache.count = cacheCount;
+        searchCache.timestamp = time(NULL);
+        getFileNodePath(currPathFileNode, searchCache.path);
+        wcscpy_s(searchCache.keyword, 64, searchData->keyword);
+    } else {
+        free(cacheResults);
+    }
+    
     SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0);
     return 0;
 }
+
+static bool isSearchCacheValid(const wchar_t* path, const wchar_t* keyword) {
+    if (searchCache.count == 0) return false;
+    if (wcscmp(searchCache.path, path) != 0) return false;
+    if (wcscmp(searchCache.keyword, keyword) != 0) return false;
+    time_t now = time(NULL);
+    if (now - searchCache.timestamp > 30) return false;
+    return true;
+}
+
+void createLVColumns();
 
 void searchFor(wchar_t* keyword) {
     if (wcslen(keyword) == 0) return;
@@ -793,8 +890,28 @@ void searchFor(wchar_t* keyword) {
         return;
     }
     
-    clearContentView();
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(currPathFileNode, path);
     
+    if (isSearchCacheValid(path, keyword)) {
+        clearContentView();
+        createLVColumns();
+
+        LVCOLUMN column = {0};
+        column.mask = LVCF_WIDTH | LVCF_TEXT;
+        column.cx = 250;
+        column.pszText = lc_str.path;
+        ListView_InsertColumn(hwndContentView, COLUMN_PATH_IDX, &column);
+
+        for (int i = 0; i < searchCache.count; i++) {
+            SendMessage(hwndContentView, MSG_ADD_ITEM, 0, (LPARAM)searchCache.results[i]);
+        }
+        return;
+    }
+
+    clearContentView();
+    createLVColumns();
+
     LVCOLUMN column = {0};
     column.mask = LVCF_WIDTH | LVCF_TEXT;
     column.cx = 250;
