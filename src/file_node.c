@@ -14,6 +14,7 @@ wchar_t* getDesktopPath() {
 
 static struct FileNode* allocFileNode(wchar_t* name, enum FileType type) {
     struct FileNode* node = malloc(sizeof(struct FileNode));
+    if (!node) return NULL;
     node->name = name;
     node->type = type;
     node->parent = NULL;
@@ -70,6 +71,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             name[2] = L'\0';
             
             struct FileNode* child = allocFileNode(name, TYPE_DRIVE);
+            if (!child) { free(name); continue; }
             child->parent = parent;
             // 延迟检查：不在启动时做磁盘IO，展开时再验证
             child->hasChildDirs = true;
@@ -102,6 +104,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             
             wchar_t* name = wcsdup(wfd.cFileName);
             struct FileNode* child = allocFileNode(name, type);
+            if (!child) { free(name); continue; }
             child->parent = parent;
             
             if (isDir) {
@@ -197,6 +200,7 @@ void setCurrPathFileNode(struct FileNode* node) {
     for (int i = count-1; i >= 0; i--) {
         wchar_t* name = wcsdup(nodes[i]->name);
         struct FileNode* newNode = allocFileNode(name, nodes[i]->type);
+        if (!newNode) { free(name); break; }
         newNode->parent = currNode;
         currNode = newNode;
     }
@@ -211,7 +215,8 @@ void setCurrPathFromString(wchar_t* path) {
     wcscpy_s(tmp, MAX_PATH, path);
 
     struct FileNode* currNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
-    
+    if (!currNode) return;
+
     wchar_t* saveptr;
     wchar_t* token = wcstok(tmp, L"\\", &saveptr);
     int i = 0;
@@ -219,6 +224,7 @@ void setCurrPathFromString(wchar_t* path) {
         wchar_t* name = wcsdup(token);
         enum FileType type = i++ == 0 ? TYPE_DRIVE : TYPE_DIR;
         struct FileNode* newNode = allocFileNode(name, type);
+        if (!newNode) { free(name); break; }
         newNode->parent = currNode;
         currNode = newNode;
         token = wcstok(NULL, L"\\",&saveptr);
@@ -237,14 +243,17 @@ void initFileNodes() {
     // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
+    if (!desktopNode || !documentsNode) return;
     documentsNode->hasChildDirs = true;
-    
+
     // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
     userProfileNodeName = wcsdup(L"User");
     struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_USERPROFILE);
+    if (!userNode) return;
     userNode->hasChildDirs = true;
 
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
+    if (!computerNode) return;
     computerNode->hasChildDirs = true;
     
     // 链接顺序：桌面 -> 文档 -> 用户 -> 此电脑

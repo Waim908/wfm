@@ -391,12 +391,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     SetProcessDPIAware();
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
-    
+
     // 解析命令行参数（第一个参数作为导航路径）
+    wchar_t navigatePathBuf[MAX_PATH] = {0};
     wchar_t* navigatePath = NULL;
-    if (numArgs > 1) {
-        navigatePath = args[1];
+    if (args && numArgs > 1) {
+        wcscpy_s(navigatePathBuf, MAX_PATH, args[1]);
+        navigatePath = navigatePathBuf;
     }
+    if (args) LocalFree(args);
     // Language: registry > system locale
     wchar_t localeName[16] = {0};
     if (!loadLanguageFromRegistry(localeName, sizeof(localeName))) {

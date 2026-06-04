@@ -107,9 +107,10 @@ struct ListItem {
 };
 
 struct SearchData {
-    wchar_t* keyword;
+    wchar_t keyword[64];  // 拥有自己的副本，避免悬空指针
     bool active;
     bool canceled;
+    HANDLE threadHandle;  // 线程句柄，用于等待线程退出
 };
 
 struct SearchCache {
@@ -210,15 +211,19 @@ static void updateStatusbar() {
 static void freeMenuItems() {
     if (menuItems) {
         for (int i = 0; i < numMenuItems; i++) {
+            if (menuItems[i].text) {
+                free(menuItems[i].text);
+                menuItems[i].text = NULL;
+            }
             if (menuItems[i].cmdData) {
                 free(menuItems[i].cmdData);
                 menuItems[i].cmdData = NULL;
             }
         }
         free(menuItems);
-        menuItems = NULL;        
+        menuItems = NULL;
     }
-    numMenuItems = 0;    
+    numMenuItems = 0;
 }
 
 void clearContentView() {    
@@ -309,10 +314,12 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (searchData != NULL && searchData->active) {
                 struct FileNode* node = (struct FileNode*)lParam;
                 int index = numItems++;
-                
+
                 if (numItems > itemsCapacity) {
                     int newCapacity = itemsCapacity == 0 ? 1000 : itemsCapacity * 2;
-                    items = realloc(items, newCapacity * sizeof(struct ListItem));
+                    struct ListItem* tmp = realloc(items, newCapacity * sizeof(struct ListItem));
+                    if (!tmp) { numItems--; break; }
+                    items = tmp;
                     itemsCapacity = newCapacity;
                 }
                 
@@ -332,11 +339,13 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (searchData != NULL && searchData->active) {
                 struct BatchItems* batch = (struct BatchItems*)lParam;
                 int newCount = numItems + batch->count;
-                
+
                 if (newCount > itemsCapacity) {
                     int newCapacity = itemsCapacity == 0 ? 1000 : itemsCapacity * 2;
                     if (newCapacity < newCount) newCapacity = newCount;
-                    items = realloc(items, newCapacity * sizeof(struct ListItem));
+                    struct ListItem* tmp = realloc(items, newCapacity * sizeof(struct ListItem));
+                    if (!tmp) break;
+                    items = tmp;
                     itemsCapacity = newCapacity;
                 }
                 
@@ -357,6 +366,10 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case MSG_SEARCH_DONE: {
             searchData->active = false;
             bool canceled = searchData->canceled;
+            if (searchData->threadHandle) {
+                CloseHandle(searchData->threadHandle);
+                searchData->threadHandle = NULL;
+            }
             free(searchData);
             searchData = NULL;
             if (canceled) {
@@ -411,11 +424,13 @@ void updateSelectedItems() {
     numSelectedItems = 0;
 
     int i = ListView_GetNextItem(hwndContentView, -1, LVNI_SELECTED);
-    while (i != -1 && items && i < numItems) {       
-        int index = numSelectedItems++;
-        selectedItems = realloc(selectedItems, numSelectedItems * sizeof(struct FileNode*));
-        if (!selectedItems) break;
-        selectedItems[index] = items[i].node;
+    while (i != -1 && items && i < numItems) {
+        int newCount = numSelectedItems + 1;
+        struct FileNode** tmp = realloc(selectedItems, newCount * sizeof(struct FileNode*));
+        if (!tmp) break;
+        selectedItems = tmp;
+        selectedItems[numSelectedItems] = items[i].node;
+        numSelectedItems = newCount;
         i = ListView_GetNextItem(hwndContentView, i, LVNI_SELECTED);
     }
 }
@@ -475,7 +490,7 @@ static void createContextMenuFromRegistry(int* id) {
                 menuItems = realloc(menuItems, numMenuItems * sizeof(struct ContextMenuItem));     
                 
                 struct ContextMenuItem* cmItem = &menuItems[index];
-                cmItem->text = subitemName;
+                cmItem->text = wcsdup(subitemName);
                 cmItem->proc = NULL;
                 
                 wchar_t *cmdData = malloc(1024);
@@ -934,10 +949,23 @@ static bool isSearchCacheValid(const wchar_t* path, const wchar_t* keyword) {
 
 void createLVColumns();
 
+// 取消当前搜索（不等待线程退出，避免死锁）
+static void cancelSearch() {
+    if (searchData == NULL) return;
+    if (searchData->active) {
+        searchData->active = false;
+        searchData->canceled = true;
+    }
+}
+
 void searchFor(wchar_t* keyword) {
     if (wcslen(keyword) == 0) return;
-    if (searchData != NULL && searchData->active) {
-        searchData->active = false;
+    // 如果有搜索正在进行或正在清理中，取消并等待 MSG_SEARCH_DONE 自然清理
+    if (searchData != NULL) {
+        if (searchData->active) {
+            searchData->active = false;
+            searchData->canceled = true;
+        }
         return;
     }
     
@@ -993,11 +1021,11 @@ void searchFor(wchar_t* keyword) {
     UpdateWindow(hwndContentView);
     
     searchData = malloc(sizeof(struct SearchData));
-    searchData->keyword = keyword;
+    if (!searchData) return;
+    wcscpy_s(searchData->keyword, 64, keyword);
     searchData->active = true;
     searchData->canceled = false;
-
-    CreateThread(NULL, 0, searchTask, searchData, 0, NULL);
+    searchData->threadHandle = CreateThread(NULL, 0, searchTask, searchData, 0, NULL);
 }
 
 static void saveViewStyle(void);
@@ -1268,10 +1296,7 @@ static void onMenuItemOpenFileLocationClick() {
     }
 
     // 如果搜索还在运行，先取消，否则refreshContentView会提前返回导致悬空指针
-    if (searchData != NULL && searchData->active) {
-        searchData->active = false;
-        searchData->canceled = true;
-    }
+    cancelSearch();
 
     // 延迟导航：菜单回调深调用链会导致栈溢出，用PostMessage在回调返回后执行
     wcscpy_s(pendingNavigatePath, MAX_PATH, parentPath);
@@ -1719,9 +1744,11 @@ void sortItems() {
 }
 
 void refreshContentView() {
-    if (searchData != NULL && searchData->active) {
-        searchData->active = false;     
-        searchData->canceled = true;
+    if (searchData != NULL) {
+        if (searchData->active) {
+            searchData->active = false;
+            searchData->canceled = true;
+        }
         return;
     }
     
@@ -1779,16 +1806,19 @@ void refreshContentView() {
     }
 
     struct FileNode* child = currPathFileNode->children;
-    
+
     // 单次遍历：计数并填充
     int capacity = 64;
     numItems = 0;
     items = malloc(capacity * sizeof(struct ListItem));
-    
+    if (!items) { itemsCapacity = 0; return; }
+
     while (child) {
         if (numItems >= capacity) {
             capacity *= 2;
-            items = realloc(items, capacity * sizeof(struct ListItem));
+            struct ListItem* tmp = realloc(items, capacity * sizeof(struct ListItem));
+            if (!tmp) break;
+            items = tmp;
         }
         struct ListItem* item = &items[numItems++];
         memset(item, 0, sizeof(struct ListItem));
