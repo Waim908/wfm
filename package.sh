@@ -1,5 +1,5 @@
 case $1 in
-	nolibdio)
+	nolibcdio)
 		7z a -tzip wfm-nolibcdio.zip wfm.exe del-reg.bat wfm-extra.bat install-winlator.bat
 	;;
 	*)
