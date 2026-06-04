@@ -82,7 +82,8 @@ static int addExeIconCache(wchar_t* path, int iconIndex) {
 enum Msg {
     MSG_ADD_ITEM = WM_APP,
     MSG_ADD_ITEMS_BATCH,
-    MSG_SEARCH_DONE
+    MSG_SEARCH_DONE,
+    MSG_NAVIGATE_TO_PATH
 };
 
 enum ContextMenuType {
@@ -138,6 +139,8 @@ static void onMenuItemLoadISOImageClick();
 void onMenuItemUnloadISOImageClick();
 #endif
 static void onMenuItemShowIconClick();
+static void onMenuItemOpenFileLocationClick();
+static bool isInSearchMode();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL};
@@ -155,6 +158,7 @@ static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageCl
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
 #endif
 static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
+static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -172,6 +176,10 @@ static struct ContextMenuItem* menuItems = NULL;
 static int numMenuItems = 0;
 
 static struct SearchData* searchData;
+
+// 延迟导航缓冲区（避免菜单回调深调用链导致栈溢出）
+static wchar_t pendingNavigatePath[MAX_PATH] = {0};
+static wchar_t pendingSelectName[MAX_PATH] = {0};
 
 // Icon viewer dialog globals
 static HWND hwndIconViewer = NULL;
@@ -355,6 +363,32 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 refreshContentView();
             }
             else updateStatusbar();
+            break;
+        }
+        case MSG_NAVIGATE_TO_PATH: {
+            if (pendingNavigatePath[0]) {
+                // 搜索线程可能还没退出，等待MSG_SEARCH_DONE处理完再导航
+                if (searchData != NULL) {
+                    PostMessage(hwndContentView, MSG_NAVIGATE_TO_PATH, 0, 0);
+                    break;
+                }
+                navigateToPath(pendingNavigatePath);
+                // 在新目录中查找并选中目标文件
+                if (pendingSelectName[0]) {
+                    for (int i = 0; i < numItems; i++) {
+                        if (items[i].node && items[i].node->name &&
+                            wcscmp(items[i].node->name, pendingSelectName) == 0) {
+                            ListView_SetItemState(hwndContentView, -1, 0, LVIS_SELECTED);
+                            ListView_SetItemState(hwndContentView, i, LVIS_SELECTED, LVIS_SELECTED);
+                            ListView_EnsureVisible(hwndContentView, i, FALSE);
+                            SetFocus(hwndContentView);
+                            break;
+                        }
+                    }
+                    pendingSelectName[0] = L'\0';
+                }
+                pendingNavigatePath[0] = L'\0';
+            }
             break;
         }
         case WM_NOTIFY: {
@@ -542,7 +576,14 @@ static void createContextMenu(enum ContextMenuType type) {
         addContextMenuItem(hMenu, id++, &cmiCreateShortcut, false);
         addContextMenuItem(hMenu, id++, &cmiDelete, false);
         
-        if (type == MENU_SINGLE) addContextMenuItem(hMenu, id++, &cmiRename, false);
+        if (type == MENU_SINGLE) {
+            bool inSearch = isInSearchMode();
+            addContextMenuItem(hMenu, id++, &cmiRename, inSearch);
+            // 搜索模式下显示"定位到文件所在路径"
+            if (inSearch) {
+                addContextMenuItem(hMenu, id++, &cmiOpenFileLocation, false);
+            }
+        }
     }
     else {
         addContextMenuItem(hMenu, id++, &cmiPaste, false);
@@ -1074,6 +1115,7 @@ void createContentView() {
     cmiUnloadISOImage.text = lc_str.unload_iso_image;
 #endif
     cmiShowIcon.text = lc_str.show_icon;
+    cmiOpenFileLocation.text = lc_str.open_file_location;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
     createLVColumns();
@@ -1194,6 +1236,46 @@ void onMenuItemSelectAllClick() {
     ListView_SetItemState(hwndContentView, -1, 0, LVIS_SELECTED);
     ListView_SetItemState(hwndContentView, -1, LVIS_SELECTED, LVIS_SELECTED);
     SetFocus(hwndContentView);
+}
+
+static bool isInSearchMode() {
+    HWND hHeader = ListView_GetHeader(hwndContentView);
+    if (!hHeader) return false;
+    return Header_GetItemCount(hHeader) > COLUMN_PATH_IDX;
+}
+
+static void onMenuItemOpenFileLocationClick() {
+    if (numSelectedItems != 1 || !selectedItems[0]) return;
+
+    struct FileNode* node = selectedItems[0];
+    if (!node || !node->parent) return;
+
+    // 仅支持文件和文件夹
+    if (node->type != TYPE_FILE && node->type != TYPE_DIR) return;
+
+    // 先保存路径字符串，因为导航后旧文件树会被释放，node指针失效
+    wchar_t parentPath[MAX_PATH] = {0};
+    getFileNodePath(node->parent, parentPath);
+    wcscpy_s(pendingSelectName, MAX_PATH, node->name);
+
+    // 路径为空或不存在则提示
+    if (parentPath[0] == L'\0' || !isPathExists(parentPath)) {
+        wchar_t msg[MAX_PATH + 64] = {0};
+        swprintf_s(msg, MAX_PATH + 64, lc_str.bookmark_path_not_found,
+                   parentPath[0] ? parentPath : node->name);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK);
+        return;
+    }
+
+    // 如果搜索还在运行，先取消，否则refreshContentView会提前返回导致悬空指针
+    if (searchData != NULL && searchData->active) {
+        searchData->active = false;
+        searchData->canceled = true;
+    }
+
+    // 延迟导航：菜单回调深调用链会导致栈溢出，用PostMessage在回调返回后执行
+    wcscpy_s(pendingNavigatePath, MAX_PATH, parentPath);
+    PostMessage(hwndContentView, MSG_NAVIGATE_TO_PATH, 0, 0);
 }
 
 void onBookmarkButtonClick() {
@@ -1687,6 +1769,12 @@ void refreshContentView() {
         HWND hHeader = ListView_GetHeader(hwndContentView);
         if (!hHeader || Header_GetItemCount(hHeader) == 0) {
             createLVColumns();
+        } else {
+            // 搜索模式遗留的PATH列需要移除（非搜索模式下不需要）
+            int numCols = Header_GetItemCount(hHeader);
+            if (numCols > COLUMN_PATH_IDX) {
+                ListView_DeleteColumn(hwndContentView, COLUMN_PATH_IDX);
+            }
         }
     }
 

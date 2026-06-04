@@ -171,6 +171,7 @@ struct LC_STR {
     wchar_t* clear_icon_cache;
     wchar_t* mount;
     wchar_t* locate_iso;
+    wchar_t* open_file_location;
     wchar_t* unmount_iso;
     wchar_t* msg_no_mounted_image;
     wchar_t* msg_image_dir_not_found;

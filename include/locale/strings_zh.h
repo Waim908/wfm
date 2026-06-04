@@ -76,6 +76,7 @@ static inline void loadStrings_zh() {
     lc_str.clear_icon_cache = L"清除图标缓存";
     lc_str.mount = L"挂载";
     lc_str.locate_iso = L"定位到映像文件";
+    lc_str.open_file_location = L"打开文件所在路径";
     lc_str.unmount_iso = L"取消挂载";
     lc_str.msg_no_mounted_image = L"没有挂载的映像文件";
     lc_str.msg_x_drive_not_found = L"未找到 X: 盘，请先在 winecfg 中添加驱动器 X: 并设置为光驱类型";
