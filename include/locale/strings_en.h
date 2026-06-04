@@ -107,6 +107,7 @@ static inline void loadStrings_en() {
     lc_str.tb_new_folder = L"New Folder";
     lc_str.tb_new_file = L"New File";
     lc_str.tb_bookmark = L"Bookmark";
+    lc_str.import_reg = L"Import to Registry";
 }
 
 #endif

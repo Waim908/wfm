@@ -24,6 +24,8 @@ IDI_PRELOADER_6 ICON "preloader_6.ico"
 IDI_PRELOADER_7 ICON "preloader_7.ico"
 IDI_PRELOADER_8 ICON "preloader_8.ico"
 IDI_BOOKMARK ICON "bookmark.ico"
+IDI_CMD ICON "cmd.ico"
+IDI_EXPLORER ICON "explorer.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "Application.manifest"
 

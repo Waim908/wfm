@@ -33,9 +33,11 @@
 #define IDI_PRELOADER_8 208
 #define IDI_BOOKMARK 209
 
-#define IDD_ICON_VIEWER 210
-#define IDC_ICON_IMAGE 211
-#define IDC_SAVE_ICON 212
+#define IDI_CMD 210
+#define IDI_EXPLORER 211
+#define IDD_ICON_VIEWER 212
+#define IDC_ICON_IMAGE 213
+#define IDC_SAVE_ICON 214
 
 #define ID_EDIT_CUT 301
 #define ID_EDIT_COPY 302
@@ -69,7 +71,9 @@
 #define ICON_SEARCH      9
 #define ICON_NAV_ARROW   10
 #define ICON_BOOKMARK    11
-#define NUM_UI_ICONS     12
+#define ICON_CMD         12
+#define ICON_EXPLORER    13
+#define NUM_UI_ICONS     14
 
 extern HICON uiIcons[NUM_UI_ICONS];
 
@@ -189,6 +193,7 @@ struct LC_STR {
     wchar_t* tb_new_folder;
     wchar_t* tb_new_file;
     wchar_t* tb_bookmark;
+    wchar_t* import_reg;
 };
 
 extern struct LC_STR lc_str;

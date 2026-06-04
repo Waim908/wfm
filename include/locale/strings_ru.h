@@ -107,6 +107,7 @@ static inline void loadStrings_ru() {
     lc_str.tb_new_folder = L"Папка";
     lc_str.tb_new_file = L"Файл";
     lc_str.tb_bookmark = L"Закладка";
+    lc_str.import_reg = L"Импорт в реестр";
 }
 
 #endif

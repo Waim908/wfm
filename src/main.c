@@ -62,6 +62,8 @@ static const struct IconMapping iconMap[] = {
     {ICON_SEARCH, IDI_SEARCH},
     {ICON_NAV_ARROW, IDI_NAV_ARROW},
     {ICON_BOOKMARK, IDI_BOOKMARK},
+    {ICON_CMD, IDI_CMD},
+    {ICON_EXPLORER, IDI_EXPLORER},
 };
 
 void preloadIcons() {

@@ -160,6 +160,8 @@ static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOIma
 #endif
 static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
 static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL};
+static void onMenuItemImportRegClick();
+static struct ContextMenuItem cmiImportReg = {NULL, &onMenuItemImportRegClick, NULL};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -597,6 +599,14 @@ static void createContextMenu(enum ContextMenuType type) {
             // 搜索模式下显示"定位到文件所在路径"
             if (inSearch) {
                 addContextMenuItem(hMenu, id++, &cmiOpenFileLocation, false);
+            }
+            // .reg 文件显示导入到注册表菜单项
+            if (selectedItems[0]->type == TYPE_FILE) {
+                wchar_t filePath[MAX_PATH] = {0};
+                getFileNodePath(selectedItems[0], filePath);
+                if (hasFileExtension(filePath, L"reg")) {
+                    addContextMenuItem(hMenu, id++, &cmiImportReg, false);
+                }
             }
         }
     }
@@ -1144,6 +1154,7 @@ void createContentView() {
 #endif
     cmiShowIcon.text = lc_str.show_icon;
     cmiOpenFileLocation.text = lc_str.open_file_location;
+    cmiImportReg.text = lc_str.import_reg;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
     createLVColumns();
@@ -1305,6 +1316,26 @@ static void onMenuItemOpenFileLocationClick() {
 
 void onBookmarkButtonClick() {
     addCurrentPathToBookmark();
+}
+
+static void onMenuItemImportRegClick() {
+    if (numSelectedItems != 1 || !selectedItems[0]) return;
+    if (selectedItems[0]->type != TYPE_FILE) return;
+
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(selectedItems[0], path);
+    if (path[0] == L'\0') return;
+
+    // 使用 regedit.exe /s 静默导入 .reg 文件
+    // 先提示用户确认
+    wchar_t msg[MAX_PATH + 64] = {0};
+    swprintf_s(msg, MAX_PATH + 64, L"%ls\n\n%ls", selectedItems[0]->name, lc_str.import_reg);
+    int result = MessageBox(hwndMain, msg, lc_str.import_reg, MB_YESNO | MB_ICONQUESTION);
+    if (result == IDYES) {
+        wchar_t params[MAX_PATH + 8] = {0};
+        swprintf_s(params, MAX_PATH + 8, L"/s \"%ls\"", path);
+        ShellExecute(hwndMain, L"open", L"regedit.exe", params, NULL, SW_SHOW);
+    }
 }
 
 #ifdef USE_LIBCDIO

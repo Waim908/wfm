@@ -106,6 +106,7 @@ static inline void loadStrings_pt() {
     lc_str.tb_new_folder = L"Pasta";
     lc_str.tb_new_file = L"Arquivo";
     lc_str.tb_bookmark = L"Favorito";
+    lc_str.import_reg = L"Importar para o Registro";
 }
 
 #endif
