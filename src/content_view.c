@@ -185,14 +185,22 @@ static wchar_t pendingNavigatePath[MAX_PATH] = {0};
 static wchar_t pendingSelectName[MAX_PATH] = {0};
 
 // Icon viewer dialog globals
+#define MAX_ICON_GROUPS 16
+#define MAX_ICONS_PER_GROUP 16
 static HWND hwndIconViewer = NULL;
-static HICON hIconSize16 = NULL;
-static HICON hIconSize32 = NULL;
-static HICON hIconSize48 = NULL;
-static HICON hIconSize256 = NULL;
-static int currentIconSize = 256;
+static int iconGroupCount = 0;
+static int currentGroupIndex = 0;
+static int currentIconIndex = 0;
 static wchar_t iconViewerTitle[MAX_PATH] = {0};
 static wchar_t iconViewerFileName[MAX_PATH] = {0};
+
+struct IconGroup {
+    HICON icons[MAX_ICONS_PER_GROUP];
+    int sizes[MAX_ICONS_PER_GROUP];
+    int iconCount;
+};
+static struct IconGroup iconGroups[MAX_ICON_GROUPS];
+static void cleanupIconGroups(void);
 
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
@@ -268,10 +276,7 @@ void clearContentView() {
     freeMenuItems();
 
     // Cleanup icon viewer resources
-    if (hIconSize16) { DestroyIcon(hIconSize16); hIconSize16 = NULL; }
-    if (hIconSize32) { DestroyIcon(hIconSize32); hIconSize32 = NULL; }
-    if (hIconSize48) { DestroyIcon(hIconSize48); hIconSize48 = NULL; }
-    if (hIconSize256) { DestroyIcon(hIconSize256); hIconSize256 = NULL; }
+    cleanupIconGroups();
 }
 
 static void execCommandLine(wchar_t *command) {
@@ -1550,141 +1555,107 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
 }
 
 struct GroupIconEnumData {
-    HRSRC hRes;
-    BOOL found;
+    HRSRC hRes[MAX_ICON_GROUPS];
+    int count;
 };
 
 static BOOL CALLBACK enumGroupIconProc(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam) {
     struct GroupIconEnumData* data = (struct GroupIconEnumData*)lParam;
-    if (!data->found) {
-        data->hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
-        data->found = (data->hRes != NULL);
+    if (data->count < MAX_ICON_GROUPS) {
+        HRSRC hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
+        if (hRes) {
+            data->hRes[data->count++] = hRes;
+        }
     }
-    return FALSE; // Stop after first group
+    return TRUE; // Continue enumerating
 }
 
-// Extract icons of specific sizes from a PE file by parsing resources directly.
-// outIcons must have room for maxIcons HICON handles.
-// Returns number of icons extracted.
-#define PE_MAX_ICONS 16
-static int extractIconsFromPE(const wchar_t* filePath, HICON* outIcons, int* outSizes, int maxIcons) {
-    if (!filePath || !outIcons || !outSizes || maxIcons <= 0) return 0;
+// Extract ALL icon groups from a PE file, each with all its icon sizes.
+// Returns number of icon groups extracted. Populates iconGroups[].
+static int extractAllIconGroupsFromPE(const wchar_t* filePath) {
+    for (int i = 0; i < MAX_ICON_GROUPS; i++) {
+        iconGroups[i].iconCount = 0;
+        for (int j = 0; j < MAX_ICONS_PER_GROUP; j++) {
+            iconGroups[i].icons[j] = NULL;
+        }
+    }
+    if (!filePath) return 0;
 
     HMODULE hModule = LoadLibraryExW(filePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
     if (!hModule) return 0;
 
-    // Find the first RT_GROUP_ICON resource
     struct GroupIconEnumData enumData = {0};
     EnumResourceNamesW(hModule, RT_GROUP_ICON, enumGroupIconProc, (LONG_PTR)&enumData);
 
-    if (!enumData.found || !enumData.hRes) {
-        FreeLibrary(hModule);
-        return 0;
-    }
+    int totalGroups = 0;
+    for (int g = 0; g < enumData.count && totalGroups < MAX_ICON_GROUPS; g++) {
+        HGLOBAL hGlob = LoadResource(hModule, enumData.hRes[g]);
+        if (!hGlob) continue;
 
-    HGLOBAL hGlob = LoadResource(hModule, enumData.hRes);
-    if (!hGlob) {
-        FreeLibrary(hModule);
-        return 0;
-    }
+        const GRPICONDIR* grpDir = (const GRPICONDIR*)LockResource(hGlob);
+        if (!grpDir) continue;
 
-    const GRPICONDIR* grpDir = (const GRPICONDIR*)LockResource(hGlob);
-    if (!grpDir) {
-        FreeLibrary(hModule);
-        return 0;
-    }
+        int count = 0;
+        WORD nIcons = grpDir->idCount;
+        if (nIcons > MAX_ICONS_PER_GROUP) nIcons = MAX_ICONS_PER_GROUP;
 
-    int count = 0;
-    WORD iconCount = grpDir->idCount;
-    if (iconCount > PE_MAX_ICONS) iconCount = PE_MAX_ICONS;
+        for (WORD i = 0; i < nIcons; i++) {
+            const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
 
-    for (WORD i = 0; i < iconCount && count < maxIcons; i++) {
-        const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
+            HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
+            if (!hIconRes) continue;
 
-        HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
-        if (!hIconRes) continue;
+            DWORD iconResSize = SizeofResource(hModule, hIconRes);
+            HGLOBAL hIconGlob = LoadResource(hModule, hIconRes);
+            if (!hIconGlob) continue;
 
-        DWORD iconResSize = SizeofResource(hModule, hIconRes);
-        HGLOBAL hIconGlob = LoadResource(hModule, hIconRes);
-        if (!hIconGlob) continue;
+            const BYTE* iconData = (const BYTE*)LockResource(hIconGlob);
+            if (!iconData || iconResSize == 0) continue;
 
-        const BYTE* iconData = (const BYTE*)LockResource(hIconGlob);
-        if (!iconData || iconResSize == 0) continue;
+            HICON hIcon = createIconFromRawData(iconData, iconResSize);
+            if (!hIcon) {
+                // Fallback: PNG-compressed icons (common for 256x256) can't be parsed
+                // as BMP; use CreateIconFromResourceEx which handles both BMP and PNG.
+                hIcon = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
+                    TRUE, 0x00030000, 0, 0, LR_DEFAULTCOLOR);
+            }
+            if (hIcon) {
+                int size = entry->bWidth;
+                if (size == 0) size = 256; // 0 means 256 in ICO format
+                iconGroups[totalGroups].icons[count] = hIcon;
+                iconGroups[totalGroups].sizes[count] = size;
+                count++;
+            }
+        }
 
-        HICON hIcon = createIconFromRawData(iconData, iconResSize);
-        if (hIcon) {
-            int size = entry->bWidth;
-            if (size == 0) size = 256; // 0 means 256 in ICO format
-            outIcons[count] = hIcon;
-            outSizes[count] = size;
-            count++;
+        if (count > 0) {
+            iconGroups[totalGroups].iconCount = count;
+            totalGroups++;
         }
     }
 
     FreeLibrary(hModule);
-    return count;
-}
-
-// Get an icon of a specific size, trying PE extraction first, then fallback APIs.
-// Caller must DestroyIcon the returned handle when done.
-static HICON getIconOfSize(const wchar_t* filePath, int desiredSize) {
-    if (!filePath) return NULL;
-
-    // Try PE resource extraction first (most reliable under Wine)
-    HICON peIcons[PE_MAX_ICONS] = {0};
-    int peSizes[PE_MAX_ICONS] = {0};
-    int peCount = extractIconsFromPE(filePath, peIcons, peSizes, PE_MAX_ICONS);
-
-    if (peCount > 0) {
-        // Find exact match
-        for (int i = 0; i < peCount; i++) {
-            if (peSizes[i] == desiredSize) {
-                // Destroy other icons we don't need
-                for (int j = 0; j < peCount; j++) {
-                    if (j != i && peIcons[j]) DestroyIcon(peIcons[j]);
-                }
-                return peIcons[i];
-            }
-        }
-        // No exact match - use closest smaller, or the smallest available
-        int bestIdx = 0;
-        int bestSize = peSizes[0];
-        for (int i = 1; i < peCount; i++) {
-            if ((peSizes[i] <= desiredSize && peSizes[i] > bestSize) ||
-                (bestSize > desiredSize && peSizes[i] < bestSize)) {
-                bestIdx = i;
-                bestSize = peSizes[i];
-            }
-        }
-        HICON result = peIcons[bestIdx];
-        peIcons[bestIdx] = NULL;
-        for (int i = 0; i < peCount; i++) {
-            if (peIcons[i]) DestroyIcon(peIcons[i]);
-        }
-        return result;
-    }
-
-    // Fallback: use PrivateExtractIconsW (may have Wine bugs but better than nothing)
-    HICON hIcon = NULL;
-    UINT iconCount = PrivateExtractIconsW(filePath, 0, desiredSize, desiredSize, &hIcon, NULL, 1, 0);
-    if (iconCount > 0 && hIcon) return hIcon;
-
-    // Last resort: SHGetFileInfo
-    SHFILEINFO sfi = {0};
-    DWORD flags = SHGFI_ICON | (desiredSize >= 48 ? SHGFI_LARGEICON : SHGFI_SMALLICON);
-    if (SHGetFileInfo(filePath, 0, &sfi, sizeof(SHFILEINFO), flags) && sfi.hIcon) {
-        return sfi.hIcon;
-    }
-
-    return NULL;
+    return totalGroups;
 }
 
 // ========== Icon viewer window ==========
 
+static void cleanupIconGroups(void) {
+    for (int g = 0; g < MAX_ICON_GROUPS; g++) {
+        for (int i = 0; i < MAX_ICONS_PER_GROUP; i++) {
+            if (iconGroups[g].icons[i]) {
+                DestroyIcon(iconGroups[g].icons[i]);
+                iconGroups[g].icons[i] = NULL;
+            }
+        }
+        iconGroups[g].iconCount = 0;
+    }
+    iconGroupCount = 0;
+}
+
 static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     if (!hIcon || !filePath) return FALSE;
 
-    // Get icon dimensions via GetIconInfo
     ICONINFO ii = {0};
     if (!GetIconInfo(hIcon, &ii)) return FALSE;
 
@@ -1697,7 +1668,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         iconHeight = bm.bmHeight;
     }
 
-    // Fallback: use mask bitmap for dimensions
     if (ii.hbmMask && iconWidth <= 0) {
         BITMAP bmMask = {0};
         GetObjectW(ii.hbmMask, sizeof(BITMAP), &bmMask);
@@ -1705,13 +1675,11 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         iconHeight = bmMask.bmHeight;
     }
 
-    // Clean up GetIconInfo handles early — we render from the HICON
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
     if (ii.hbmMask) DeleteObject(ii.hbmMask);
 
     if (iconWidth <= 0 || iconHeight <= 0) return FALSE;
 
-    // Render icon to a 32bpp top-down DIBSection
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     if (!hdcMem) {
@@ -1722,7 +1690,7 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = iconWidth;
-    bmi.bmiHeader.biHeight = -iconHeight;  // top-down for natural pixel order
+    bmi.bmiHeader.biHeight = -iconHeight;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -1737,24 +1705,20 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
 
     HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmDib);
 
-    // Fill with transparent white
     RECT rc = {0, 0, iconWidth, iconHeight};
     HBRUSH hBr = CreateSolidBrush(RGB(255, 255, 255));
     FillRect(hdcMem, &rc, hBr);
     DeleteObject(hBr);
 
-    // Render icon at full resolution
     DrawIconEx(hdcMem, 0, 0, hIcon, iconWidth, iconHeight, 0, NULL, DI_NORMAL);
     GdiFlush();
 
-    // Copy pixel data out of the DIBSection before destroying it
     int colorSize = iconWidth * iconHeight * 4;
     BYTE* colorBits = (BYTE*)malloc(colorSize);
     if (colorBits) {
         memcpy(colorBits, dibBits, colorSize);
     }
 
-    // Destroy the DIBSection and DC
     SelectObject(hdcMem, hbmOld);
     DeleteObject(hbmDib);
     DeleteDC(hdcMem);
@@ -1762,7 +1726,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
 
     if (!colorBits) return FALSE;
 
-    // Generate zero AND mask (all pixels visible; alpha is in the color data)
     int maskSize = ((iconWidth + 31) / 32) * 4 * iconHeight;
     BYTE* maskBits = (BYTE*)calloc(1, maskSize);
     if (!maskBits) {
@@ -1770,7 +1733,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         return FALSE;
     }
 
-    // Write ICO file
     BOOL result = FALSE;
     HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -1779,13 +1741,11 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         DWORD totalImageSize = dibSize + colorSize + maskSize;
         DWORD dataOffset = 6 + 16;
 
-        // ICO header (6 bytes)
         WORD reserved = 0, type = 1, count = 1;
         WriteFile(hFile, &reserved, 2, &written, NULL);
         WriteFile(hFile, &type, 2, &written, NULL);
         WriteFile(hFile, &count, 2, &written, NULL);
 
-        // Directory entry (16 bytes)
         BYTE w = (iconWidth >= 256) ? 0 : (BYTE)iconWidth;
         BYTE h = (iconHeight >= 256) ? 0 : (BYTE)iconHeight;
         BYTE colors = 0, res = 0;
@@ -1799,7 +1759,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         WriteFile(hFile, &totalImageSize, 4, &written, NULL);
         WriteFile(hFile, &dataOffset, 4, &written, NULL);
 
-        // BITMAPINFOHEADER: biHeight = iconHeight * 2 (XOR + AND combined)
         BITMAPINFOHEADER bih = {0};
         bih.biSize = sizeof(BITMAPINFOHEADER);
         bih.biWidth = iconWidth;
@@ -1809,7 +1768,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         bih.biCompression = BI_RGB;
         WriteFile(hFile, &bih, sizeof(bih), &written, NULL);
 
-        // XOR bitmap (reverse rows: DIBSection is top-down, ICO XOR expects bottom-up)
         int rowSize = iconWidth * 4;
         BYTE* rowBuf = (BYTE*)malloc(rowSize);
         if (rowBuf) {
@@ -1822,7 +1780,6 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
             WriteFile(hFile, colorBits, colorSize, &written, NULL);
         }
 
-        // AND mask
         WriteFile(hFile, maskBits, maskSize, &written, NULL);
 
         CloseHandle(hFile);
@@ -1835,70 +1792,104 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     return result;
 }
 
-// Get the HICON for the currently selected size
 static HICON getCurrentIcon(void) {
-    switch (currentIconSize) {
-        case 16:  return hIconSize16;
-        case 32:  return hIconSize32;
-        case 48:  return hIconSize48;
-        case 256: return hIconSize256;
-        default:  return hIconSize256;
+    if (currentGroupIndex < 0 || currentGroupIndex >= iconGroupCount) return NULL;
+    struct IconGroup* grp = &iconGroups[currentGroupIndex];
+    if (currentIconIndex < 0 || currentIconIndex >= grp->iconCount) return NULL;
+    return grp->icons[currentIconIndex];
+}
+
+static void updateViewerTitle(void) {
+    struct IconGroup* grp = &iconGroups[currentGroupIndex];
+    int size = grp->sizes[currentIconIndex];
+    swprintf_s(iconViewerTitle, MAX_PATH, L"%ls - [%d/%d] %dx%d (%d/%d) - %ls",
+        iconViewerFileName,
+        currentGroupIndex + 1, iconGroupCount,
+        size, size,
+        currentIconIndex + 1, grp->iconCount,
+        lc_str.show_icon);
+    SetWindowTextW(hwndIconViewer, iconViewerTitle);
+}
+
+static void destroySizeButtons(HWND hwnd) {
+    for (int i = 0; i < MAX_ICONS_PER_GROUP; i++) {
+        HWND hBtn = GetDlgItem(hwnd, IDC_SIZE_BASE + i);
+        if (hBtn) DestroyWindow(hBtn);
     }
 }
 
-// Update button states to highlight the currently selected size
-static void updateSizeButtons(HWND hwnd) {
-    int ids[4] = { IDC_ICON_SIZE_16, IDC_ICON_SIZE_32, IDC_ICON_SIZE_48, IDC_ICON_SIZE_256 };
-    int sizes[4] = { 16, 32, 48, 256 };
-    for (int i = 0; i < 4; i++) {
-        HWND hBtn = GetDlgItem(hwnd, ids[i]);
-        if (hBtn) {
-            SendMessageW(hBtn, BM_SETSTYLE,
-                (sizes[i] == currentIconSize) ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON,
-                MAKELPARAM(TRUE, 0));
-            InvalidateRect(hBtn, NULL, TRUE);
+static void createSizeButtons(HWND hwnd) {
+    destroySizeButtons(hwnd);
+
+    if (currentGroupIndex < 0 || currentGroupIndex >= iconGroupCount) return;
+    struct IconGroup* grp = &iconGroups[currentGroupIndex];
+    int n = grp->iconCount;
+
+    int btnW = 70, btnH = 28, gap = 6;
+    int btnsPerRow = 4;
+    int rowW = btnsPerRow * btnW + (btnsPerRow - 1) * gap;
+    int startX = (340 - rowW) / 2;
+    int btnY = 275;
+
+    for (int i = 0; i < n; i++) {
+        int row = i / btnsPerRow;
+        int col = i % btnsPerRow;
+        wchar_t label[16];
+        int s = grp->sizes[i];
+        swprintf_s(label, 16, L"%dx%d", s, s);
+
+        HWND hBtn = CreateWindowW(L"BUTTON", label,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            startX + col * (btnW + gap), btnY + row * (btnH + gap), btnW, btnH,
+            hwnd, (HMENU)(INT_PTR)(IDC_SIZE_BASE + i), globalHInstance, NULL);
+        if (hBtn && hGuiFont) {
+            SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
         }
+    }
+
+    // Reposition the save button below the last row of size buttons
+    int nRows = (n + btnsPerRow - 1) / btnsPerRow;
+    int saveBtnY = btnY + nRows * (btnH + gap) + 10;
+    HWND hSaveBtn = GetDlgItem(hwnd, IDC_SAVE_ICON);
+    if (hSaveBtn) {
+        SetWindowPos(hSaveBtn, NULL, 70, saveBtnY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 }
 
 static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            // Size selection buttons: 16x16, 32x32, 48x48, 256x256
-            int btnY = 280;
-            int btnW = 70;
-            int btnH = 28;
-            int gap = 6;
-            int totalW = 4 * btnW + 3 * gap;
-            int startX = (340 - totalW) / 2;
+            // Group navigation arrows
+            int navY = 245;
+            int arrowW = 28, arrowH = 28;
 
-            struct { int id; const wchar_t* text; int size; } sizeButtons[] = {
-                { IDC_ICON_SIZE_16,  L"16x16",  16 },
-                { IDC_ICON_SIZE_32,  L"32x32",  32 },
-                { IDC_ICON_SIZE_48,  L"48x48",  48 },
-                { IDC_ICON_SIZE_256, L"256x256", 256 },
-            };
+            HWND hPrev = CreateWindowW(L"BUTTON", L"\u25C0",
+                WS_CHILD | WS_VISIBLE | (iconGroupCount > 1 ? 0 : WS_DISABLED) | BS_PUSHBUTTON,
+                10, navY, arrowW, arrowH,
+                hwnd, (HMENU)IDC_PREV_GROUP, globalHInstance, NULL);
+            if (hPrev && hGuiFont) SendMessageW(hPrev, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-            for (int i = 0; i < 4; i++) {
-                HWND hBtn = CreateWindowW(L"BUTTON", sizeButtons[i].text,
-                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    startX + i * (btnW + gap), btnY, btnW, btnH,
-                    hwnd, (HMENU)(INT_PTR)sizeButtons[i].id, globalHInstance, NULL);
-                if (hBtn && hGuiFont) {
-                    SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-                }
-            }
+            HWND hNext = CreateWindowW(L"BUTTON", L"\u25B6",
+                WS_CHILD | WS_VISIBLE | (iconGroupCount > 1 ? 0 : WS_DISABLED) | BS_PUSHBUTTON,
+                340 - 10 - arrowW, navY, arrowW, arrowH,
+                hwnd, (HMENU)IDC_NEXT_GROUP, globalHInstance, NULL);
+            if (hNext && hGuiFont) SendMessageW(hNext, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-            // Save button
+            // Dynamic size buttons
+            createSizeButtons(hwnd);
+
+            // Save button - placed after the last row of size buttons
+            struct IconGroup* grp = &iconGroups[currentGroupIndex];
+            int nRows = (grp->iconCount + 3) / 4;
+            int saveBtnY = 275 + nRows * 34 + 10;
+
             HWND hSaveBtn = CreateWindowW(L"BUTTON", lc_str.save_icon,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                70, 320, 200, 28,
+                70, saveBtnY, 200, 28,
                 hwnd, (HMENU)IDC_SAVE_ICON, globalHInstance, NULL);
-            if (hSaveBtn && hGuiFont) {
-                SendMessageW(hSaveBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-            }
+            if (hSaveBtn && hGuiFont) SendMessageW(hSaveBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-            updateSizeButtons(hwnd);
+            updateViewerTitle();
             break;
         }
         case WM_PAINT: {
@@ -1910,10 +1901,11 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 RECT rc;
                 GetClientRect(hwnd, &rc);
                 int cx = rc.right - rc.left;
-                int iconAreaCy = 270; // Top area for icon display
+                int iconAreaCy = 240;
 
-                int iconCx = min(cx - 20, currentIconSize);
-                int iconCy = min(iconAreaCy - 10, currentIconSize);
+                int curSize = iconGroups[currentGroupIndex].sizes[currentIconIndex];
+                int iconCx = min(cx - 20, curSize);
+                int iconCy = min(iconAreaCy - 10, curSize);
                 int drawSize = min(iconCx, iconCy);
                 int x = (cx - drawSize) / 2;
                 int y = (iconAreaCy - drawSize) / 2;
@@ -1928,49 +1920,48 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         case WM_COMMAND: {
             int cmdId = LOWORD(wParam);
             if (HIWORD(wParam) == BN_CLICKED) {
-                switch (cmdId) {
-                    case IDC_ICON_SIZE_16:
-                    case IDC_ICON_SIZE_32:
-                    case IDC_ICON_SIZE_48:
-                    case IDC_ICON_SIZE_256: {
-                        int newSize = (cmdId == IDC_ICON_SIZE_16) ? 16 :
-                                      (cmdId == IDC_ICON_SIZE_32) ? 32 :
-                                      (cmdId == IDC_ICON_SIZE_48) ? 48 : 256;
-                        if (newSize != currentIconSize) {
-                            currentIconSize = newSize;
-                            updateSizeButtons(hwnd);
-                            // Update window title to show current size
-                            wchar_t title[MAX_PATH] = {0};
-                            wchar_t baseTitle[MAX_PATH] = {0};
-                            wcscpy_s(baseTitle, MAX_PATH, iconViewerFileName);
-                            swprintf_s(title, MAX_PATH, L"%ls (%dx%d) - %ls",
-                                baseTitle, currentIconSize, currentIconSize, lc_str.show_icon);
-                            SetWindowTextW(hwnd, title);
-                            InvalidateRect(hwnd, NULL, TRUE);
-                        }
-                        break;
+                if (cmdId == IDC_PREV_GROUP) {
+                    if (iconGroupCount > 1) {
+                        currentGroupIndex = (currentGroupIndex - 1 + iconGroupCount) % iconGroupCount;
+                        currentIconIndex = 0;
+                        createSizeButtons(hwnd);
+                        updateViewerTitle();
+                        InvalidateRect(hwnd, NULL, TRUE);
                     }
-                    case IDC_SAVE_ICON: {
-                        HICON hCurrent = getCurrentIcon();
-                        if (!hCurrent) break;
+                } else if (cmdId == IDC_NEXT_GROUP) {
+                    if (iconGroupCount > 1) {
+                        currentGroupIndex = (currentGroupIndex + 1) % iconGroupCount;
+                        currentIconIndex = 0;
+                        createSizeButtons(hwnd);
+                        updateViewerTitle();
+                        InvalidateRect(hwnd, NULL, TRUE);
+                    }
+                } else if (cmdId >= IDC_SIZE_BASE && cmdId < IDC_SIZE_BASE + MAX_ICONS_PER_GROUP) {
+                    int idx = cmdId - IDC_SIZE_BASE;
+                    if (idx != currentIconIndex && idx < iconGroups[currentGroupIndex].iconCount) {
+                        currentIconIndex = idx;
+                        updateViewerTitle();
+                        InvalidateRect(hwnd, NULL, TRUE);
+                    }
+                } else if (cmdId == IDC_SAVE_ICON) {
+                    HICON hCurrent = getCurrentIcon();
+                    if (!hCurrent) break;
 
-                        wchar_t filePath[MAX_PATH] = {0};
-                        swprintf_s(filePath, MAX_PATH, L"%ls.ico", iconViewerFileName);
-                        OPENFILENAMEW ofn = {0};
-                        ofn.lStructSize = sizeof(ofn);
-                        ofn.hwndOwner = hwnd;
-                        ofn.lpstrFile = filePath;
-                        ofn.nMaxFile = MAX_PATH;
-                        ofn.lpstrFilter = L"Icon Files (*.ico)\0*.ico\0All Files (*.*)\0*.*\0";
-                        ofn.nFilterIndex = 1;
-                        ofn.lpstrDefExt = L"ico";
-                        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-                        if (GetSaveFileNameW(&ofn)) {
-                            if (!saveIconToFile(hCurrent, filePath)) {
-                                MessageBoxW(hwnd, L"保存图标失败", lc_str.alert, MB_OK | MB_ICONERROR);
-                            }
+                    wchar_t filePath[MAX_PATH] = {0};
+                    swprintf_s(filePath, MAX_PATH, L"%ls.ico", iconViewerFileName);
+                    OPENFILENAMEW ofn = {0};
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = hwnd;
+                    ofn.lpstrFile = filePath;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.lpstrFilter = L"Icon Files (*.ico)\0*.ico\0All Files (*.*)\0*.*\0";
+                    ofn.nFilterIndex = 1;
+                    ofn.lpstrDefExt = L"ico";
+                    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+                    if (GetSaveFileNameW(&ofn)) {
+                        if (!saveIconToFile(hCurrent, filePath)) {
+                            MessageBoxW(hwnd, L"保存图标失败", lc_str.alert, MB_OK | MB_ICONERROR);
                         }
-                        break;
                     }
                 }
             }
@@ -1985,10 +1976,7 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             return 1;
         }
         case WM_CLOSE: {
-            if (hIconSize16) { DestroyIcon(hIconSize16); hIconSize16 = NULL; }
-            if (hIconSize32) { DestroyIcon(hIconSize32); hIconSize32 = NULL; }
-            if (hIconSize48) { DestroyIcon(hIconSize48); hIconSize48 = NULL; }
-            if (hIconSize256) { DestroyIcon(hIconSize256); hIconSize256 = NULL; }
+            cleanupIconGroups();
             hwndIconViewer = NULL;
             DestroyWindow(hwnd);
             break;
@@ -2015,43 +2003,45 @@ static void registerIconViewerClass() {
 }
 
 static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
-    // Clean up any previous icons
-    if (hIconSize16) { DestroyIcon(hIconSize16); hIconSize16 = NULL; }
-    if (hIconSize32) { DestroyIcon(hIconSize32); hIconSize32 = NULL; }
-    if (hIconSize48) { DestroyIcon(hIconSize48); hIconSize48 = NULL; }
-    if (hIconSize256) { DestroyIcon(hIconSize256); hIconSize256 = NULL; }
+    cleanupIconGroups();
 
-    // Extract icons for all 4 sizes using PE resource parsing (bypasses Wine bugs)
-    hIconSize16  = getIconOfSize(filePath, 16);
-    hIconSize32  = getIconOfSize(filePath, 32);
-    hIconSize48  = getIconOfSize(filePath, 48);
-    hIconSize256 = getIconOfSize(filePath, 256);
+    iconGroupCount = extractAllIconGroupsFromPE(filePath);
+    currentGroupIndex = 0;
+    currentIconIndex = 0;
 
-    // Check that at least one icon was extracted
-    if (!hIconSize16 && !hIconSize32 && !hIconSize48 && !hIconSize256) {
+    if (iconGroupCount == 0) {
         MessageBox(hwndMain, L"无法提取文件图标", lc_str.alert, MB_OK);
         return;
     }
 
-    // Default to the largest available size
-    currentIconSize = 256;
-    if (!hIconSize256) currentIconSize = hIconSize48 ? 48 : (hIconSize32 ? 32 : 16);
+    // Pick the best (largest) icon in the first group as default
+    struct IconGroup* grp = &iconGroups[0];
+    int bestIdx = 0;
+    for (int i = 1; i < grp->iconCount; i++) {
+        if (grp->sizes[i] > grp->sizes[bestIdx]) bestIdx = i;
+    }
+    currentIconIndex = bestIdx;
 
-    // Build window title with size info
-    wmemset(iconViewerTitle, 0, MAX_PATH);
-    swprintf_s(iconViewerTitle, MAX_PATH, L"%ls (%dx%d) - %ls",
-        fileName, currentIconSize, currentIconSize, lc_str.show_icon);
     wcscpy_s(iconViewerFileName, MAX_PATH, fileName);
 
-    // Register window class if not already registered
     WNDCLASSEX wcCheck = {0};
     if (!GetClassInfoEx(globalHInstance, L"IconViewerClass", &wcCheck)) {
         registerIconViewerClass();
     }
 
-    int winWidth = 340;
-    int winHeight = 420;
+    // Compute window height based on the group with the most icons
+    int maxIcons = 0;
+    for (int g = 0; g < iconGroupCount; g++) {
+        if (iconGroups[g].iconCount > maxIcons)
+            maxIcons = iconGroups[g].iconCount;
+    }
+    int btnsPerRow = 4;
+    int maxRows = (maxIcons + btnsPerRow - 1) / btnsPerRow;
+    // Layout: icon(240) + navRow(35) + sizeBtnRows + saveBtn(28) + padding(30)
+    int winHeight = 240 + 35 + maxRows * 34 + 28 + 30;
+    if (winHeight < 380) winHeight = 380; // minimum height
 
+    int winWidth = 340;
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenWidth - winWidth) / 2;
@@ -2060,7 +2050,7 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     hwndIconViewer = CreateWindowEx(
         0,
         L"IconViewerClass",
-        iconViewerTitle,
+        L"",
         WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
         x, y, winWidth, winHeight,
         hwndMain,
@@ -2070,19 +2060,10 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     );
 
     if (!hwndIconViewer) {
-        if (hIconSize16) { DestroyIcon(hIconSize16); hIconSize16 = NULL; }
-        if (hIconSize32) { DestroyIcon(hIconSize32); hIconSize32 = NULL; }
-        if (hIconSize48) { DestroyIcon(hIconSize48); hIconSize48 = NULL; }
-        if (hIconSize256) { DestroyIcon(hIconSize256); hIconSize256 = NULL; }
+        cleanupIconGroups();
         MessageBox(hwndMain, L"无法创建图标查看窗口", lc_str.alert, MB_OK);
         return;
     }
-
-    // Disable buttons for sizes where icon extraction failed
-    if (!hIconSize16)  EnableWindow(GetDlgItem(hwndIconViewer, IDC_ICON_SIZE_16), FALSE);
-    if (!hIconSize32)  EnableWindow(GetDlgItem(hwndIconViewer, IDC_ICON_SIZE_32), FALSE);
-    if (!hIconSize48)  EnableWindow(GetDlgItem(hwndIconViewer, IDC_ICON_SIZE_48), FALSE);
-    if (!hIconSize256) EnableWindow(GetDlgItem(hwndIconViewer, IDC_ICON_SIZE_256), FALSE);
 
     ShowWindow(hwndIconViewer, SW_SHOW);
     UpdateWindow(hwndIconViewer);
@@ -2183,10 +2164,7 @@ void refreshContentView() {
     freeMenuItems();
 
     // 清理图标查看器资源
-    if (hIconSize16) { DestroyIcon(hIconSize16); hIconSize16 = NULL; }
-    if (hIconSize32) { DestroyIcon(hIconSize32); hIconSize32 = NULL; }
-    if (hIconSize48) { DestroyIcon(hIconSize48); hIconSize48 = NULL; }
-    if (hIconSize256) { DestroyIcon(hIconSize256); hIconSize256 = NULL; }
+    cleanupIconGroups();
     
     // 仅在非详细信息视图中删除列（避免列闪烁）
     if (viewStyle != STYLE_DETAILS) {

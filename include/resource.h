@@ -42,6 +42,9 @@
 #define IDC_ICON_SIZE_32  216
 #define IDC_ICON_SIZE_48  217
 #define IDC_ICON_SIZE_256 218
+#define IDC_PREV_GROUP    219
+#define IDC_NEXT_GROUP    220
+#define IDC_SIZE_BASE     230  /* 230..259 reserved for dynamic size buttons */
 
 #define ID_EDIT_CUT 301
 #define ID_EDIT_COPY 302
