@@ -1396,6 +1396,74 @@ void onMenuItemLocateISOImageClick() {
 }
 #endif /* USE_LIBCDIO */
 
+// ========== GDI+ PNG decoder (bypasses Wine's buggy PNG icon loading) ==========
+#include <shlwapi.h>
+
+/* GDI+ flat API - manually declared for C99 compatibility */
+typedef int GpStatus;
+typedef void GpBitmap;
+typedef void GpImage;
+typedef struct {
+    UINT32 GdiplusVersion;
+    void* DebugEventCallback;
+    BOOL SuppressBackgroundThread;
+    BOOL SuppressExternalCodecs;
+} GdiplusStartupInput;
+typedef struct { int dummy; } GdiplusStartupOutput;
+#define WINGDIPAPI __stdcall
+#define GDIPCONST const
+
+/* GpStatus values */
+enum { Ok = 0 };
+
+/* Forward declarations for GDI+ flat API (gdiplus.dll) */
+GpStatus WINGDIPAPI GdiplusStartup(ULONG_PTR*, GDIPCONST GdiplusStartupInput*, GdiplusStartupOutput*);
+VOID     WINGDIPAPI GdiplusShutdown(ULONG_PTR);
+GpStatus WINGDIPAPI GdipCreateBitmapFromStream(IStream*, GpBitmap**);
+GpStatus WINGDIPAPI GdipCreateHICONFromBitmap(GpBitmap*, HICON*);
+GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
+
+static ULONG_PTR g_gdiplusToken = 0;
+
+static void initGdiplus(void) {
+    if (g_gdiplusToken) return;
+    GdiplusStartupInput input;
+    memset(&input, 0, sizeof(input));
+    input.GdiplusVersion = 1;
+    GdiplusStartup(&g_gdiplusToken, &input, NULL);
+}
+
+/* Decode PNG data directly using GDI+, bypassing Wine's load_png which has
+   a bug where png_set_bgr() is missing for 24-bit RGB PNGs (R/B swapped).
+   Returns an HICON or NULL on failure. Caller must DestroyIcon(). */
+static HICON createIconFromPngData(const BYTE* data, DWORD dataSize) {
+    if (!data || dataSize < 8) return NULL;
+
+    /* Verify PNG signature: 0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A */
+    static const BYTE pngSig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+    if (memcmp(data, pngSig, 8) != 0) return NULL;
+
+    initGdiplus();
+
+    /* Create IStream from memory */
+    IStream* pStream = SHCreateMemStream(data, dataSize);
+    if (!pStream) return NULL;
+
+    /* Decode PNG to GDI+ Bitmap */
+    GpBitmap* pBitmap = NULL;
+    GpStatus status = GdipCreateBitmapFromStream(pStream, &pBitmap);
+    IStream_Release(pStream);
+
+    if (status != Ok || !pBitmap) return NULL;
+
+    /* Convert Bitmap to HICON */
+    HICON hIcon = NULL;
+    status = GdipCreateHICONFromBitmap(pBitmap, &hIcon);
+    GdipDisposeImage((GpImage*)pBitmap);
+
+    return (status == Ok) ? hIcon : NULL;
+}
+
 // ========== PE icon extraction (bypasses Wine's buggy icon APIs) ==========
 
 #pragma pack(push, 2)
@@ -1614,8 +1682,11 @@ static int extractAllIconGroupsFromPE(const wchar_t* filePath) {
 
             HICON hIcon = createIconFromRawData(iconData, iconResSize);
             if (!hIcon) {
-                // Fallback: PNG-compressed icons (common for 256x256) can't be parsed
-                // as BMP; use CreateIconFromResourceEx which handles both BMP and PNG.
+                /* Try GDI+ PNG decoder first (bypasses Wine's load_png R/B swap bug) */
+                hIcon = createIconFromPngData(iconData, iconResSize);
+            }
+            if (!hIcon) {
+                /* Last resort: use Wine's API (may have color issues for some formats) */
                 hIcon = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
                     TRUE, 0x00030000, 0, 0, LR_DEFAULTCOLOR);
             }
@@ -1875,19 +1946,15 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 hwnd, (HMENU)IDC_NEXT_GROUP, globalHInstance, NULL);
             if (hNext && hGuiFont) SendMessageW(hNext, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-            // Dynamic size buttons
-            createSizeButtons(hwnd);
-
-            // Save button - placed after the last row of size buttons
-            struct IconGroup* grp = &iconGroups[currentGroupIndex];
-            int nRows = (grp->iconCount + 3) / 4;
-            int saveBtnY = 275 + nRows * 34 + 10;
-
+            // Save button - create first so createSizeButtons can reposition it
             HWND hSaveBtn = CreateWindowW(L"BUTTON", lc_str.save_icon,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                70, saveBtnY, 200, 28,
+                70, 400, 200, 28,
                 hwnd, (HMENU)IDC_SAVE_ICON, globalHInstance, NULL);
             if (hSaveBtn && hGuiFont) SendMessageW(hSaveBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+            // Dynamic size buttons + reposition save button
+            createSizeButtons(hwnd);
 
             updateViewerTitle();
             break;
@@ -2029,7 +2096,7 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
         registerIconViewerClass();
     }
 
-    // Compute window height based on the group with the most icons
+    // Compute client area height based on the group with the most icons
     int maxIcons = 0;
     for (int g = 0; g < iconGroupCount; g++) {
         if (iconGroups[g].iconCount > maxIcons)
@@ -2037,11 +2104,18 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     }
     int btnsPerRow = 4;
     int maxRows = (maxIcons + btnsPerRow - 1) / btnsPerRow;
-    // Layout: icon(240) + navRow(35) + sizeBtnRows + saveBtn(28) + padding(30)
-    int winHeight = 240 + 35 + maxRows * 34 + 28 + 30;
-    if (winHeight < 380) winHeight = 380; // minimum height
+    // Client layout: icon(240) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(30)
+    int clientH = 240 + 35 + maxRows * 34 + 28 + 30;
+    if (clientH < 380) clientH = 380;
+    int clientW = 340;
 
-    int winWidth = 340;
+    // Convert client size to window size (includes title bar, borders)
+    DWORD dwStyle = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
+    RECT rc = {0, 0, clientW, clientH};
+    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    int winWidth = rc.right - rc.left;
+    int winHeight = rc.bottom - rc.top;
+
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     int x = (screenWidth - winWidth) / 2;
