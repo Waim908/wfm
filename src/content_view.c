@@ -1946,6 +1946,37 @@ static void createSizeButtons(HWND hwnd) {
     }
 }
 
+// Static variable to store filename clickable area
+static RECT g_filenameRect = {0};
+
+// Window procedure for filename popup window
+static LRESULT CALLBACK FilenamePopupWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_COMMAND: {
+            if (LOWORD(wParam) == IDCANCEL) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_KEYDOWN: {
+            if (wParam == VK_ESCAPE) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE: {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        case WM_DESTROY: {
+            return 0;
+        }
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
 static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -2012,17 +2043,27 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             SelectObject(hdc, hOldPen);
             DeleteObject(hPen);
 
-            // Draw filename below separator
+            // Draw filename below separator (clickable)
             if (iconViewerFileName[0] != L'\0') {
                 RECT textRc = {10, separatorY + 5, clientRc.right - 10, clientRc.bottom - 5};
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(80, 80, 80));
+                g_filenameRect = textRc;  // Store for click detection
                 
-                // Use DrawText with DT_END_ELLIPSIS to handle long filenames
-                HFONT hOldFont = SelectObject(hdc, hGuiFont);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(0, 102, 204));  // Blue color for clickable text
+                
+                // Create underlined font for clickable effect
+                HFONT hUnderlineFont = CreateFontW(
+                    -MulDiv(9, GetDeviceCaps(hdc, LOGPIXELSY), 72),  // Height
+                    0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,  // Underline=TRUE
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                    L"Segoe UI");
+                
+                HFONT hOldFont = SelectObject(hdc, hUnderlineFont);
                 DrawTextW(hdc, iconViewerFileName, -1, &textRc, 
                     DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
                 SelectObject(hdc, hOldFont);
+                DeleteObject(hUnderlineFont);
             }
 
             EndPaint(hwnd, &ps);
@@ -2074,6 +2115,87 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                             MessageBoxW(hwnd, L"保存图标失败", lc_str.alert, MB_OK | MB_ICONERROR);
                         }
                     }
+                }
+            }
+            break;
+        }
+        case WM_LBUTTONDOWN: {
+            int xPos = LOWORD(lParam);
+            int yPos = HIWORD(lParam);
+            POINT pt = {xPos, yPos};
+            
+            // Check if click is within filename area
+            if (PtInRect(&g_filenameRect, pt) && iconViewerFileName[0] != L'\0') {
+                // Register popup window class if not already registered
+                WNDCLASSEX wcPopup = {0};
+                wcPopup.cbSize = sizeof(WNDCLASSEX);
+                wcPopup.lpfnWndProc = FilenamePopupWndProc;
+                wcPopup.hInstance = globalHInstance;
+                wcPopup.hCursor = LoadCursor(NULL, IDC_ARROW);
+                wcPopup.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+                wcPopup.lpszClassName = L"FilenamePopupClass";
+                RegisterClassEx(&wcPopup);
+                
+                // Create popup window to show full filename
+                HWND hPopup = CreateWindowEx(
+                    WS_EX_TOPMOST,
+                    L"FilenamePopupClass",
+                    L"File Name",
+                    WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                    CW_USEDEFAULT, CW_USEDEFAULT, 420, 180,
+                    hwnd, NULL, globalHInstance, NULL);
+                
+                if (hPopup) {
+                    // Calculate position to center popup on screen
+                    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+                    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+                    int popupW = 420, popupH = 180;
+                    int popupX = (screenWidth - popupW) / 2;
+                    int popupY = (screenHeight - popupH) / 2;
+                    
+                    SetWindowPos(hPopup, NULL, popupX, popupY, popupW, popupH, SWP_SHOWWINDOW);
+                    
+                    // Create edit control to display full filename with scrolling
+                    HWND hEdit = CreateWindowEx(
+                        WS_EX_CLIENTEDGE, L"EDIT", iconViewerFileName,
+                        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | 
+                        ES_READONLY | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                        10, 10, popupW - 36, popupH - 95,
+                        hPopup, NULL, globalHInstance, NULL);
+                    
+                    if (hEdit && hGuiFont) {
+                        SendMessageW(hEdit, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+                    }
+                    
+                    // Create close button
+                    HWND hCloseBtn = CreateWindowW(L"BUTTON", L"Close",
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        (popupW - 100) / 2, popupH - 55, 100, 28,
+                        hPopup, (HMENU)IDCANCEL, globalHInstance, NULL);
+                    
+                    if (hCloseBtn && hGuiFont) {
+                        SendMessageW(hCloseBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+                    }
+                    
+                    // Set focus to edit control
+                    SetFocus(hEdit);
+                    
+                    // Show the window
+                    ShowWindow(hPopup, SW_SHOW);
+                    UpdateWindow(hPopup);
+                }
+            }
+            break;
+        }
+        case WM_SETCURSOR: {
+            // Change cursor to hand when hovering over filename
+            if (LOWORD(lParam) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                if (PtInRect(&g_filenameRect, pt)) {
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    return TRUE;
                 }
             }
             break;
