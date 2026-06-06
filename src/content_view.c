@@ -1899,31 +1899,50 @@ static void createSizeButtons(HWND hwnd) {
     int btnW = 70, btnH = 28, gap = 6;
     int btnsPerRow = 4;
     int rowW = btnsPerRow * btnW + (btnsPerRow - 1) * gap;
-    int startX = (340 - rowW) / 2;
-    int btnY = 275;
+    int startX = (380 - rowW) / 2;
+    int btnY = 285;  // Adjusted for larger icon area
 
+    // Track unique sizes to avoid duplicate buttons
+    int uniqueSizes[MAX_ICONS_PER_GROUP];
+    int uniqueCount = 0;
+    
     for (int i = 0; i < n; i++) {
-        int row = i / btnsPerRow;
-        int col = i % btnsPerRow;
-        wchar_t label[16];
         int s = grp->sizes[i];
-        swprintf_s(label, 16, L"%dx%d", s, s);
+        BOOL isDuplicate = FALSE;
+        
+        // Check if we already have this size
+        for (int j = 0; j < uniqueCount; j++) {
+            if (uniqueSizes[j] == s) {
+                isDuplicate = TRUE;
+                break;
+            }
+        }
+        
+        if (!isDuplicate) {
+            uniqueSizes[uniqueCount] = s;
+            uniqueCount++;
+            
+            int row = (uniqueCount - 1) / btnsPerRow;
+            int col = (uniqueCount - 1) % btnsPerRow;
+            wchar_t label[16];
+            swprintf_s(label, 16, L"%dx%d", s, s);
 
-        HWND hBtn = CreateWindowW(L"BUTTON", label,
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            startX + col * (btnW + gap), btnY + row * (btnH + gap), btnW, btnH,
-            hwnd, (HMENU)(INT_PTR)(IDC_SIZE_BASE + i), globalHInstance, NULL);
-        if (hBtn && hGuiFont) {
-            SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+            HWND hBtn = CreateWindowW(L"BUTTON", label,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                startX + col * (btnW + gap), btnY + row * (btnH + gap), btnW, btnH,
+                hwnd, (HMENU)(INT_PTR)(IDC_SIZE_BASE + i), globalHInstance, NULL);
+            if (hBtn && hGuiFont) {
+                SendMessageW(hBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+            }
         }
     }
 
     // Reposition the save button below the last row of size buttons
-    int nRows = (n + btnsPerRow - 1) / btnsPerRow;
+    int nRows = (uniqueCount + btnsPerRow - 1) / btnsPerRow;
     int saveBtnY = btnY + nRows * (btnH + gap) + 10;
     HWND hSaveBtn = GetDlgItem(hwnd, IDC_SAVE_ICON);
     if (hSaveBtn) {
-        SetWindowPos(hSaveBtn, NULL, 70, saveBtnY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        SetWindowPos(hSaveBtn, NULL, 90, saveBtnY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 }
 
@@ -1931,7 +1950,7 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
     switch (msg) {
         case WM_CREATE: {
             // Group navigation arrows
-            int navY = 245;
+            int navY = 285;
             int arrowW = 28, arrowH = 28;
 
             HWND hPrev = CreateWindowW(L"BUTTON", L"\u25C0",
@@ -1942,14 +1961,14 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
 
             HWND hNext = CreateWindowW(L"BUTTON", L"\u25B6",
                 WS_CHILD | WS_VISIBLE | (iconGroupCount > 1 ? 0 : WS_DISABLED) | BS_PUSHBUTTON,
-                340 - 10 - arrowW, navY, arrowW, arrowH,
+                380 - 10 - arrowW, navY, arrowW, arrowH,
                 hwnd, (HMENU)IDC_NEXT_GROUP, globalHInstance, NULL);
             if (hNext && hGuiFont) SendMessageW(hNext, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
             // Save button - create first so createSizeButtons can reposition it
             HWND hSaveBtn = CreateWindowW(L"BUTTON", lc_str.save_icon,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                70, 400, 200, 28,
+                90, 400, 200, 28,
                 hwnd, (HMENU)IDC_SAVE_ICON, globalHInstance, NULL);
             if (hSaveBtn && hGuiFont) SendMessageW(hSaveBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
@@ -1968,7 +1987,7 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 RECT rc;
                 GetClientRect(hwnd, &rc);
                 int cx = rc.right - rc.left;
-                int iconAreaCy = 240;
+                int iconAreaCy = 280;
 
                 int curSize = iconGroups[currentGroupIndex].sizes[currentIconIndex];
                 int iconCx = min(cx - 20, curSize);
@@ -2104,10 +2123,10 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     }
     int btnsPerRow = 4;
     int maxRows = (maxIcons + btnsPerRow - 1) / btnsPerRow;
-    // Client layout: icon(240) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(30)
-    int clientH = 240 + 35 + maxRows * 34 + 28 + 30;
-    if (clientH < 380) clientH = 380;
-    int clientW = 340;
+    // Client layout: icon(280) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(30)
+    int clientH = 280 + 35 + maxRows * 34 + 28 + 30;
+    if (clientH < 420) clientH = 420;
+    int clientW = 380;
 
     // Convert client size to window size (includes title bar, borders)
     DWORD dwStyle = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
