@@ -3,12 +3,12 @@ OBJS_LIBCDIO=obj/libcdio_loader.o
 INCLUDE_DIR=-I./include
 EXE_NAME=wfm.exe
 
-CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall
+CFLAGS=-O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -DUSE_LIBCDIO_STATIC -Wall
 LDFLAGS=-s -lcomctl32 -lgdi32 -lole32 -luuid -lcomdlg32 -lgdiplus -lshlwapi -Wl,--subsystem,windows
 ifeq ($(USE_LIBCDIO),1)
 OBJS=$(OBJS_BASE) $(OBJS_LIBCDIO)
 INCLUDE_DIR+=-I./include/libcdio
-LDFLAGS+=./libcdio.dll
+LDFLAGS+=./libcdio.a ./libiso9660.a -lwinmm
 CFLAGS:=-DUSE_LIBCDIO $(CFLAGS)
 endif
 OBJS?=$(OBJS_BASE)
