@@ -2000,6 +2000,31 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 DrawIconEx(hdc, x, y, hCurrent, drawSize, drawSize, 0, NULL, DI_NORMAL);
             }
 
+            // Draw separator line below Save Icon button
+            RECT clientRc;
+            GetClientRect(hwnd, &clientRc);
+            int separatorY = clientRc.bottom - 35;  // 35 pixels from bottom for filename
+            
+            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+            HPEN hOldPen = SelectObject(hdc, hPen);
+            MoveToEx(hdc, 10, separatorY, NULL);
+            LineTo(hdc, clientRc.right - 10, separatorY);
+            SelectObject(hdc, hOldPen);
+            DeleteObject(hPen);
+
+            // Draw filename below separator
+            if (iconViewerFileName[0] != L'\0') {
+                RECT textRc = {10, separatorY + 5, clientRc.right - 10, clientRc.bottom - 5};
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(80, 80, 80));
+                
+                // Use DrawText with DT_END_ELLIPSIS to handle long filenames
+                HFONT hOldFont = SelectObject(hdc, hGuiFont);
+                DrawTextW(hdc, iconViewerFileName, -1, &textRc, 
+                    DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
+                SelectObject(hdc, hOldFont);
+            }
+
             EndPaint(hwnd, &ps);
             break;
         }
@@ -2145,9 +2170,9 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
     
     int btnsPerRow = 4;
     int maxRows = (maxUniqueSizes + btnsPerRow - 1) / btnsPerRow;
-    // Client layout: icon(280) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(20)
-    int clientH = 280 + 35 + maxRows * 34 + 28 + 20;
-    if (clientH < 400) clientH = 400;
+    // Client layout: icon(280) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + separator(10) + filename(20) + padding(15)
+    int clientH = 280 + 35 + maxRows * 34 + 28 + 10 + 20 + 15;
+    if (clientH < 420) clientH = 420;
     int clientW = 380;
 
     // Convert client size to window size (includes title bar, borders)
