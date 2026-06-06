@@ -1939,7 +1939,7 @@ static void createSizeButtons(HWND hwnd) {
 
     // Reposition the save button below the last row of size buttons
     int nRows = (uniqueCount + btnsPerRow - 1) / btnsPerRow;
-    int saveBtnY = btnY + nRows * (btnH + gap) + 10;
+    int saveBtnY = btnY + nRows * (btnH + gap) + 5;
     HWND hSaveBtn = GetDlgItem(hwnd, IDC_SAVE_ICON);
     if (hSaveBtn) {
         SetWindowPos(hSaveBtn, NULL, 90, saveBtnY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
@@ -2115,17 +2115,39 @@ static void showIconInNewWindow(wchar_t* filePath, wchar_t* fileName) {
         registerIconViewerClass();
     }
 
-    // Compute client area height based on the group with the most icons
-    int maxIcons = 0;
+    // Compute client area height based on the group with the most unique icon sizes
+    int maxUniqueSizes = 0;
     for (int g = 0; g < iconGroupCount; g++) {
-        if (iconGroups[g].iconCount > maxIcons)
-            maxIcons = iconGroups[g].iconCount;
+        int uniqueSizes[MAX_ICONS_PER_GROUP];
+        int uniqueCount = 0;
+        
+        for (int i = 0; i < iconGroups[g].iconCount; i++) {
+            int s = iconGroups[g].sizes[i];
+            BOOL isDuplicate = FALSE;
+            
+            // Check if we already have this size
+            for (int j = 0; j < uniqueCount; j++) {
+                if (uniqueSizes[j] == s) {
+                    isDuplicate = TRUE;
+                    break;
+                }
+            }
+            
+            if (!isDuplicate) {
+                uniqueSizes[uniqueCount] = s;
+                uniqueCount++;
+            }
+        }
+        
+        if (uniqueCount > maxUniqueSizes)
+            maxUniqueSizes = uniqueCount;
     }
+    
     int btnsPerRow = 4;
-    int maxRows = (maxIcons + btnsPerRow - 1) / btnsPerRow;
-    // Client layout: icon(280) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(30)
-    int clientH = 280 + 35 + maxRows * 34 + 28 + 30;
-    if (clientH < 420) clientH = 420;
+    int maxRows = (maxUniqueSizes + btnsPerRow - 1) / btnsPerRow;
+    // Client layout: icon(280) + navRow(35) + sizeBtnRows(34 each) + saveBtn(28) + padding(20)
+    int clientH = 280 + 35 + maxRows * 34 + 28 + 20;
+    if (clientH < 400) clientH = 400;
     int clientW = 380;
 
     // Convert client size to window size (includes title bar, borders)
