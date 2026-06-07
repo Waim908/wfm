@@ -1,4 +1,4 @@
-targetFiles=(wfm.exe del-reg.bat wfm-extra.bat install-winlator.bat)
+targetFiles=(wfm.exe del-reg.bat wfm-extra.bat install-winlator.bat readme.txt)
 
 scriptDir="$(dirname $(readlink -f "$0"))"
 
