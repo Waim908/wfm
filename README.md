@@ -129,3 +129,9 @@ A: 确保你的挂载盘取消挂载后，删除*wfm.exe*和*libcdio.dll*，执�
 2. ```make -j4``` 如果需要 libcdio 文件挂载功能支持，必须使用```make USE_LIBCDIO=1 -j4``` PS: 数字4 为编译线程数，根据CPU核心数自行设置。
 
 3. 编译完成，执行exe文件
+
+# 感谢以下项目
+
+- [libcdio](https://github.com/libcdio/libcdio)
+
+- [wine](https://github.com/wine-mirror/wine)
