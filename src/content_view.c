@@ -1392,7 +1392,17 @@ void onMenuItemLocateISOImageClick() {
         MessageBox(NULL, lc_str.msg_image_dir_not_found, lc_str.alert, MB_OK);
         return;
     }
-    navigateToPath(parentDir);
+    // 提取ISO文件名，导航后选中该文件
+    wchar_t isoFileName[MAX_PATH] = {0};
+    getBasenameFromPath(currentISOPath, isoFileName, false);
+    wcscpy_s(pendingSelectName, MAX_PATH, isoFileName);
+    
+    // 如果搜索还在运行，先取消
+    cancelSearch();
+    
+    // 延迟导航：使用消息机制确保导航后能选中文件
+    wcscpy_s(pendingNavigatePath, MAX_PATH, parentDir);
+    PostMessage(hwndContentView, MSG_NAVIGATE_TO_PATH, 0, 0);
 }
 #endif /* USE_LIBCDIO */
 
