@@ -11,7 +11,7 @@
 
 ![Screenshot](wfm2.png)
 
-![Screenshot]()
+![Screenshot](wfm3.png)
 
 # 注册表结构
 ```
@@ -51,6 +51,7 @@ Windows Registry Editor Version 5.00
 11. 查看视图（大图标，小图标）持久保存在注册表
 12. 搜索结果右键指定文件的菜单里可以直接定位到文件所在位置
 13. 加入了explorer启动，cmd启动的按钮（请务必在进入有效路径后，这两个按钮才会生效）
+14. 使用挂载功能不再需要*libcdio.dll*文件了-> by [nostalgia296](https://github.com/Waim908/wfm/pull/2)
 
 相较于原版wfm
 
