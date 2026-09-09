@@ -107,6 +107,7 @@ static inline void loadStrings_zh() {
     lc_str.tb_new_file = L"新建文件";
     lc_str.tb_bookmark = L"收藏";
     lc_str.import_reg = L"导入到注册表";
+    lc_str.show_hidden_files = L"显示隐藏文件";
 }
 
 #endif

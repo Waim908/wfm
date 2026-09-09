@@ -17,6 +17,8 @@ HMENU hMenuView = NULL;
 HMENU hMenuLang = NULL;
 static wchar_t currentLocale[16] = {0};
 
+bool g_showHiddenFiles = false;
+
 HINSTANCE globalHInstance = NULL;
 HWND hwndMain = NULL;
 HFONT hGuiFont = NULL;
@@ -144,6 +146,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
 static void createMainMenu(void);
 static void switchLanguage(const wchar_t* lang);
 static void updateLangMenuCheckmarks(void);
+static void toggleShowHidden(void);
 
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
@@ -183,6 +186,9 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_CLEAR_ICON_CACHE:
             clearIconCaches();
             navigateRefresh();
+            break;
+        case ID_VIEW_SHOW_HIDDEN:
+            toggleShowHidden();
             break;
         case ID_MOUNT_LOCATE_ISO:
 #ifdef USE_LIBCDIO
@@ -333,6 +339,37 @@ void openFileNode(struct FileNode* node) {
     else navigateToFileNode(node);
 }
 
+static void saveShowHidden(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, NULL,
+                       REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS) {
+        DWORD val = g_showHiddenFiles ? 1 : 0;
+        RegSetValueEx(hkey, L"ShowHidden", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        RegCloseKey(hkey);
+    }
+}
+
+static void loadShowHidden(void) {
+    HKEY hkey;
+    DWORD val = 0;
+    DWORD size = sizeof(val);
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+        RegQueryValueEx(hkey, L"ShowHidden", NULL, NULL, (BYTE*)&val, &size);
+        RegCloseKey(hkey);
+    }
+    g_showHiddenFiles = val != 0;
+}
+
+static void toggleShowHidden(void) {
+    g_showHiddenFiles = !g_showHiddenFiles;
+    saveShowHidden();
+    if (hMenuView) {
+        CheckMenuItem(hMenuView, ID_VIEW_SHOW_HIDDEN,
+            MF_BYCOMMAND | (g_showHiddenFiles ? MF_CHECKED : MF_UNCHECKED));
+    }
+    navigateRefresh();
+}
+
 // Switch language: save to registry, prompt restart (takes effect on next launch)
 static void switchLanguage(const wchar_t* lang) {
     saveLanguageToRegistry(lang);
@@ -374,6 +411,7 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_STRING, ID_VIEW_DETAILS, lc_str.details);
     
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hmView, MF_STRING, ID_VIEW_SHOW_HIDDEN, lc_str.show_hidden_files);
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
 #ifdef USE_LIBCDIO
     HMENU hmMount = CreatePopupMenu();
@@ -479,7 +517,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     
     setViewStyle(loadViewStyle());
+    loadShowHidden();
     updateViewMenuCheckmarks();
+    if (hMenuView) {
+        CheckMenuItem(hMenuView, ID_VIEW_SHOW_HIDDEN,
+            MF_BYCOMMAND | (g_showHiddenFiles ? MF_CHECKED : MF_UNCHECKED));
+    }
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
     

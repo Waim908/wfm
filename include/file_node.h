@@ -24,4 +24,6 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs);
 void checkIfNodesHasChildDirs(struct FileNode* node, bool deep);
 void freeChildNodes(struct FileNode* parent);
 
+extern bool g_showHiddenFiles;
+
 #endif

@@ -93,7 +93,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
         do {
             if (wfd.cFileName[0] == L'.' && (wfd.cFileName[1] == L'\0' || 
                 (wfd.cFileName[1] == L'.' && wfd.cFileName[2] == L'\0'))) continue;
-            if (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) continue;
+            if (!g_showHiddenFiles && (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
 
             bool isDir = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 

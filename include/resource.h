@@ -65,6 +65,7 @@
 #define ID_LANG_ZH  317
 #define ID_LANG_PT  318
 #define ID_LANG_RU  319
+#define ID_VIEW_SHOW_HIDDEN 320
 
 #define ICON_UP          0
 #define ICON_COPY        1
@@ -201,6 +202,7 @@ struct LC_STR {
     wchar_t* tb_new_file;
     wchar_t* tb_bookmark;
     wchar_t* import_reg;
+    wchar_t* show_hidden_files;
 };
 
 extern struct LC_STR lc_str;
