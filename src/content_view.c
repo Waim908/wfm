@@ -715,10 +715,9 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
                         folderIconIndex = fi.icon;
                         folderIconCached = 1;
-                        wcscpy_s(item->type, 80, lc_str.folder);
                     }
                     item->icon = folderIconIndex;
-                    wcscpy_s(item->type, 80, lc_str.folder);
+                    wcscpy_s(item->type, 64, lc_str.folder);
                 }
                 else if (item->node->type == TYPE_FILE) {
                     // 获取扩展名
@@ -732,27 +731,27 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         wchar_t path[MAX_PATH] = {0};
                         getFileNodePath(item->node, path);
                         int cachedIcon = findExeIconCache(path);
+                        const wchar_t* typeName = ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
                         if (cachedIcon >= 0) {
                             item->icon = cachedIcon;
-                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
                         } else {
                             struct FileInfo fi = {0};
                             getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
                             item->icon = fi.icon;
                             addExeIconCache(path, fi.icon);
-                            wcscpy_s(item->type, 80, ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut);
                         }
+                        wcscpy_s(item->type, 64, typeName);
                     } else {
                         // 非 exe/lnk：先查内存缓存（扩展名 → 图标索引 + 类型名）
                         int ci = findExtIconCache(ext);
                         if (ci >= 0) {
                             item->icon = ci;
                             const wchar_t* ct = findExtTypeNameCache(ext);
-                            if (ct && ct[0]) wcscpy_s(item->type, 80, ct);
+                            if (ct && ct[0]) wcscpy_s(item->type, 64, ct);
                             else {
                                 wchar_t upper[30] = {0};
-                                strToUpper(ext + 1, upper);
-                                swprintf_s(item->type, 80, lc_str.fmt_file, upper);
+                                if (ext && ext[1]) strToUpper(ext + 1, upper);
+                                swprintf_s(item->type, 64, lc_str.fmt_file, upper);
                             }
                         } else {
                             wchar_t path[MAX_PATH] = {0};
@@ -760,7 +759,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                             struct FileInfo fi = {0};
                             getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
                             item->icon = fi.icon;
-                            wcscpy_s(item->type, 80, fi.typeName);
+                            wcscpy_s(item->type, 64, fi.typeName);
                             addExtIconCache(ext, fi.icon, fi.typeName);
                         }
                     }
@@ -780,7 +779,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     struct FileInfo fi = {0};
                     getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
                     item->icon = fi.icon;
-                    wcscpy_s(item->type, 80, fi.typeName);
+                    wcscpy_s(item->type, 64, fi.typeName);
                     if (item->node->type == TYPE_DRIVE) {
                         wchar_t rootPath[4] = {0};
                         swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
@@ -2358,17 +2357,109 @@ static void onMenuItemShowIconClick() {
     showIconInNewWindow(path, node->name);
 }
 
+static void ensureItemTypeLoaded(struct ListItem* item) {
+    if (!item || !item->node) return;
+    if (item->loaded) return;
+    
+    if (item->node->type == TYPE_DIR) {
+        if (!folderIconCached) {
+            wchar_t path[MAX_PATH] = {0};
+            getFileNodePath(item->node, path);
+            struct FileInfo fi = {0};
+            getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
+            folderIconIndex = fi.icon;
+            folderIconCached = 1;
+        }
+        item->icon = folderIconIndex;
+        wcscpy_s(item->type, 64, lc_str.folder);
+    }
+    else if (item->node->type == TYPE_FILE) {
+        wchar_t* ext = wcsrchr(item->node->name, L'.');
+        bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+        
+        if (isExeOrLnk) {
+            wchar_t path[MAX_PATH] = {0};
+            getFileNodePath(item->node, path);
+            int cachedIcon = findExeIconCache(path);
+            const wchar_t* typeName = ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
+            if (cachedIcon >= 0) {
+                item->icon = cachedIcon;
+            } else {
+                struct FileInfo fi = {0};
+                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                item->icon = fi.icon;
+                addExeIconCache(path, fi.icon);
+            }
+            wcscpy_s(item->type, 64, typeName);
+        } else {
+            int ci = findExtIconCache(ext);
+            if (ci >= 0) {
+                item->icon = ci;
+                const wchar_t* ct = findExtTypeNameCache(ext);
+                if (ct && ct[0]) wcscpy_s(item->type, 64, ct);
+                else {
+                    wchar_t upper[30] = {0};
+                    if (ext && ext[1]) strToUpper(ext + 1, upper);
+                    swprintf_s(item->type, 64, lc_str.fmt_file, upper);
+                }
+            } else {
+                wchar_t path[MAX_PATH] = {0};
+                getFileNodePath(item->node, path);
+                struct FileInfo fi = {0};
+                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
+                item->icon = fi.icon;
+                wcscpy_s(item->type, 64, fi.typeName);
+                addExtIconCache(ext, fi.icon, fi.typeName);
+            }
+        }
+    }
+    else {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(item->node, path);
+        struct FileInfo fi = {0};
+        getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
+        item->icon = fi.icon;
+        wcscpy_s(item->type, 64, fi.typeName);
+        if (item->node->type == TYPE_DRIVE) {
+            wchar_t rootPath[4] = {0};
+            swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
+            ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
+            if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
+                item->driveTotalBytes = totalBytes.QuadPart;
+                item->driveFreeBytes = freeBytesAvail.QuadPart;
+                formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
+            }
+        }
+    }
+    
+    if (item->node->type == TYPE_FILE) {
+        formatFileSize(item->size, item->formattedSize);
+        SYSTEMTIME systemTime = {0};
+        FILETIME localFiletime;
+        if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
+            formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
+        }
+    }
+    
+    item->loaded = true;
+}
+
 static int compareType(const void* a, const void* b) {
     struct ListItem* ia = (struct ListItem*)a;
     struct ListItem* ib = (struct ListItem*)b;
-    return sortAscending ? ia->node->type - ib->node->type : ib->node->type - ia->node->type;
+    
+    ensureItemTypeLoaded(ia);
+    ensureItemTypeLoaded(ib);
+    
+    int res = sortAscending ? wcscmp(ia->type, ib->type) : wcscmp(ib->type, ia->type);
+    return res;
 }
 
 static int compareName(const void* a, const void* b) {
     struct ListItem* ia = (struct ListItem*)a;
     struct ListItem* ib = (struct ListItem*)b;
     int res = compareType(a, b);
-    if (res == 0) res = sortAscending ? wcscoll(ia->node->name, ib->node->name) : wcscoll(ib->node->name, ia->node->name);
+    if (res == 0) res = sortAscending ? wcscmp(ia->node->name, ib->node->name) : wcscmp(ib->node->name, ia->node->name);
     return res;
 }
 
