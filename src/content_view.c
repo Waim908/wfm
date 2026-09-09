@@ -2487,6 +2487,9 @@ static int compareType(const void* a, const void* b) {
     ensureItemTypeLoaded(ib);
     
     int res = sortAscending ? wcscmp(ia->type, ib->type) : wcscmp(ib->type, ia->type);
+    if (res == 0) {
+        res = sortAscending ? wcscmp(ia->node->name, ib->node->name) : wcscmp(ib->node->name, ia->node->name);
+    }
     return res;
 }
 
