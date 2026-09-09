@@ -99,6 +99,7 @@ struct ListItem {
     wchar_t formattedSize[64];
     wchar_t formattedDate[32];
     bool loaded;
+    bool isHidden;
     uint64_t size;
     wchar_t* path;
     FILETIME modifiedTime;
@@ -141,6 +142,7 @@ void onMenuItemUnloadISOImageClick();
 #endif
 static void onMenuItemShowIconClick();
 static void onMenuItemOpenFileLocationClick();
+static void onMenuItemOpenWithClick();
 static bool isInSearchMode();
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
@@ -159,6 +161,7 @@ static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageCl
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
 #endif
 static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
+static struct ContextMenuItem cmiOpenWith = {NULL, &onMenuItemOpenWithClick, NULL};
 static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL};
 static void onMenuItemImportRegClick();
 static struct ContextMenuItem cmiImportReg = {NULL, &onMenuItemImportRegClick, NULL};
@@ -584,6 +587,7 @@ static void createContextMenu(enum ContextMenuType type) {
             if (selectedItems[0]->type == TYPE_FILE) {
                 addContextMenuItem(hMenu, id++, &cmiOpen, false);
                 addContextMenuItem(hMenu, id++, &cmiEdit, true);
+                addContextMenuItem(hMenu, id++, &cmiOpenWith, true);
                 addContextMenuItem(hMenu, id++, &cmiShowIcon, true);
                 #ifdef USE_LIBCDIO
                 createCDDriveContextMenu(&id);
@@ -641,6 +645,10 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
                         && items[idx].driveTotalBytes > 0) {
                         return CDRF_NOTIFYSUBITEMDRAW;
+                    }
+                    // 隐藏文件用灰色文字
+                    if (idx >= 0 && idx < numItems && items[idx].isHidden) {
+                        lvcd->clrText = RGB(160, 160, 160);
                     }
                     return CDRF_DODEFAULT;
                 }
@@ -1156,6 +1164,7 @@ void createContentView() {
     cmiUnloadISOImage.text = lc_str.unload_iso_image;
 #endif
     cmiShowIcon.text = lc_str.show_icon;
+    cmiOpenWith.text = lc_str.open_with_menu;
     cmiOpenFileLocation.text = lc_str.open_file_location;
     cmiImportReg.text = lc_str.import_reg;
     
@@ -1170,6 +1179,26 @@ void onMenuItemUpClick() {
 
 void onMenuItemOpenClick() {
     if (numSelectedItems == 1) openFileNode(selectedItems[0]);
+}
+
+static void onMenuItemOpenWithClick() {
+    if (numSelectedItems == 1 && selectedItems[0]->type == TYPE_FILE) {
+        wchar_t path[MAX_PATH] = {0};
+        wchar_t parentPath[MAX_PATH] = {0};
+        getFileNodePath(selectedItems[0], path);
+        getFileNodePath(selectedItems[0]->parent, parentPath);
+        
+        wchar_t* ext = wcsrchr(selectedItems[0]->name, L'.');
+        bool removeAssoc = false;
+        wchar_t* chosen = showOpenWithDialog(path, ext, &removeAssoc);
+        
+        if (removeAssoc && ext) {
+            removeFileAssociation(ext);
+        } else if (chosen) {
+            ShellExecute(hwndMain, L"open", chosen, path, parentPath, SW_SHOW);
+            free(chosen);
+        }
+    }
 }
 
 void onMenuItemEditClick() {
@@ -2360,6 +2389,12 @@ static void onMenuItemShowIconClick() {
 static void ensureItemTypeLoaded(struct ListItem* item) {
     if (!item || !item->node) return;
     if (item->loaded) return;
+    
+    // 查询文件属性，标记隐藏文件
+    wchar_t itemPath[MAX_PATH] = {0};
+    getFileNodePath(item->node, itemPath);
+    DWORD attrs = GetFileAttributes(itemPath);
+    item->isHidden = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_HIDDEN));
     
     if (item->node->type == TYPE_DIR) {
         if (!folderIconCached) {

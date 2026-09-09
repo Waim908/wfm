@@ -108,6 +108,11 @@ static inline void loadStrings_pt() {
     lc_str.tb_bookmark = L"Favorito";
     lc_str.import_reg = L"Importar para o Registro";
     lc_str.show_hidden_files = L"Mostrar Arquivos Ocultos";
+    lc_str.open_with = L"Abrir Com";
+    lc_str.open_with_label = L"Escolha o programa para abrir este arquivo:";
+    lc_str.browse = L"Procurar...";
+    lc_str.always_use = L"Sempre usar este programa para este tipo de arquivo";
+    lc_str.open_with_menu = L"Abrir Com...";
 }
 
 #endif

@@ -109,6 +109,11 @@ static inline void loadStrings_ru() {
     lc_str.tb_bookmark = L"Закладка";
     lc_str.import_reg = L"Импорт в реестр";
     lc_str.show_hidden_files = L"Показать скрытые файлы";
+    lc_str.open_with = L"Открыть с помощью";
+    lc_str.open_with_label = L"Выберите программу для открытия этого файла:";
+    lc_str.browse = L"Обзор...";
+    lc_str.always_use = L"Всегда использовать эту программу для этого типа файлов";
+    lc_str.open_with_menu = L"Открыть с помощью...";
 }
 
 #endif

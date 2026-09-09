@@ -334,7 +334,29 @@ void openFileNode(struct FileNode* node) {
         wchar_t parentPath[MAX_PATH] = {0};
         getFileNodePath(node, path);
         getFileNodePath(node->parent, parentPath);
-        ShellExecute(hwndMain, L"open", path, NULL, parentPath, SW_SHOW);
+        
+        // 检查是否有自定义文件关联
+        wchar_t* ext = wcsrchr(node->name, L'.');
+        wchar_t program[MAX_PATH] = {0};
+        if (ext && getFileAssociation(ext, program, MAX_PATH)) {
+            // 使用自定义关联程序打开
+            ShellExecute(hwndMain, L"open", program, path, parentPath, SW_SHOW);
+        } else {
+            // 尝试系统默认关联
+            HINSTANCE hInst = ShellExecute(hwndMain, L"open", path, NULL, parentPath, SW_SHOW);
+            // 如果系统无法打开（错误码 > 32 表示成功）
+            if ((INT_PTR)hInst <= 32) {
+                // 显示"打开方式"对话框
+                bool removeAssoc = false;
+                wchar_t* chosen = showOpenWithDialog(path, ext, &removeAssoc);
+                if (removeAssoc && ext) {
+                    removeFileAssociation(ext);
+                } else if (chosen) {
+                    ShellExecute(hwndMain, L"open", chosen, path, parentPath, SW_SHOW);
+                    free(chosen);
+                }
+            }
+        }
     }
     else navigateToFileNode(node);
 }

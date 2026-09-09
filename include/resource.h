@@ -66,6 +66,10 @@
 #define ID_LANG_PT  318
 #define ID_LANG_RU  319
 #define ID_VIEW_SHOW_HIDDEN 320
+#define IDD_OPEN_WITH 260
+#define IDC_EDIT_PROGRAM 261
+#define IDC_BTN_BROWSE 262
+#define IDC_CHECK_ALWAYS 263
 
 #define ICON_UP          0
 #define ICON_COPY        1
@@ -203,6 +207,11 @@ struct LC_STR {
     wchar_t* tb_bookmark;
     wchar_t* import_reg;
     wchar_t* show_hidden_files;
+    wchar_t* open_with;
+    wchar_t* open_with_label;
+    wchar_t* browse;
+    wchar_t* always_use;
+    wchar_t* open_with_menu;
 };
 
 extern struct LC_STR lc_str;

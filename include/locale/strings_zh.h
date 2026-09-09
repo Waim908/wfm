@@ -108,6 +108,11 @@ static inline void loadStrings_zh() {
     lc_str.tb_bookmark = L"收藏";
     lc_str.import_reg = L"导入到注册表";
     lc_str.show_hidden_files = L"显示隐藏文件";
+    lc_str.open_with = L"打开方式";
+    lc_str.open_with_label = L"选择要用来打开此文件的程序：";
+    lc_str.browse = L"浏览...";
+    lc_str.always_use = L"始终使用此程序打开此类文件";
+    lc_str.open_with_menu = L"打开方式...";
 }
 
 #endif

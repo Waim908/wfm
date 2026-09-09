@@ -1,4 +1,4 @@
-OBJS_BASE=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/bookmarks.o obj/resource.o
+OBJS_BASE=obj/main.o obj/content_view.o obj/toolbar.o obj/navbar.o obj/treeview.o obj/sizebar.o obj/statusbar.o obj/file_node.o obj/file_actions.o obj/input_dialog.o obj/bookmarks.o obj/open_with_dialog.o obj/resource.o
 OBJS_LIBCDIO=obj/libcdio_loader.o
 INCLUDE_DIR=-I./include
 EXE_NAME=wfm.exe
