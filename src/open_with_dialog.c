@@ -69,10 +69,13 @@ static INT_PTR CALLBACK OpenWithDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam
             SetWindowText(GetDlgItem(hwndDlg, IDOK), lc_str.ok);
             SetWindowText(GetDlgItem(hwndDlg, IDCANCEL), lc_str.cancel);
             
-            // 如果已有关联程序，显示在输入框中并勾选"始终使用"
+            // 如果已有关联程序，显示在输入框中，并将复选框改为"取消默认打开程序"，隐藏浏览按钮，文本框设为只读
             if (dialogExistingProgram[0]) {
                 SetWindowText(GetDlgItem(hwndDlg, IDC_EDIT_PROGRAM), dialogExistingProgram);
-                CheckDlgButton(hwndDlg, IDC_CHECK_ALWAYS, BST_CHECKED);
+                SetWindowText(GetDlgItem(hwndDlg, IDC_CHECK_ALWAYS), L"取消为默认打开程序");
+                CheckDlgButton(hwndDlg, IDC_CHECK_ALWAYS, BST_UNCHECKED);
+                ShowWindow(GetDlgItem(hwndDlg, IDC_BTN_BROWSE), SW_HIDE);
+                SendMessage(GetDlgItem(hwndDlg, IDC_EDIT_PROGRAM), EM_SETREADONLY, TRUE, 0);
             }
             
             SendMessage(hwndDlg, WM_NEXTDLGCTL, (WPARAM)GetDlgItem(hwndDlg, IDC_EDIT_PROGRAM), TRUE);
@@ -99,41 +102,50 @@ static INT_PTR CALLBACK OpenWithDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam
                 case IDOK: {
                     HWND hwndEdit = GetDlgItem(hwndDlg, IDC_EDIT_PROGRAM);
                     int len = GetWindowTextLength(hwndEdit);
+                    bool checkboxChecked = IsDlgButtonChecked(hwndDlg, IDC_CHECK_ALWAYS) == BST_CHECKED;
                     
-                    if (len > 0) {
-                        // 用户输入了程序路径
-                        selectedProgram = calloc(len + 1, sizeof(wchar_t));
-                        SendMessage(hwndEdit, WM_GETTEXT, len + 1, (LPARAM)selectedProgram);
-                        
-                        bool alwaysUse = IsDlgButtonChecked(hwndDlg, IDC_CHECK_ALWAYS) == BST_CHECKED;
-                        if (alwaysUse) {
-                            // 勾选了"始终使用"，保存关联
-                            EndDialog(hwndDlg, IDYES);
-                        } else {
-                            // 没勾选，只是一次性打开
-                            EndDialog(hwndDlg, IDOK);
-                        }
-                    } else {
-                        // 输入框为空，询问是否取消关联
-                        if (dialogExistingProgram[0]) {
-                            // 已有关联，询问是否删除
-                            int msgResult = MessageBox(hwndDlg, 
-                                L"清空路径将取消默认打开程序设置，是否继续？",
-                                lc_str.open_with, MB_YESNO | MB_ICONQUESTION);
-                            if (msgResult == IDYES) {
+                    if (dialogExistingProgram[0]) {
+                        // 已有关联的情况
+                        if (checkboxChecked) {
+                            // 勾选了"取消为默认打开程序"，删除关联
+                            if (selectedProgram) {
+                                free(selectedProgram);
                                 selectedProgram = NULL;
-                                shouldRemoveAssoc = true;
+                            }
+                            shouldRemoveAssoc = true;
+                        }
+                        // 无论是否勾选都关闭弹窗
+                        EndDialog(hwndDlg, IDYES);
+                    } else {
+                        // 没有关联的情况
+                        if (len > 0) {
+                            // 用户输入了程序路径
+                            selectedProgram = calloc(len + 1, sizeof(wchar_t));
+                            if (!selectedProgram) {
+                                EndDialog(hwndDlg, IDCANCEL);
+                                break;
+                            }
+                            SendMessage(hwndEdit, WM_GETTEXT, len + 1, (LPARAM)selectedProgram);
+                            
+                            if (checkboxChecked) {
+                                // 勾选了"始终使用"，保存关联
                                 EndDialog(hwndDlg, IDYES);
+                            } else {
+                                // 没勾选，只是一次性打开（不保存关联）
+                                EndDialog(hwndDlg, IDOK);
                             }
                         } else {
-                            // 没有关联，提示输入程序路径
+                            // 输入框为空，提示输入程序路径
                             MessageBox(hwndDlg, L"请输入程序路径", lc_str.open_with, MB_OK | MB_ICONINFORMATION);
                         }
                     }
                     break;
                 }
                 case IDCANCEL:
-                    selectedProgram = NULL;
+                    if (selectedProgram) {
+                        free(selectedProgram);
+                        selectedProgram = NULL;
+                    }
                     shouldRemoveAssoc = false;
                     EndDialog(hwndDlg, IDCANCEL);
                     break;
