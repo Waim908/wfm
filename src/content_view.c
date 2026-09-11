@@ -2784,20 +2784,37 @@ static int compareTypeName(const struct ListItem* ia, const struct ListItem* ib)
     return wcscmp(typeA, typeB);
 }
 
+// 文件夹永远排在文件前面 —— 这是资源管理器（以及几乎所有文件管理器）的固定行为：
+// 点列头只改变「文件之间」的次序，文件夹始终置顶，升降序都不翻转。
+static int compareFoldersFirst(const struct ListItem* ia, const struct ListItem* ib) {
+    bool fa = (ia->node && ia->node->type != TYPE_FILE);
+    bool fb = (ib->node && ib->node->type != TYPE_FILE);
+    if (fa == fb) return 0;
+    return fa ? -1 : 1;
+}
+
 static int compareNameOnly(const struct ListItem* ia, const struct ListItem* ib) {
     const wchar_t* na = (ia->node && ia->node->name) ? ia->node->name : L"";
     const wchar_t* nb = (ib->node && ib->node->name) ? ib->node->name : L"";
-    return wcscmp(na, nb);
+    // 先做大小写无关比较（与资源管理器一致，README.md 会排在 abc.txt 前面），
+    // 完全相同时再按大小写敏感收敛 —— 保证是个确定的全序，qsort 不会因"相等"漂移。
+    int res = wcsicmp(na, nb);
+    if (res == 0) res = wcscmp(na, nb);
+    return res;
 }
 
 static int finalizeCompare(int res) {
     return sortAscending ? res : -res;
 }
 
+// 四个比较器统一结构：文件夹置顶 → 本列主键 → 名称 → 类型。
+// 「文件夹置顶」必须直接 return，不能进 finalizeCompare —— 否则降序时会被翻到最底部。
 static int compareName(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareNameOnly(ia, ib);
+    int res = compareFoldersFirst(ia, ib);
+    if (res != 0) return res;
+    res = compareNameOnly(ia, ib);
     if (res == 0) res = compareTypeName(ia, ib);
     return finalizeCompare(res);
 }
@@ -2805,7 +2822,9 @@ static int compareName(const void* a, const void* b) {
 static int compareType(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareTypeName(ia, ib);
+    int res = compareFoldersFirst(ia, ib);
+    if (res != 0) return res;
+    res = compareTypeName(ia, ib);
     if (res == 0) res = compareNameOnly(ia, ib);
     return finalizeCompare(res);
 }
@@ -2813,9 +2832,11 @@ static int compareType(const void* a, const void* b) {
 static int compareSize(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
+    int res = compareFoldersFirst(ia, ib);
+    if (res != 0) return res;
     // 主键就是大小。旧实现先比类型/名称，而且用 uint64 相减截断成 int，
     // 两个 >2GB 的文件差值超过 INT_MAX 时排序结果随机错乱。
-    int res = 0;
+    res = 0;
     if (ia->size < ib->size) res = -1;
     else if (ia->size > ib->size) res = 1;
     if (res == 0) res = compareTypeName(ia, ib);
@@ -2826,7 +2847,9 @@ static int compareSize(const void* a, const void* b) {
 static int compareDate(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = CompareFileTime(&ia->modifiedTime, &ib->modifiedTime);
+    int res = compareFoldersFirst(ia, ib);
+    if (res != 0) return res;
+    res = CompareFileTime(&ia->modifiedTime, &ib->modifiedTime);
     if (res == 0) res = compareNameOnly(ia, ib);
     return finalizeCompare(res);
 }
@@ -2835,6 +2858,32 @@ void clearIconCaches() {
     extCacheCount = 0;
     exeIconCacheCount = 0;
     folderIconCachedForStyle = -1;
+}
+
+// 更新表头排序指示箭头。
+//
+// 关键：Win32 / Wine 的 ListView **不会**自动绘制排序三角，必须由应用自己
+// 通过 HDI_FORMAT + HDF_SORTUP / HDF_SORTDOWN 设置（Wine 的 comctl32 header.c
+// 同样按这个标志绘制），否则用户完全看不出当前按哪列、哪个方向排序。
+static void updateSortIndicator() {
+    HWND hHeader = ListView_GetHeader(hwndContentView);
+    if (!hHeader) return;
+
+    int numCols = Header_GetItemCount(hHeader);
+    for (int i = 0; i < numCols; i++) {
+        HDITEM hd = {0};
+        hd.mask = HDI_FORMAT;
+        if (!Header_GetItem(hHeader, i, &hd)) continue;
+
+        UINT fmt = hd.fmt & ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == sortColumnIdx) {
+            fmt |= sortAscending ? HDF_SORTUP : HDF_SORTDOWN;
+        }
+        if (fmt == (UINT)hd.fmt) continue;      // 无变化就不发包，避免无谓重绘
+
+        hd.fmt = fmt;
+        Header_SetItem(hHeader, i, &hd);
+    }
 }
 
 void sortItems() {
@@ -2958,6 +3007,9 @@ void refreshContentView() {
     // 注意：Wine 在图标视图下会强制丢弃 LVSICF_NOINVALIDATEALL（见
     // dlls/comctl32/listview.c LISTVIEW_SetItemCount），此时退化为整表失效，仍然正确。
     ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+
+    // 排序指示箭头：列结构或排序状态一变就重设（建列、点列头、切视图都汇到这里）
+    updateSortIndicator();
 
     updateStatusbar();
 }
