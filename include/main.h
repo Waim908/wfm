@@ -22,15 +22,6 @@
 #include <cdio/iso9660.h>
 #endif
 
-static inline void alertf(const char *fmt, ...) {
-    char text[128] = {0};
-    va_list args;
-    va_start(args, fmt);
-    vsprintf_s(text, 128, fmt, args);
-    va_end(args);
-    MessageBoxA(NULL, text, "Alert", MB_OK);
-}
-
 static inline void timetToFileTime(time_t t, LPFILETIME result) {
     ULARGE_INTEGER timeValue;
     timeValue.QuadPart = (t * 10000000LL) + 116444736000000000LL;
