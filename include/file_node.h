@@ -10,6 +10,7 @@ struct FileNode {
     struct FileNode* sibling;
     struct FileNode* children;
     bool hasChildDirs;
+    bool isHidden;      // 枚举时记录，供列表灰显隐藏文件（避免在重绘里反复查属性）
     uint64_t size;
     FILETIME modifiedTime;
 };
@@ -21,7 +22,6 @@ void setCurrPathFromString(wchar_t* path);
 int getChildNodeCount(struct FileNode* parent);
 int getFileNodePath(struct FileNode* node, wchar_t* path);
 void buildChildNodes(struct FileNode* parent, bool onlyDirs);
-void checkIfNodesHasChildDirs(struct FileNode* node, bool deep);
 void freeChildNodes(struct FileNode* parent);
 
 extern bool g_showHiddenFiles;

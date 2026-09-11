@@ -4,6 +4,18 @@
 #include "main.h"
 #include "string_utils.h"
 
+#include <stdarg.h>
+
+// 安全格式化：容量不足时截断，而不是让安全 CRT 触发约束违规（swprintf_s 溢出会
+// 落入 invalid parameter handler）。拼接路径这类「长度不受控」的写入一律用它。
+static inline void swprintfTrunc(wchar_t* buf, size_t bufSize, const wchar_t* fmt, ...) {
+    if (!buf || bufSize == 0) return;
+    va_list args;
+    va_start(args, fmt);
+    _vsnwprintf_s(buf, bufSize, _TRUNCATE, fmt, args);
+    va_end(args);
+}
+
 enum FileType {
     TYPE_DIR,
     TYPE_FILE,
@@ -22,45 +34,50 @@ struct FileInfo {
 };
 
 static inline bool isPathExists(wchar_t* path) {
-    DWORD dwAttrib = GetFileAttributes(path);
-    return (dwAttrib != INVALID_FILE_ATTRIBUTES && (
-           (dwAttrib & FILE_ATTRIBUTE_DIRECTORY) || (dwAttrib & FILE_ATTRIBUTE_ARCHIVE)));
+    // 存在性判据只看 INVALID_FILE_ATTRIBUTES。
+    // 不能用 FILE_ATTRIBUTE_ARCHIVE 这类「正向属性」做判据：真实 Windows 上
+    // 清除了归档位的文件（备份/同步工具常见）会被误判为不存在。
+    if (!path || path[0] == L'\0') return false;
+    return GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+// 统一的容量换算：整数循环，不依赖 log10/pow。
+// 整除时输出整数（"1 KB"），否则保留两位小数（"1.50 KB"），
+// 保证文件大小列与磁盘剩余空间列的格式一致。
+static inline void formatSizeU64(uint64_t size, wchar_t* buf, int bufSize) {
+    static const wchar_t* units[6] = { L"bytes", L"KB", L"MB", L"GB", L"TB", L"PB" };
+    if (!buf || bufSize <= 0) return;
+
+    if (size == 0) {
+        wcsncpy_s(buf, (size_t)bufSize, L"0 bytes", _TRUNCATE);
+        return;
+    }
+
+    // 最多进位到 PB，避免 units[] 越界（旧实现 size >= 1024^5 时会读 units[5]）
+    int group = 0;
+    uint64_t scaled = size;
+    while (group < 5 && scaled >= 1024) {
+        scaled /= 1024;
+        group++;
+    }
+
+    uint64_t divisor = 1;
+    for (int i = 0; i < group; i++) divisor *= 1024;
+
+    if (size % divisor == 0) {
+        swprintfTrunc(buf, (size_t)bufSize, L"%llu %ls", (unsigned long long)scaled, units[group]);
+    }
+    else {
+        swprintfTrunc(buf, (size_t)bufSize, L"%.2f %ls", (double)size / (double)divisor, units[group]);
+    }
 }
 
 static inline void formatFileSize(uint64_t size, wchar_t* formattedSize) {
-    static const wchar_t units[5][11] = {L"bytes", L"KB", L"MB", L"GB", L"TB"};
-    
-    if (size > 0) {
-        int digitGroups = (int)(log10(size) / log10(1024));
-        swprintf_s(formattedSize, 32, L"%.2f %ls", size / pow(1024, digitGroups), units[digitGroups]);
-        
-        wchar_t* lastDot = wcsrchr(formattedSize, L'.');
-        if (lastDot) {
-            int offset = lastDot - formattedSize;
-            if (formattedSize[offset+1] == L'\0' && formattedSize[offset+2] == L'\0') {
-                int len = wcslen(formattedSize);
-                for (int i = 0; i < len-3; i++) formattedSize[offset+i] = formattedSize[offset+i+3];
-            }
-        }
-    }
-    else wcscpy_s(formattedSize, 32, L"0 bytes");
+    formatSizeU64(size, formattedSize, 32);
 }
 
 static inline void formatOneSize(uint64_t val, wchar_t* buf, int bufSize) {
-    static const wchar_t units[5][11] = {L"bytes", L"KB", L"MB", L"GB", L"TB"};
-    if (val > 0) {
-        int digitGroups = (int)(log10((double)val) / log10(1024.0));
-        swprintf_s(buf, bufSize, L"%.2f %ls", (double)val / pow(1024.0, digitGroups), units[digitGroups]);
-        wchar_t* lastDot = wcsrchr(buf, L'.');
-        if (lastDot) {
-            int offset = (int)(lastDot - buf);
-            if (buf[offset+1] == L'0' && buf[offset+2] == L'0') {
-                int len = wcslen(buf);
-                for (int i = 0; i < len-3; i++) buf[offset+i] = buf[offset+i+3];
-            }
-        }
-    }
-    else wcscpy_s(buf, bufSize, L"0 bytes");
+    formatSizeU64(val, buf, bufSize);
 }
 
 static inline void formatDriveSpace(uint64_t totalBytes, uint64_t freeBytes, wchar_t* result, int resultSize) {
@@ -79,26 +96,30 @@ static inline void getParentDirFromPath(wchar_t* path, wchar_t* result) {
     result[len-1] = L'\0';
 }
 
-static inline void getBasenameFromPath(wchar_t* path, wchar_t* result, bool removeExt) {
-    wchar_t* lastSlash = wcsrchr(path, L'\\');
-    int offset = lastSlash ? lastSlash - path + 1 : 0;
-    int len = (wcslen(path) - offset) + 1;
-    
-    memcpy(result, path + offset, len * sizeof(wchar_t));
-    result[len-1] = L'\0';
-    
+// 取路径的最后一段。必须传入 result 的真实容量，旧实现无边界检查（长文件名栈溢出）。
+static inline void getBasenameFromPath(const wchar_t* path, wchar_t* result, int resultSize, bool removeExt) {
+    if (!result || resultSize <= 0) return;
+    result[0] = L'\0';
+    if (!path) return;
+
+    const wchar_t* lastSlash = wcsrchr(path, L'\\');
+    const wchar_t* base = lastSlash ? lastSlash + 1 : path;
+    wcsncpy_s(result, (size_t)resultSize, base, _TRUNCATE);
+
     if (removeExt) {
         wchar_t* lastDot = wcsrchr(result, L'.');
-        if (lastDot) {
-            offset = lastDot - result;
-            result[offset] = L'\0';
-        }     
+        // 前导点号表示隐藏文件名（.gitignore/.bashrc），不当扩展名处理
+        if (lastDot && lastDot != result) *lastDot = L'\0';
     }
 }
 
 static inline void toUnixPath(wchar_t* dosPath, char* result) {
+    if (!result) return;
+    result[0] = '\0';
+    if (!dosPath || wcslen(dosPath) < 2) return;   // 避免 dosPath + 2 越过字符串末尾
+
     wchar_t unixPath[MAX_PATH] = {0};
-    wcscpy_s(unixPath, MAX_PATH, dosPath + 2);
+    wcsncpy_s(unixPath, MAX_PATH, dosPath + 2, _TRUNCATE);
     
     int count = 0;
     wchar_t* ptr = unixPath;
@@ -219,8 +240,8 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
                 }
                 else {
                     wchar_t value[30] = {0};
-                    strToUpper(ext, value);
-                    swprintf_s(result->typeName, 80, lc_str.fmt_file, value);
+                    strToUpper(ext, value, 30);
+                    swprintfTrunc(result->typeName, 80, lc_str.fmt_file, value);
                 }
             }
             
@@ -237,37 +258,70 @@ static inline void makeDirs(wchar_t* path) {
     CreateDirectory(path, NULL);
 }
 
-static inline void joinPaths(wchar_t* pathA, wchar_t* pathB, wchar_t* result) {
-    wmemset(result, L'\0', MAX_PATH);
-    int pathLen = wcslen(pathA);
-    wcscpy_s(result, MAX_PATH, pathA);
-    
-    if (result[pathLen-1] != L'\\') result[pathLen++] = L'\\';
-    wcscpy_s(result + pathLen, MAX_PATH, pathB);
+// 拼接路径。旧实现把 MAX_PATH 当作「剩余容量」传给 CRT（result + pathLen 之后
+// 实际只剩 MAX_PATH - pathLen），且 pathA 为空串时会读 result[-1]。
+static inline void joinPaths(wchar_t* pathA, wchar_t* pathB, wchar_t* result, int resultSize) {
+    if (!result || resultSize <= 0) return;
+    result[0] = L'\0';
+    if (!pathA) pathA = L"";
+    if (!pathB) pathB = L"";
+
+    wcsncpy_s(result, (size_t)resultSize, pathA, _TRUNCATE);
+    int pathLen = (int)wcslen(result);
+
+    if (pathLen > 0 && result[pathLen - 1] != L'\\' && pathLen + 1 < resultSize) {
+        result[pathLen++] = L'\\';
+        result[pathLen] = L'\0';
+    }
+
+    wcsncpy_s(result + pathLen, (size_t)(resultSize - pathLen), pathB, _TRUNCATE);
 }
 
-static inline void joinUnixPaths(char* pathA, char* pathB, char* result) {
-    memset(result, 0, MAX_PATH);
-    int pathLen = strlen(pathA);
-    strcpy_s(result, MAX_PATH, pathA);
-    
-    if (result[pathLen-1] != '/') result[pathLen++] = '/';
-    strcpy_s(result + pathLen, MAX_PATH, pathB);
+static inline void joinUnixPaths(char* pathA, char* pathB, char* result, int resultSize) {
+    if (!result || resultSize <= 0) return;
+    result[0] = '\0';
+    if (!pathA) pathA = "";
+    if (!pathB) pathB = "";
+
+    strncpy_s(result, (size_t)resultSize, pathA, _TRUNCATE);
+    int pathLen = (int)strlen(result);
+
+    if (pathLen > 0 && result[pathLen - 1] != '/' && pathLen + 1 < resultSize) {
+        result[pathLen++] = '/';
+        result[pathLen] = '\0';
+    }
+
+    strncpy_s(result + pathLen, (size_t)(resultSize - pathLen), pathB, _TRUNCATE);
 }
 
 static inline void clearDirectory(wchar_t* targetPath) {
+    if (!targetPath || targetPath[0] == L'\0') return;
+
     wchar_t path[MAX_PATH] = {0};
-    wcscpy_s(path, MAX_PATH, targetPath);
+    if (wcsstr(targetPath, L"\\*")) {
+        wcsncpy_s(path, MAX_PATH, targetPath, _TRUNCATE);
+    }
+    else {
+        // 父目录路径 + 分隔符 + 通配符 + 终止符必须都放得下。
+        // 放不下就整体放弃：截断后再交给 FindFirstFile 会匹配到错误路径，
+        // 而沿用 wcscat_s 会因容量不足落进安全 CRT 的无效参数处理器。
+        if (wcslen(targetPath) + 2 >= MAX_PATH) return;
+        swprintfTrunc(path, MAX_PATH, L"%ls%ls*", targetPath,
+                      targetPath[wcslen(targetPath) - 1] == L'\\' ? L"" : L"\\");
+    }
+
     WIN32_FIND_DATA wfd = {0};
-    if (!wcsstr(path, L"\\*")) wcscat_s(path, MAX_PATH, L"\\*");
     HANDLE handle = FindFirstFile(path, &wfd);
 
     if (handle != INVALID_HANDLE_VALUE) {
         do {
-            if (wfd.cFileName[0] == L'.') continue;
+            // 只跳过 "." 和 ".."。旧写法 cFileName[0] == '.' 会把 .config/.git/.wine
+            // 这些合法的隐藏目录一并跳过，导致卸载后删除不干净。
+            if (wcscmp(wfd.cFileName, L".") == 0 || wcscmp(wfd.cFileName, L"..") == 0) continue;
             
             wchar_t fullPath[MAX_PATH] = {0};
-            joinPaths(targetPath, wfd.cFileName, fullPath);
+            joinPaths(targetPath, wfd.cFileName, fullPath, MAX_PATH);
+            if (fullPath[0] == L'\0') continue;
             bool isDir = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
             
             if (isDir) {
@@ -282,15 +336,18 @@ static inline void clearDirectory(wchar_t* targetPath) {
 }
 
 static inline bool getCurrentISOPath(wchar_t* result) {
+    if (!result) return false;
     wmemset(result, L'\0', MAX_PATH);
-    int pathLen = MAX_PATH;
+    // RegQueryValue 的 lpcbData 单位是「字节」；传入的元素个数要乘 sizeof(wchar_t)
+    LONG size = MAX_PATH * sizeof(wchar_t);
+    LONG ret = ERROR_FILE_NOT_FOUND;
     HKEY hkey;
     if (RegOpenKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
-        RegQueryValue(hkey, NULL, result, (PLONG)&pathLen);
+        ret = RegQueryValue(hkey, NULL, result, &size);
         RegCloseKey(hkey);
     }
-    
-    return pathLen != MAX_PATH;
+    // Wine 在值不存在时返回 ERROR_SUCCESS 且数据为空串，因此必须同时判断内容
+    return ret == ERROR_SUCCESS && result[0] != L'\0';
 }
 
 #endif

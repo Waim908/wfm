@@ -21,6 +21,7 @@ static struct FileNode* allocFileNode(wchar_t* name, enum FileType type) {
     node->sibling = NULL;
     node->children = NULL;
     node->hasChildDirs = false;
+    node->isHidden = false;
     node->size = 0;
     memset(&node->modifiedTime, 0, sizeof(FILETIME));
     return node;
@@ -50,6 +51,15 @@ void freeChildNodes(struct FileNode* parent) {
     parent->children = NULL;
 }
 
+// 释放「顶层节点」的结构体本身。
+// 注意：不能释放 node->name —— 顶层节点的 name 可能指向 lc_str.* 这类字面量，
+// 或指向全局的 userProfileNodeName（由 initFileNodes 单独持有）。
+static void freeTopLevelNode(struct FileNode* node) {
+    if (!node) return;
+    freeChildNodes(node);
+    MEMFREE(node);
+}
+
 void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
     freeChildNodes(parent);
     
@@ -66,6 +76,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             i += wcslen(drive) + 1;
 
             wchar_t* name = malloc(3 * sizeof(wchar_t));
+            if (!name) break;   // 分配失败时停止枚举，避免解引用 NULL
             name[0] = drive[0];
             name[1] = drive[1];
             name[2] = L'\0';
@@ -86,7 +97,10 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
         getFileNodePath(parent, path);
         
         WIN32_FIND_DATA wfd = {0};
-        wcscat_s(path, MAX_PATH, L"\\*");
+        if (path[0] == L'\0') goto done;
+        // 先按 MAX_PATH 截断判断再拼接，避免 wcscat_s 容量不足时触发约束违规
+        if (wcslen(path) + 2 >= MAX_PATH) goto done;
+        wcscat_s(path, MAX_PATH, path[wcslen(path) - 1] == L'\\' ? L"*" : L"\\*");
         HANDLE handle = FindFirstFile(path, &wfd);
         if (handle == INVALID_HANDLE_VALUE) goto done;
         
@@ -98,7 +112,8 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             bool isDir = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
             if (onlyDirs && !isDir) continue;
-            if (!isDir && !(wfd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)) continue;
+            // 不要用「必须带 ARCHIVE 位」做正向判据：真实 Windows 上清了归档位的
+            // 普通文件会被这里凭空过滤掉（Wine 恰好恒设该位，掩盖了这个问题）
             
             enum FileType type = isDir ? TYPE_DIR : TYPE_FILE;
             
@@ -106,6 +121,7 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
             struct FileNode* child = allocFileNode(name, type);
             if (!child) { free(name); continue; }
             child->parent = parent;
+            child->isHidden = (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
             
             if (isDir) {
                 child->hasChildDirs = true;
@@ -128,43 +144,6 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
     
 done:
     parent->children = firstChild;
-}
-
-void checkIfNodesHasChildDirs(struct FileNode* node, bool deep) {
-    if (!node) return;
-    wchar_t path[MAX_PATH] = {0};
-    
-    struct FileNode* parent = node;
-    while (parent) {
-        parent->hasChildDirs = false;
-        if (parent->type == TYPE_COMPUTER) {
-            parent->hasChildDirs = true;
-        }
-        else {
-            getFileNodePath(parent, path);
-            
-            if (isPathExists(path)) {
-                WIN32_FIND_DATA wfd = {0};
-                wcscat_s(path, MAX_PATH, L"\\*");
-                HANDLE handle = FindFirstFile(path, &wfd);
-
-                if (handle != INVALID_HANDLE_VALUE) {
-                    do {
-                        if (wcscmp(wfd.cFileName, L".") == 0 || wcscmp(wfd.cFileName, L"..") == 0) continue;
-                        if (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            parent->hasChildDirs = true;
-                            break;
-                        }               
-                    }
-                    while (FindNextFile(handle, &wfd));
-                    FindClose(handle);
-                }
-            }
-        }
-        
-        if (deep) checkIfNodesHasChildDirs(parent->children, deep);
-        parent = parent->sibling;
-    }
 }
 
 static void freeCurrPathFileNode() {
@@ -243,17 +222,31 @@ void initFileNodes() {
     // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
-    if (!desktopNode || !documentsNode) return;
+    if (!desktopNode || !documentsNode) {
+        // 分配失败：释放已成功创建的节点，不留下无人持有的内存
+        freeTopLevelNode(desktopNode);
+        freeTopLevelNode(documentsNode);
+        return;
+    }
     documentsNode->hasChildDirs = true;
 
     // 创建用户目录节点（显示名建议使用本地化字符串，若无则用硬编码）
     userProfileNodeName = wcsdup(L"User");
     struct FileNode* userNode = allocFileNode(userProfileNodeName, TYPE_USERPROFILE);
-    if (!userNode) return;
+    if (!userNode) {
+        freeTopLevelNode(desktopNode);
+        freeTopLevelNode(documentsNode);
+        return;
+    }
     userNode->hasChildDirs = true;
 
     struct FileNode* computerNode = allocFileNode(lc_str.computer, TYPE_COMPUTER);
-    if (!computerNode) return;
+    if (!computerNode) {
+        freeTopLevelNode(desktopNode);
+        freeTopLevelNode(documentsNode);
+        freeTopLevelNode(userNode);
+        return;
+    }
     computerNode->hasChildDirs = true;
     
     // 链接顺序：桌面 -> 文档 -> 用户 -> 此电脑
@@ -279,8 +272,11 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
     int count = 0;
     
     // 收集路径片段（从叶到根）
-    wchar_t* parts[32];
+    wchar_t* parts[32] = {0};   // 显式清零：拼接阶段按 numParts 反向读取，避免读到未初始化指针
     int numParts = 0;
+    // 盘符片段需要一块在整个函数内都有效的存储（parts[] 会一直引用它到拼接阶段）。
+    // 旧实现用 static，会让搜索线程与 UI 线程互相覆盖；改为函数局部。
+    wchar_t drivePath[4] = {0};
     
     while (currNode && numParts < 32) {
         wchar_t* filename = NULL;
@@ -305,7 +301,6 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                     break;
                 case TYPE_DRIVE: {
                     // 对于驱动器，只返回盘号如 C:，路径拼接逻辑会添加分隔符
-                    static wchar_t drivePath[MAX_PATH];
                     wchar_t* name = currNode->name;
                     if (name[0] != L'\0' && name[1] == L':') {
                         // 移除可能存在的尾部反斜杠，只保留 C: 格式
