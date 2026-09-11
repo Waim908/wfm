@@ -82,6 +82,7 @@ static inline void loadStrings_zh() {
     lc_str.msg_x_drive_not_found = L"未找到 X: 盘，请先在 winecfg 中添加驱动器 X: 并设置为光驱类型";
     lc_str.msg_image_dir_not_found = L"映像文件所在目录不存在";
     lc_str.msg_no_libcdio = L"此版本不支持 libcdio 挂载功能";
+    lc_str.msg_confirm_unmount_iso = L"取消挂载会清空 X: 盘的全部内容。\n\nX: 通常软链到真实目录，此操作不可撤销。确定继续吗？";
     lc_str.save_icon = L"保存图标";
     lc_str.fmt_drive_space = L"%ls / %ls";
 

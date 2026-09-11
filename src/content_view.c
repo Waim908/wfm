@@ -8,69 +8,71 @@
 
 
 // 目录图标缓存
-static int folderIconCached = 0;
+// 缓存键必须带上「大图标/小图标」维度：getFileInfo 返回的是对应图像列表内的
+// 索引，大小图标图像列表的索引空间不同，不区分维度必然串图标。
+static int folderIconCachedForStyle = -1;   // -1 表示未缓存
 static int folderIconIndex = 0;
 
-// exe/lnk 文件图标缓存（按路径缓存图标索引）
+// exe/lnk 文件图标缓存（按路径 + 图标尺寸缓存图标索引）
 #define EXE_ICON_CACHE_SIZE 64
 static struct {
     wchar_t path[MAX_PATH];
     int iconIndex;
+    bool large;
 } exeIconCache[EXE_ICON_CACHE_SIZE];
 static int exeIconCacheCount = 0;
 static HIMAGELIST currentImageList = NULL;
 
+// 状态栏节流：搜索期间每批（100 项）都刷新一次状态栏没有意义，限制到约 5 次/秒。
+// 最终值由 MSG_SEARCH_DONE 里的 updateStatusbar() 保证正确。
+static DWORD lastStatusbarTick = 0;
+
 // 扩展名 → 图标索引 内存缓存（仅限当次会话，不持久化）
 #define EXT_CACHE_SIZE 64
-static struct {
+struct ExtIconCacheEntry {
     wchar_t ext[16];
     int icon;
     wchar_t typeName[64];
-} extIconCache[EXT_CACHE_SIZE];
+    bool large;
+};
+static struct ExtIconCacheEntry extIconCache[EXT_CACHE_SIZE];
 static int extCacheCount = 0;
 
-// 快速查找
-static int findExtIconCache(const wchar_t* ext) {
-    if (!ext) return -1;
-    for (int i = 0; i < extCacheCount; i++) {
-        if (wcsicmp(extIconCache[i].ext, ext) == 0)
-            return extIconCache[i].icon;
-    }
-    return -1;
-}
-
-static const wchar_t* findExtTypeNameCache(const wchar_t* ext) {
+// 一次查找同时拿到图标索引与类型名（旧实现分两次线性扫描）
+static struct ExtIconCacheEntry* findExtCache(const wchar_t* ext, bool large) {
     if (!ext) return NULL;
     for (int i = 0; i < extCacheCount; i++) {
-        if (wcsicmp(extIconCache[i].ext, ext) == 0)
-            return extIconCache[i].typeName;
+        if (extIconCache[i].large == large && wcsicmp(extIconCache[i].ext, ext) == 0)
+            return &extIconCache[i];
     }
     return NULL;
 }
 
-static void addExtIconCache(const wchar_t* ext, int icon, const wchar_t* typeName) {
+static void addExtIconCache(const wchar_t* ext, int icon, const wchar_t* typeName, bool large) {
     if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
     wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
     extIconCache[extCacheCount].icon = icon;
+    extIconCache[extCacheCount].large = large;
     if (typeName) wcsncpy_s(extIconCache[extCacheCount].typeName, 64, typeName, 63);
     else extIconCache[extCacheCount].typeName[0] = L'\0';
     extCacheCount++;
 }
 
-static int findExeIconCache(wchar_t* path) {
+static int findExeIconCache(wchar_t* path, bool large) {
     if (!path || !currentImageList) return -1;
     for (int i = 0; i < exeIconCacheCount; i++) {
-        if (wcsicmp(exeIconCache[i].path, path) == 0) {
+        if (exeIconCache[i].large == large && wcsicmp(exeIconCache[i].path, path) == 0) {
             return exeIconCache[i].iconIndex;
         }
     }
     return -1;
 }
 
-static int addExeIconCache(wchar_t* path, int iconIndex) {
+static int addExeIconCache(wchar_t* path, int iconIndex, bool large) {
     if (!path || exeIconCacheCount >= EXE_ICON_CACHE_SIZE) return iconIndex;
     wcsncpy_s(exeIconCache[exeIconCacheCount].path, MAX_PATH, path, MAX_PATH - 1);
     exeIconCache[exeIconCacheCount].iconIndex = iconIndex;
+    exeIconCache[exeIconCacheCount].large = large;
     return exeIconCacheCount++, iconIndex;
 }
 
@@ -80,8 +82,7 @@ static int addExeIconCache(wchar_t* path, int iconIndex) {
 
 
 enum Msg {
-    MSG_ADD_ITEM = WM_APP,
-    MSG_ADD_ITEMS_BATCH,
+    MSG_ADD_ITEMS_BATCH = WM_APP,
     MSG_SEARCH_DONE,
     MSG_NAVIGATE_TO_PATH
 };
@@ -107,11 +108,24 @@ struct ListItem {
     uint64_t driveFreeBytes;
 };
 
+// 搜索线程持有的只读节点池。
+// 搜索线程绝不调用 buildChildNodes（那会 free 掉 UI 线程正在使用的节点），
+// 而是用 FindFirstFile 在本地建立一棵只属于自己的树，退出时统一释放。
+struct SearchNodePool {
+    struct FileNode** nodes;
+    int count;
+    int capacity;
+};
+
 struct SearchData {
     wchar_t keyword[64];  // 拥有自己的副本，避免悬空指针
-    bool active;
-    bool canceled;
+    wchar_t rootPath[MAX_PATH];  // 搜索起点路径，创建线程前由 UI 线程抓取
+    volatile bool active;
+    volatile bool canceled;
     HANDLE threadHandle;  // 线程句柄，用于等待线程退出
+    struct SearchNodePool* pool;      // 线程建立的只读节点池
+    struct FileNode** results;        // 结果数组（MSG_SEARCH_DONE 时移交 UI 线程）
+    int resultCount;
 };
 
 struct SearchCache {
@@ -119,10 +133,45 @@ struct SearchCache {
     wchar_t keyword[64];
     struct FileNode** results;
     int count;
+    struct SearchNodePool* pool;   // results 指向的节点由该池拥有
     time_t timestamp;
 };
 
 static struct SearchCache searchCache = {0};
+
+// ===== 搜索节点池 =====
+// 池中记录搜索线程分配过的每一个节点，释放时不依赖链表结构，
+// 避免某条链忘记登记造成泄漏。
+static void freeSearchPool(struct SearchNodePool* pool) {
+    if (!pool) return;
+    for (int i = 0; i < pool->count; i++) {
+        struct FileNode* node = pool->nodes[i];
+        if (!node) continue;
+        free(node->name);
+        free(node);
+    }
+    free(pool->nodes);
+    free(pool);
+}
+
+static struct FileNode* allocSearchNode(struct SearchNodePool* pool, const wchar_t* name, enum FileType type) {
+    if (!pool) return NULL;
+    struct FileNode* node = calloc(1, sizeof(struct FileNode));
+    if (!node) return NULL;
+    node->name = wcsdup(name);
+    if (!node->name) { free(node); return NULL; }
+    node->type = type;
+
+    if (pool->count >= pool->capacity) {
+        int newCap = pool->capacity ? pool->capacity * 2 : 64;
+        struct FileNode** tmp = realloc(pool->nodes, newCap * sizeof(struct FileNode*));
+        if (!tmp) { free(node->name); free(node); return NULL; }
+        pool->nodes = tmp;
+        pool->capacity = newCap;
+    }
+    pool->nodes[pool->count++] = node;
+    return node;
+}
 
 struct BatchItems {
     struct FileNode** nodes;
@@ -215,6 +264,7 @@ HWND hwndContentView = NULL;
 static void fillFileInfo(struct FileNode* node, struct ListItem* item) {
     // 直接使用已保存的文件属性，无需再次调用 API
     item->size = node->size;
+    item->isHidden = node->isHidden;
     memcpy(&item->modifiedTime, &node->modifiedTime, sizeof(FILETIME));
 }
 
@@ -273,6 +323,9 @@ void clearContentView() {
     free(searchCache.results);
     searchCache.results = NULL;
     searchCache.count = 0;
+    // 搜索结果所引用的节点由搜索节点池拥有，与结果同生命周期
+    freeSearchPool(searchCache.pool);
+    searchCache.pool = NULL;
 
     // 注意：图标缓存不再在此清空，以保持跨导航的加速效果
     // 只有在视图样式切换时才需要重建图像列表
@@ -282,66 +335,82 @@ void clearContentView() {
     cleanupIconGroups();
 }
 
-static void execCommandLine(wchar_t *command) {
+// 后台等待线程的参数：command 的所有权在线程结束前归它所有。
+struct CommandWaitData {
+    wchar_t* command;
+};
+
+// 在后台线程里执行并等待 cmd.exe 退出。
+// 旧实现在 UI 线程上 WaitForSingleObject(INFINITE)：只要自定义命令启动的程序
+// 不退出，整个 WFM 就完全无响应（连窗口都不能拖动）。
+static DWORD WINAPI commandWaitTask(void* param) {
+    struct CommandWaitData* data = (struct CommandWaitData*)param;
+
     SHELLEXECUTEINFO shExecInfo = {0};
     shExecInfo.cbSize = sizeof(SHELLEXECUTEINFO);
     shExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
     shExecInfo.hwnd = hwndMain;
     shExecInfo.lpVerb = NULL;
-    shExecInfo.lpFile = L"C:\\windows\\system32\\cmd.exe";        
-    shExecInfo.lpParameters = command;   
+    shExecInfo.lpFile = L"C:\\windows\\system32\\cmd.exe";
+    shExecInfo.lpParameters = data->command;
     shExecInfo.lpDirectory = NULL;
     shExecInfo.nShow = SW_SHOW;
-    shExecInfo.hInstApp = NULL; 
-    ShellExecuteEx(&shExecInfo);
-    WaitForSingleObject(shExecInfo.hProcess, INFINITE);
-    CloseHandle(shExecInfo.hProcess);    
+    shExecInfo.hInstApp = NULL;
+
+    // ShellExecuteEx 失败时 hProcess 为 NULL，直接传给 WaitForSingleObject 无意义
+    if (ShellExecuteEx(&shExecInfo) && shExecInfo.hProcess) {
+        WaitForSingleObject(shExecInfo.hProcess, INFINITE);
+        CloseHandle(shExecInfo.hProcess);
+    }
+
+    free(data->command);
+    free(data);
+    return 0;
+}
+
+// 接管 command 的所有权（成功创建线程时由线程释放）
+static void execCommandLine(wchar_t* command) {
+    struct CommandWaitData* data = calloc(1, sizeof(struct CommandWaitData));
+    if (!data) {
+        free(command);
+        return;
+    }
+    data->command = command;
+
+    HANDLE thread = CreateThread(NULL, 0, commandWaitTask, data, 0, NULL);
+    if (!thread) {
+        free(command);
+        free(data);
+        return;
+    }
+    CloseHandle(thread);
 }
 
 LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_COMMAND: {
             if ((HWND)lParam == 0) {
-                MENUITEMINFO item;
+                // dwItemData 只在 GetMenuItemInfo 成功后才有效，否则是栈垃圾
+                MENUITEMINFO item = {0};
                 item.cbSize = sizeof(MENUITEMINFO);
                 item.fMask = MIIM_DATA;
-                GetMenuItemInfo(hContextMenu, LOWORD(wParam), FALSE, &item);
+                if (!GetMenuItemInfo(hContextMenu, LOWORD(wParam), FALSE, &item)) break;
                 struct ContextMenuItem* cmItem = (struct ContextMenuItem*)item.dwItemData;
-                
+                if (!cmItem) break;
+
                 if (cmItem->cmdData) {
-                    wchar_t command[MAX_PATH];
-                    wcscpy_s(command, MAX_PATH, L"/C ");
-                    wcscat_s(command, MAX_PATH, cmItem->cmdData);
-                    execCommandLine(command);
+                    // 缓冲区按命令实际长度分配：固定 MAX_PATH 会静默丢弃较长的自定义命令
+                    size_t cmdLen = wcslen(cmItem->cmdData) + 4;
+                    wchar_t* command = malloc(cmdLen * sizeof(wchar_t));
+                    if (command) {
+                        wcscpy_s(command, cmdLen, L"/C ");
+                        wcscat_s(command, cmdLen, cmItem->cmdData);
+                        execCommandLine(command);   // 所有权移交（内部线程负责释放）
+                    }
                     navigateRefresh();
                 }
-                else cmItem->proc();
+                else if (cmItem->proc) cmItem->proc();
             }           
-            break;
-        }
-        case MSG_ADD_ITEM: {
-            if (searchData != NULL && searchData->active) {
-                struct FileNode* node = (struct FileNode*)lParam;
-                int index = numItems++;
-
-                if (numItems > itemsCapacity) {
-                    int newCapacity = itemsCapacity == 0 ? 1000 : itemsCapacity * 2;
-                    struct ListItem* tmp = realloc(items, newCapacity * sizeof(struct ListItem));
-                    if (!tmp) { numItems--; break; }
-                    items = tmp;
-                    itemsCapacity = newCapacity;
-                }
-                
-                struct ListItem* item = &items[index];
-                item->node = node;
-                item->path = NULL;
-                item->loaded = false;
-                
-                fillFileInfo(node, item);
-                
-                ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL);
-                updateStatusbar();
-            }
             break;
         }
         case MSG_ADD_ITEMS_BATCH: {
@@ -368,17 +437,44 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 numItems = newCount;
                 ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL);
-                updateStatusbar();
+
+                DWORD now = GetTickCount();
+                if (now - lastStatusbarTick >= 200) {
+                    lastStatusbarTick = now;
+                    updateStatusbar();
+                }
             }
             break;
         }
         case MSG_SEARCH_DONE: {
-            searchData->active = false;
+            if (!searchData) break;   // 防御：正常情况下该消息只在 searchData 非空时投递
             bool canceled = searchData->canceled;
+            searchData->active = false;
             if (searchData->threadHandle) {
                 CloseHandle(searchData->threadHandle);
                 searchData->threadHandle = NULL;
             }
+
+            if (!canceled && searchData->results) {
+                // 在 UI 线程接管搜索结果的数组与节点池的所有权
+                free(searchCache.results);
+                freeSearchPool(searchCache.pool);
+                searchCache.results = searchData->results;
+                searchCache.pool = searchData->pool;
+                searchCache.count = searchData->resultCount;
+                searchCache.timestamp = time(NULL);
+                wcsncpy_s(searchCache.path, MAX_PATH, searchData->rootPath, _TRUNCATE);
+                wcscpy_s(searchCache.keyword, 64, searchData->keyword);
+                searchData->results = NULL;
+                searchData->pool = NULL;
+            }
+            else {
+                free(searchData->results);
+                freeSearchPool(searchData->pool);
+                searchData->results = NULL;
+                searchData->pool = NULL;
+            }
+
             free(searchData);
             searchData = NULL;
             if (canceled) {
@@ -431,17 +527,29 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 void updateSelectedItems() {
     MEMFREE(selectedItems);
     numSelectedItems = 0;
+    if (!items || numItems <= 0) return;
 
-    int i = ListView_GetNextItem(hwndContentView, -1, LVNI_SELECTED);
-    while (i != -1 && items && i < numItems) {
-        int newCount = numSelectedItems + 1;
-        struct FileNode** tmp = realloc(selectedItems, newCount * sizeof(struct FileNode*));
-        if (!tmp) break;
-        selectedItems = tmp;
-        selectedItems[numSelectedItems] = items[i].node;
-        numSelectedItems = newCount;
-        i = ListView_GetNextItem(hwndContentView, i, LVNI_SELECTED);
+    int total = ListView_GetSelectedCount(hwndContentView);
+    if (total <= 0) return;
+
+    // 一次分配：旧实现逐项 realloc，全选 N 项是 O(N^2)。
+    struct FileNode** tmp = calloc((size_t)total, sizeof(struct FileNode*));
+    if (!tmp) return;
+    selectedItems = tmp;
+
+    for (int i = 0; i < numItems && numSelectedItems < total; i++) {
+        if (ListView_GetItemState(hwndContentView, i, LVIS_SELECTED) & LVIS_SELECTED) {
+            selectedItems[numSelectedItems++] = items[i].node;
+        }
     }
+
+    // 防御：如果控件上报的选中数大于实际能取到的条目（或个别条目的 node 为空），
+    // 在这里把空槽压缩掉，保证下游所有 selectedItems[i]->... 的解引用都安全。
+    int write = 0;
+    for (int i = 0; i < numSelectedItems; i++) {
+        if (selectedItems[i]) selectedItems[write++] = selectedItems[i];
+    }
+    numSelectedItems = write;
 }
 
 static void addContextMenuItem(HMENU hMenu, int id, struct ContextMenuItem* cmItem, bool separate) {
@@ -464,19 +572,79 @@ static void addContextMenuItem(HMENU hMenu, int id, struct ContextMenuItem* cmIt
     }
 }
 
+// ===== 自定义菜单命令的安全替换 =====
+// 文件名可能包含 " & ^ | % 等字符（Linux/Winlator 文件名允许，Wine 会原样映射），
+// 直接拼接就等于命令注入。这里按「模板是否已经给占位符加引号」分别处理：
+//   - 模板已加引号（如官方模板 ... x "%FILE%" ...）：引号内无法转义 " 和 %，
+//     遇到这类字符就放弃整个菜单项，其余原样替换（保持既有模板完全兼容）；
+//   - 模板未加引号：值里含空白或 cmd 元字符时补一层引号，避免参数被拆分或注入。
+static bool placeholderIsQuoted(const wchar_t* cmd, const wchar_t* placeholder) {
+    const wchar_t* p = wcsstr(cmd, placeholder);
+    return p && p != cmd && p[-1] == L'"';
+}
+
+static wchar_t* buildCmdArg(const wchar_t* cmd, const wchar_t* placeholder, const wchar_t* value) {
+    if (!value) return NULL;
+    if (wcspbrk(value, L"\"%")) return NULL;
+
+    bool quoted = placeholderIsQuoted(cmd, placeholder);
+    if (quoted || !wcspbrk(value, L" \t&|<>^()")) return wcsdup(value);
+
+    size_t len = wcslen(value);
+    wchar_t* out = malloc((len + 3) * sizeof(wchar_t));
+    if (!out) return NULL;
+    out[0] = L'"';
+    memcpy(out + 1, value, len * sizeof(wchar_t));
+    out[len + 1] = L'"';
+    out[len + 2] = L'\0';
+    return out;
+}
+
+// 把注册表里的命令模板替换成最终命令行；任一处无法安全替换就返回 NULL
+static wchar_t* buildContextMenuCommand(const wchar_t* tmpl, const wchar_t* filePath,
+                                        const wchar_t* basename, const wchar_t* dirPath) {
+    if (!tmpl) return NULL;
+    wchar_t* cmdData = wcsdup(tmpl);
+    if (!cmdData) return NULL;
+
+    const wchar_t* specs[3][2] = {
+        { L"%FILE%", filePath },
+        { L"%BASENAME%", basename },
+        { L"%DIR%", dirPath }
+    };
+
+    for (int s = 0; s < 3; s++) {
+        if (!wcsstr(cmdData, specs[s][0])) continue;
+        wchar_t* arg = buildCmdArg(cmdData, specs[s][0], specs[s][1]);
+        if (!arg) { free(cmdData); return NULL; }
+        wchar_t* replaced = strReplace(cmdData, specs[s][0], arg, true);
+        free(arg);
+        // strReplace 在分配失败时返回原串（而不是 NULL）。这种情况下占位符没被替换，
+        // 留在命令行里的 %FILE% 会被 cmd.exe 当环境变量展开 —— 必须整条放弃。
+        if (replaced == cmdData) { free(cmdData); return NULL; }
+        cmdData = replaced;
+    }
+    return cmdData;
+}
+
 static void createContextMenuFromRegistry(int* id) {
     freeMenuItems();
     HKEY hkeyContextMenu, hkeyItem;
     if (RegOpenKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\ContextMenu", &hkeyContextMenu) != ERROR_SUCCESS) return;
-    
-    WCHAR itemName[30] = {0};
+    if (!selectedItems || numSelectedItems < 1 || !selectedItems[0]) {
+        RegCloseKey(hkeyContextMenu);
+        return;
+    }
+
+    WCHAR itemName[64] = {0};
     WCHAR subitemName[100] = {0};
-    WCHAR itemValue[MAX_PATH];
+    WCHAR itemValue[MAX_PATH] = {0};
     DWORD i, j, itemNameLen, itemValueLen;
-    
+
     i = 0;
     while (i < 10) {
-        itemNameLen = 30;    
+        // RegEnumKey 的 lpcchName 单位是「字符」，不是字节
+        itemNameLen = (DWORD)(sizeof(itemName) / sizeof(itemName[0]));
         if (RegEnumKey(hkeyContextMenu, i++, itemName, itemNameLen) != ERROR_SUCCESS) break;
         if (RegOpenKey(hkeyContextMenu, itemName, &hkeyItem) == ERROR_SUCCESS) {
             MENUITEMINFO item = {0};
@@ -489,34 +657,41 @@ static void createContextMenuFromRegistry(int* id) {
             
             HMENU hSubmenu = CreatePopupMenu();
             
+            // 结果条目文本与当前路径只取一次，循环内复用
+            wchar_t filePath[MAX_PATH] = {0};
+            wchar_t dirPath[MAX_PATH] = {0};
+            wchar_t basename[MAX_PATH] = {0};
+            getFileNodePath(selectedItems[0], filePath);
+            getBasenameFromPath(filePath, basename, MAX_PATH, true);
+            getFileNodePath(selectedItems[0]->parent, dirPath);
+
             j = 0;
             while (j < 10) {
-                itemNameLen = 100;
-                itemValueLen = MAX_PATH;
+                // name 长度单位是字符，data 长度单位是字节（Wine: RegEnumValueW 内部按
+                // info->NameLength/sizeof(WCHAR) 比较 val_count，按字节比较 *count）
+                itemNameLen = (DWORD)(sizeof(subitemName) / sizeof(subitemName[0]));
+                itemValueLen = sizeof(itemValue);
                 if (RegEnumValue(hkeyItem, j++, subitemName, &itemNameLen, NULL, NULL, (LPBYTE)itemValue, &itemValueLen) != ERROR_SUCCESS) break;
-                
-                int index = numMenuItems++;
-                menuItems = realloc(menuItems, numMenuItems * sizeof(struct ContextMenuItem));     
-                
-                struct ContextMenuItem* cmItem = &menuItems[index];
-                cmItem->text = wcsdup(subitemName);
+
+                // 无法安全替换（值里含 " 或 %）时放弃该菜单项：
+                // 宁可少一项，也不执行被文件名篡改过的命令
+                wchar_t* cmdData = buildContextMenuCommand(itemValue, filePath, basename, dirPath);
+                if (!cmdData) break;
+                if (numMenuItems >= 100) { free(cmdData); break; }
+
+                struct ContextMenuItem* tmp = realloc(menuItems, (numMenuItems + 1) * sizeof(struct ContextMenuItem));
+                if (!tmp) { free(cmdData); break; }
+                menuItems = tmp;
+
+                wchar_t* text = wcsdup(subitemName);
+                if (!text) { free(cmdData); break; }
+
+                struct ContextMenuItem* cmItem = &menuItems[numMenuItems];
+                cmItem->text = text;
                 cmItem->proc = NULL;
-                
-                wchar_t *cmdData = malloc(1024);
-                wcscpy_s(cmdData, MAX_PATH, itemValue);
-                
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(selectedItems[0], path);
-                cmdData = strReplace(cmdData, L"%FILE%", path, true);
-                
-                wchar_t basename[80] = {0};
-                getBasenameFromPath(path, basename, true);
-                cmdData = strReplace(cmdData, L"%BASENAME%", basename, true);                
-                
-                getFileNodePath(selectedItems[0]->parent, path);
-                cmdData = strReplace(cmdData, L"%DIR%", path, true);
-                
                 cmItem->cmdData = cmdData;
+                numMenuItems++;
+
                 addContextMenuItem(hSubmenu, (*id)++, cmItem, false);
             }
             
@@ -540,28 +715,33 @@ static void createCDDriveContextMenu(int* id) {
     HMENU hSubmenu = CreatePopupMenu();
     
     wchar_t currentISOPath[MAX_PATH] = {0};
-    int currentISOPathLen = MAX_PATH;
+    LONG currentISOPathLen = sizeof(currentISOPath);   // RegQueryValue 的长度单位是字节
     HKEY hkey;
+    bool hasISO = false;
     if (RegOpenKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath", &hkey) == ERROR_SUCCESS) {
-        RegQueryValue(hkey, NULL, currentISOPath, (PLONG)&currentISOPathLen);
+        LONG ret = RegQueryValue(hkey, NULL, currentISOPath, &currentISOPathLen);
+        // Wine 在值不存在时返回 ERROR_SUCCESS 且给出空串，必须同时判断内容
+        hasISO = (ret == ERROR_SUCCESS && currentISOPath[0] != L'\0');
         RegCloseKey(hkey);
     }
     
-    wchar_t itemText[64] = {0};
-    swprintf_s(itemText, MAX_PATH, L"%ls <%ls>", lc_str.load_iso_image, currentISOPathLen != MAX_PATH ? currentISOPath : lc_str.no_media);
-#ifdef USE_LIBCDIO
+    // 缓冲区要同时容纳前缀、完整 ISO 路径（最长 MAX_PATH）和尖括号。
+    // 旧实现是 wchar_t itemText[64] 却告诉 CRT 有 MAX_PATH，属必然触发的栈溢出。
+    wchar_t itemText[MAX_PATH + 64] = {0};
+    swprintfTrunc(itemText, MAX_PATH + 64, L"%ls <%ls>",
+                  lc_str.load_iso_image, hasISO ? currentISOPath : lc_str.no_media);
+
     cmiLoadISOImage.text = itemText;
     addContextMenuItem(hSubmenu, (*id)++, &cmiLoadISOImage, false);
     
     cmiLoadISOImage.text = NULL;
     addContextMenuItem(hSubmenu, (*id)++, &cmiUnloadISOImage, false);
     
-#endif
     MENUITEMINFO item = {0};
     item.cbSize = sizeof(MENUITEMINFO);
     item.fMask = MIIM_TYPE | MIIM_ID | MIIM_SUBMENU;
     item.fType = MFT_STRING;
-    swprintf_s(itemText, 64, L"%ls [X:]", lc_str.cd_drive);
+    swprintfTrunc(itemText, MAX_PATH + 64, L"%ls [X:]", lc_str.cd_drive);
     item.dwTypeData = itemText;
     item.cch = wcslen(itemText);
     item.wID = ++(*id);    
@@ -631,6 +811,118 @@ static void createContextMenu(enum ContextMenuType type) {
     POINT cursor;
     GetCursorPos(&cursor);
     TrackPopupMenu(hMenu, 0, cursor.x, cursor.y, 0, hwndContentView, NULL);
+
+    // 菜单在 TrackPopupMenu 的模态循环里被使用，返回后才能安全销毁。
+    // 旧实现从不销毁，每次右键泄漏一个 HMENU 及其全部菜单项。
+    hContextMenu = NULL;
+    DestroyMenu(hMenu);
+}
+
+// 绘制时反复 CreateSolidBrush/DeleteObject 会带来可观的 GDI 开销，这里按颜色复用
+static HBRUSH brushDriveFree = NULL;
+static HBRUSH brushDriveLow = NULL;
+static HBRUSH brushDriveMid = NULL;
+static HBRUSH brushDriveHigh = NULL;
+
+static HBRUSH getUiBrush(HBRUSH* slot, COLORREF color) {
+    if (!*slot) *slot = CreateSolidBrush(color);
+    return *slot;
+}
+
+// 按需加载单个条目的图标 / 类型名 / 大小 / 日期。
+// 只在 LVN_GETDISPINFO（即可见行）里调用 —— 排序阶段绝不能调用它，
+// 否则虚拟列表会被物化，排序时就把整个目录的图标都解析一遍。
+static void loadItemData(struct ListItem* item) {
+    if (!item || !item->node || item->loaded) return;
+
+    const bool large = (viewStyle == STYLE_LARGE_ICON);
+
+    if (item->node->type == TYPE_DIR) {
+        // 目录图标缓存：记录缓存时使用的视图样式（大小图标的索引空间不同）
+        if (folderIconCachedForStyle != (int)viewStyle) {
+            wchar_t path[MAX_PATH] = {0};
+            getFileNodePath(item->node, path);
+            struct FileInfo fi = {0};
+            getFileInfo(path, TYPE_DIR, large, &fi);
+            folderIconIndex = fi.icon;
+            folderIconCachedForStyle = (int)viewStyle;
+        }
+        item->icon = folderIconIndex;
+        wcsncpy_s(item->type, 64, lc_str.folder, _TRUNCATE);
+    }
+    else if (item->node->type == TYPE_FILE) {
+        // 获取扩展名
+        wchar_t* ext = wcsrchr(item->node->name, L'.');
+
+        // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
+        bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
+
+        if (isExeOrLnk) {
+            // exe/lnk 使用路径缓存
+            wchar_t path[MAX_PATH] = {0};
+            getFileNodePath(item->node, path);
+            int cachedIcon = findExeIconCache(path, large);
+            const wchar_t* typeName = wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
+            if (cachedIcon >= 0) {
+                item->icon = cachedIcon;
+            } else {
+                struct FileInfo fi = {0};
+                getFileInfo(path, TYPE_FILE, large, &fi);
+                item->icon = fi.icon;
+                addExeIconCache(path, fi.icon, large);
+            }
+            wcsncpy_s(item->type, 64, typeName, _TRUNCATE);
+        } else {
+            // 非 exe/lnk：先查内存缓存（一次查到图标索引 + 类型名）
+            struct ExtIconCacheEntry* ce = findExtCache(ext, large);
+            if (ce) {
+                item->icon = ce->icon;
+                if (ce->typeName[0]) wcsncpy_s(item->type, 64, ce->typeName, _TRUNCATE);
+                else {
+                    wchar_t upper[30] = {0};
+                    if (ext && ext[1]) strToUpper(ext + 1, upper, 30);
+                    swprintfTrunc(item->type, 64, lc_str.fmt_file, upper);
+                }
+            } else {
+                wchar_t path[MAX_PATH] = {0};
+                getFileNodePath(item->node, path);
+                struct FileInfo fi = {0};
+                getFileInfo(path, TYPE_FILE, large, &fi);
+                item->icon = fi.icon;
+                wcsncpy_s(item->type, 64, fi.typeName, _TRUNCATE);
+                addExtIconCache(ext, fi.icon, fi.typeName, large);
+            }
+        }
+
+        // 格式化文件大小和日期
+        formatFileSize(item->size, item->formattedSize);
+        SYSTEMTIME systemTime = {0};
+        FILETIME localFiletime;
+        if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
+            formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
+        }
+    }
+    else {
+        // 其他类型（驱动器等）
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(item->node, path);
+        struct FileInfo fi = {0};
+        getFileInfo(path, item->node->type, large, &fi);
+        item->icon = fi.icon;
+        wcsncpy_s(item->type, 64, fi.typeName, _TRUNCATE);
+        if (item->node->type == TYPE_DRIVE) {
+            wchar_t rootPath[4] = {0};
+            swprintfTrunc(rootPath, 4, L"%lc:\\", path[0]);
+            ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
+            if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
+                item->driveTotalBytes = totalBytes.QuadPart;
+                item->driveFreeBytes = freeBytesAvail.QuadPart;
+                formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
+            }
+        }
+    }
+
+    item->loaded = true;
 }
 
 LRESULT contentViewNotify(NMHDR* nmhdr) {
@@ -665,9 +957,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         InflateRect(&rc, -2, -1);
                         
                         // Background bar: light gray for free space
-                        HBRUSH hBrFree = CreateSolidBrush(RGB(230, 235, 240));
-                        FillRect(hdc, &rc, hBrFree);
-                        DeleteObject(hBrFree);
+                        FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
                         
                         // Used space bar
                         double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
@@ -686,9 +976,9 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                             else if (usedPct < 0.9) barColor = RGB(255, 213, 79);
                             else barColor = RGB(239, 154, 154);
                             
-                            HBRUSH hBrUsed = CreateSolidBrush(barColor);
-                            FillRect(hdc, &usedRc, hBrUsed);
-                            DeleteObject(hBrUsed);
+                            HBRUSH* slot = (barColor == RGB(100, 181, 246)) ? &brushDriveLow :
+                                           (barColor == RGB(255, 213, 79))  ? &brushDriveMid : &brushDriveHigh;
+                            FillRect(hdc, &usedRc, getUiBrush(slot, barColor));
                         }
                         
                         // Text overlay
@@ -712,100 +1002,12 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             if (!items || nmlvdi->item.iItem < 0 || nmlvdi->item.iItem >= numItems) break;
             struct ListItem* item = &items[nmlvdi->item.iItem];
             
-            if (!item->loaded) {
-                // 使用图标缓存优化
-                if (item->node->type == TYPE_DIR) {
-                    // 目录图标缓存
-                    if (!folderIconCached) {
-                        wchar_t path[MAX_PATH] = {0};
-                        getFileNodePath(item->node, path);
-                        struct FileInfo fi = {0};
-                        getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
-                        folderIconIndex = fi.icon;
-                        folderIconCached = 1;
-                    }
-                    item->icon = folderIconIndex;
-                    wcscpy_s(item->type, 64, lc_str.folder);
-                }
-                else if (item->node->type == TYPE_FILE) {
-                    // 获取扩展名
-                    wchar_t* ext = wcsrchr(item->node->name, L'.');
-                    
-                    // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
-                    bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
-                    
-                    if (isExeOrLnk) {
-                        // exe/lnk 使用路径缓存
-                        wchar_t path[MAX_PATH] = {0};
-                        getFileNodePath(item->node, path);
-                        int cachedIcon = findExeIconCache(path);
-                        const wchar_t* typeName = ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
-                        if (cachedIcon >= 0) {
-                            item->icon = cachedIcon;
-                        } else {
-                            struct FileInfo fi = {0};
-                            getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                            item->icon = fi.icon;
-                            addExeIconCache(path, fi.icon);
-                        }
-                        wcscpy_s(item->type, 64, typeName);
-                    } else {
-                        // 非 exe/lnk：先查内存缓存（扩展名 → 图标索引 + 类型名）
-                        int ci = findExtIconCache(ext);
-                        if (ci >= 0) {
-                            item->icon = ci;
-                            const wchar_t* ct = findExtTypeNameCache(ext);
-                            if (ct && ct[0]) wcscpy_s(item->type, 64, ct);
-                            else {
-                                wchar_t upper[30] = {0};
-                                if (ext && ext[1]) strToUpper(ext + 1, upper);
-                                swprintf_s(item->type, 64, lc_str.fmt_file, upper);
-                            }
-                        } else {
-                            wchar_t path[MAX_PATH] = {0};
-                            getFileNodePath(item->node, path);
-                            struct FileInfo fi = {0};
-                            getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                            item->icon = fi.icon;
-                            wcscpy_s(item->type, 64, fi.typeName);
-                            addExtIconCache(ext, fi.icon, fi.typeName);
-                        }
-                    }
-                    
-                    // 格式化文件大小和日期
-                    formatFileSize(item->size, item->formattedSize);
-                    SYSTEMTIME systemTime = {0};
-                    FILETIME localFiletime;
-                    if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
-                        formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
-                    }
-                }
-                else {
-                    // 其他类型（驱动器等）
-                    wchar_t path[MAX_PATH] = {0};
-                    getFileNodePath(item->node, path);
-                    struct FileInfo fi = {0};
-                    getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
-                    item->icon = fi.icon;
-                    wcscpy_s(item->type, 64, fi.typeName);
-                    if (item->node->type == TYPE_DRIVE) {
-                        wchar_t rootPath[4] = {0};
-                        swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
-                        ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
-                        if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
-                            item->driveTotalBytes = totalBytes.QuadPart;
-                            item->driveFreeBytes = freeBytesAvail.QuadPart;
-                            formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
-                        }
-                    }
-                }
-                
-                item->loaded = true;                
-            }
-            
-            if (mask & LVIF_STATE) {
-                nmlvdi->item.state = 0;
-            }
+            if (!item->loaded) loadItemData(item);
+            if (!item->node) break;
+
+            // 不回应 LVIF_STATE：owner-data 模式下选中/焦点状态由控件自行维护。
+            // 旧实现无条件把 state 清 0（且从不设置 stateMask），语义是错的 ——
+            // 这里保持不修改，由控件决定。
 
             if (mask & LVIF_IMAGE) {
                 nmlvdi->item.iImage = item->icon;
@@ -841,7 +1043,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         case NM_RCLICK: {
             NMITEMACTIVATE* nmia = (NMITEMACTIVATE*)nmhdr;
 
-            if (nmia->iItem != -1 && nmia->iSubItem == 0) {
+            // 不限制 iSubItem：启用整行选中后，右键落在哪一列都应当弹出菜单
+            if (nmia->iItem != -1) {
                 updateSelectedItems();
                 
                 bool show = true;
@@ -858,7 +1061,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
         }
         case NM_DBLCLK: {
             NMITEMACTIVATE* nmia = (NMITEMACTIVATE*)nmhdr;
-            if (nmia->iItem == -1 || nmia->iSubItem != 0) break;
+            if (nmia->iItem == -1) break;
             
             if (!items || nmia->iItem >= numItems) break;
             struct ListItem* item = &items[nmia->iItem];            
@@ -884,30 +1087,112 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
     return 0;   
 }
 
+// 按路径字符串建立一条属于搜索线程的节点链，返回最深一级（搜索起点）。
+// 拆分方式与 setCurrPathFromString 保持一致：第一段是盘符。
+static struct FileNode* createSearchRootNode(struct SearchNodePool* pool, const wchar_t* path) {
+    if (!pool || !path || path[0] == L'\0') return NULL;
+
+    wchar_t tmp[MAX_PATH] = {0};
+    wcsncpy_s(tmp, MAX_PATH, path, _TRUNCATE);
+
+    struct FileNode* leaf = NULL;
+    wchar_t* saveptr = NULL;
+    wchar_t* token = wcstok(tmp, L"\\", &saveptr);
+    int i = 0;
+    while (token) {
+        enum FileType type = (i++ == 0) ? TYPE_DRIVE : TYPE_DIR;
+        struct FileNode* node = allocSearchNode(pool, token, type);
+        if (!node) return NULL;
+        node->parent = leaf;
+        leaf = node;
+        token = wcstok(NULL, L"\\", &saveptr);
+    }
+    return leaf;
+}
+
+// 只读枚举目录项并在搜索节点池里建链 —— 绝不修改（更不能释放）UI 线程的文件树。
+static struct FileNode* enumChildrenForSearch(struct SearchNodePool* pool, struct FileNode* parent) {
+    if (!pool || !parent) return NULL;
+
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(parent, path);
+    if (path[0] == L'\0') return NULL;
+    if (wcslen(path) + 2 >= MAX_PATH) return NULL;
+    wcscat_s(path, MAX_PATH, path[wcslen(path) - 1] == L'\\' ? L"*" : L"\\*");
+
+    WIN32_FIND_DATA wfd = {0};
+    HANDLE handle = FindFirstFile(path, &wfd);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+
+    struct FileNode* first = NULL;
+    struct FileNode* last = NULL;
+    do {
+        if (wfd.cFileName[0] == L'.' && (wfd.cFileName[1] == L'\0' ||
+            (wfd.cFileName[1] == L'.' && wfd.cFileName[2] == L'\0'))) continue;
+        if (!g_showHiddenFiles && (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
+
+        bool isDir = (wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        struct FileNode* child = allocSearchNode(pool, wfd.cFileName, isDir ? TYPE_DIR : TYPE_FILE);
+        if (!child) continue;
+        child->parent = parent;
+        child->isHidden = (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+        if (isDir) {
+            child->hasChildDirs = true;
+        }
+        else {
+            LARGE_INTEGER filesize;
+            filesize.LowPart = wfd.nFileSizeLow;
+            filesize.HighPart = wfd.nFileSizeHigh;
+            child->size = filesize.QuadPart;
+            memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
+        }
+
+        if (!first) first = child;
+        if (last) last->sibling = child;
+        last = child;
+    }
+    while (FindNextFile(handle, &wfd));
+    FindClose(handle);
+    return first;
+}
+
 static DWORD WINAPI searchTask(void* param) {
     struct SearchData* searchData = (struct SearchData*)param;
-    
     const int maxStackSize = 50;
     struct FileNode* stack[maxStackSize];
     int stackSize = 0;
-    stack[stackSize++] = currPathFileNode->children;
-    
+
+    struct SearchNodePool* pool = calloc(1, sizeof(struct SearchNodePool));
     wchar_t keyword[64] = {0};
-    strToLower(searchData->keyword, keyword);
-    
+    strToLower(searchData->keyword, keyword, 64);
+
     const int BATCH_SIZE = 100;
     struct BatchItems batch;
     batch.capacity = BATCH_SIZE;
     batch.nodes = malloc(batch.capacity * sizeof(struct FileNode*));
     batch.count = 0;
-    if (!batch.nodes) { SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0); return 0; }
 
     int cacheCapacity = 1000;
     struct FileNode** cacheResults = malloc(cacheCapacity * sizeof(struct FileNode*));
     int cacheCount = 0;
-    if (!cacheResults) { free(batch.nodes); SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0); return 0; }
+    int addedCount = 0;   // 本线程自己的计数，不再读 UI 线程的 numItems
 
-    while (stackSize > 0 && numItems < 10000 && searchData->active) {
+    if (!pool || !batch.nodes || !cacheResults) {
+        free(batch.nodes);
+        free(cacheResults);
+        searchData->pool = pool;
+        SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0);
+        return 0;
+    }
+
+    // 搜索起点：用线程自己建立的节点链，完全不依赖 UI 线程正在使用的文件树
+    struct FileNode* root = createSearchRootNode(pool, searchData->rootPath);
+    if (root) {
+        struct FileNode* rootChildren = enumChildrenForSearch(pool, root);
+        if (rootChildren) stack[stackSize++] = rootChildren;
+    }
+
+    while (stackSize > 0 && addedCount < 10000 && searchData->active) {
         struct FileNode* node = stack[--stackSize];
         while (node && searchData->active) {
             if (wcsstrIgnoreCase(node->name, keyword)) {
@@ -924,15 +1209,16 @@ static DWORD WINAPI searchTask(void* param) {
                 
                 if (batch.count >= BATCH_SIZE) {
                     SendMessage(hwndContentView, MSG_ADD_ITEMS_BATCH, 0, (LPARAM)&batch);
+                    addedCount += batch.count;
                     batch.count = 0;
                 }
             }
             
-            if (numItems >= 10000) break;
+            if (addedCount >= 10000) break;
             
             if (node->type == TYPE_DIR && stackSize < maxStackSize) {
-                buildChildNodes(node, false);
-                if (node->children) stack[stackSize++] = node->children;
+                struct FileNode* children = enumChildrenForSearch(pool, node);
+                if (children) stack[stackSize++] = children;
             }
             node = node->sibling;       
         }
@@ -940,21 +1226,23 @@ static DWORD WINAPI searchTask(void* param) {
     
     if (batch.count > 0 && searchData->active) {
         SendMessage(hwndContentView, MSG_ADD_ITEMS_BATCH, 0, (LPARAM)&batch);
+        addedCount += batch.count;
     }
     
     free(batch.nodes);
-    
+
+    // 结果与节点池一起交给 UI 线程处理（MSG_SEARCH_DONE 里决定并入缓存还是释放）
     if (searchData->active) {
-        free(searchCache.results);
-        searchCache.results = cacheResults;
-        searchCache.count = cacheCount;
-        searchCache.timestamp = time(NULL);
-        getFileNodePath(currPathFileNode, searchCache.path);
-        wcscpy_s(searchCache.keyword, 64, searchData->keyword);
-    } else {
-        free(cacheResults);
+        searchData->results = cacheResults;
+        searchData->resultCount = cacheCount;
     }
-    
+    else {
+        free(cacheResults);
+        searchData->results = NULL;
+        searchData->resultCount = 0;
+    }
+    searchData->pool = pool;
+
     SendMessage(hwndContentView, MSG_SEARCH_DONE, 0, 0);
     return 0;
 }
@@ -997,8 +1285,11 @@ void searchFor(wchar_t* keyword) {
         // 先保存缓存数据到局部变量，因为clearContentView会清空缓存
         int cachedCount = searchCache.count;
         struct FileNode** cachedResults = searchCache.results;
+        // 结果节点由节点池拥有，必须连同池一起移出，否则会被 clearContentView 释放
+        struct SearchNodePool* cachedPool = searchCache.pool;
         searchCache.results = NULL;
         searchCache.count = 0;
+        searchCache.pool = NULL;
 
         clearContentView();
         createLVColumns();
@@ -1010,20 +1301,28 @@ void searchFor(wchar_t* keyword) {
         ListView_InsertColumn(hwndContentView, COLUMN_PATH_IDX, &column);
 
         items = malloc(cachedCount * sizeof(struct ListItem));
-        itemsCapacity = cachedCount;
-        numItems = cachedCount;
+        if (items) {
+            itemsCapacity = cachedCount;
+            numItems = cachedCount;
 
-        for (int i = 0; i < cachedCount; i++) {
-            struct ListItem* item = &items[i];
-            item->node = cachedResults[i];
-            item->path = NULL;
-            item->loaded = false;
-            fillFileInfo(cachedResults[i], item);
+            for (int i = 0; i < cachedCount; i++) {
+                struct ListItem* item = &items[i];
+                memset(item, 0, sizeof(struct ListItem));
+                item->node = cachedResults[i];
+                item->path = NULL;
+                item->loaded = false;
+                fillFileInfo(cachedResults[i], item);
+            }
+        }
+        else {
+            itemsCapacity = 0;
+            numItems = 0;
         }
 
         // 重新缓存（指针仍然有效，因为currPathFileNode未变）
         searchCache.results = cachedResults;
         searchCache.count = cachedCount;
+        searchCache.pool = cachedPool;
         searchCache.timestamp = time(NULL);
 
         ListView_SetItemCountEx(hwndContentView, numItems, 0);
@@ -1041,12 +1340,22 @@ void searchFor(wchar_t* keyword) {
     ListView_InsertColumn(hwndContentView, COLUMN_PATH_IDX, &column);
     UpdateWindow(hwndContentView);
     
-    searchData = malloc(sizeof(struct SearchData));
+    searchData = calloc(1, sizeof(struct SearchData));
     if (!searchData) return;
     wcscpy_s(searchData->keyword, 64, keyword);
+    // 搜索起点路径在此处（UI 线程）抓取，搜索线程不再读取 UI 线程的文件树
+    wcsncpy_s(searchData->rootPath, MAX_PATH, path, _TRUNCATE);
     searchData->active = true;
     searchData->canceled = false;
+    searchData->results = NULL;
+    searchData->resultCount = 0;
+    searchData->pool = NULL;
     searchData->threadHandle = CreateThread(NULL, 0, searchTask, searchData, 0, NULL);
+    if (!searchData->threadHandle) {
+        // 线程创建失败：自己清理，否则 refreshContentView 会一直被 searchData 挡住
+        free(searchData);
+        searchData = NULL;
+    }
 }
 
 static void saveViewStyle(void);
@@ -1074,11 +1383,18 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     // 强制 ListView 识别样式变更并重新布局
     SetWindowPos(hwndContentView, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
+    // 必须先把图标缓存清空再刷新：大/小图标在系统图像列表里的索引不同，
+    // 旧实现先 refresh 再清缓存，refresh 里命中的是上一个尺寸的索引 —— 这正是
+    // README 里「图标混淆」的根因。
+    clearIconCaches();
     viewStyle = newViewStyle;
     refreshContentView();
-    // 视图样式切换时（大/小图标），图标索引在系统图像列表中不同，需要清空缓存重新获取
-    folderIconCached = 0;
-    exeIconCacheCount = 0;
+
+    // 图标视图需要重新排列：样式切换时 LISTVIEW_StyleChanged 会按旧的条目数排布
+    if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
+        ListView_Arrange(hwndContentView, LVA_DEFAULT);
+        InvalidateRect(hwndContentView, NULL, FALSE);
+    }
 
     // 持久化视图样式到注册表
     saveViewStyle();
@@ -1148,6 +1464,10 @@ void createContentView() {
     hwndContentView = CreateWindowEx(0, WC_LISTVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_BORDER | LVS_OWNERDATA | LVS_REPORT | LVS_SHAREIMAGELISTS,
                                      0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
 
+    // LVS_EX_DOUBLEBUFFER：Wine 的 comctl32 完整实现（拦截 WM_ERASEBKGND + 内存 DC 绘制），
+    // 同时改善闪烁与重绘开销；LVS_EX_FULLROWSELECT：整行可选中
+    ListView_SetExtendedListViewStyle(hwndContentView, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
+
     cmiOpen.text = lc_str.open;
     cmiEdit.text = lc_str.edit;
     cmiCut.text = lc_str.cut;
@@ -1206,9 +1526,10 @@ void onMenuItemEditClick() {
         static const wchar_t editorPath[] = L"C:\\windows\\notepad.exe";
         
         wchar_t path[MAX_PATH] = {0};
-        wchar_t parameters[MAX_PATH] = {0};
+        wchar_t parameters[MAX_PATH + 8] = {0};
         getFileNodePath(selectedItems[0], path);
-        swprintf_s(parameters, MAX_PATH, L"\"%ls\"", path);
+        if (wcschr(path, L'"')) return;   // 含引号的路径无法安全拼进命令行
+        swprintfTrunc(parameters, MAX_PATH + 8, L"\"%ls\"", path);
         getFileNodePath(selectedItems[0]->parent, path);
         ShellExecute(hwndMain, L"open", editorPath, parameters, path, SW_SHOW);     
     }   
@@ -1364,9 +1685,11 @@ static void onMenuItemImportRegClick() {
     swprintf_s(msg, MAX_PATH + 64, L"%ls\n\n%ls", selectedItems[0]->name, lc_str.import_reg);
     int result = MessageBox(hwndMain, msg, lc_str.import_reg, MB_YESNO | MB_ICONQUESTION);
     if (result == IDYES) {
-        wchar_t params[MAX_PATH + 8] = {0};
-        swprintf_s(params, MAX_PATH + 8, L"/s \"%ls\"", path);
-        ShellExecute(hwndMain, L"open", L"regedit.exe", params, NULL, SW_SHOW);
+        if (!wcschr(path, L'"')) {   // 含引号的路径会逃逸引号，直接拒绝
+            wchar_t params[MAX_PATH + 8] = {0};
+            swprintfTrunc(params, MAX_PATH + 8, L"/s \"%ls\"", path);
+            ShellExecute(hwndMain, L"open", L"regedit.exe", params, NULL, SW_SHOW);
+        }
     }
 }
 
@@ -1403,6 +1726,13 @@ static void onMenuItemLoadISOImageClick() {
 }
 
 void onMenuItemUnloadISOImageClick() {
+    // S9：clearDirectory(L"X:") 是递归永久删除，而 README 指导用户把 X: 软链到真实目录。
+    // 一次误点就会清空真实目录，因此这里必须先二次确认。
+    if (MessageBox(hwndMain, lc_str.msg_confirm_unmount_iso, lc_str.unmount_iso,
+                   MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
     clearDirectory(L"X:");
     RegDeleteKey(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM\\CurrentISOPath");
     navigateRefresh();
@@ -1422,7 +1752,7 @@ void onMenuItemLocateISOImageClick() {
     }
     // 提取ISO文件名，导航后选中该文件
     wchar_t isoFileName[MAX_PATH] = {0};
-    getBasenameFromPath(currentISOPath, isoFileName, false);
+    getBasenameFromPath(currentISOPath, isoFileName, MAX_PATH, false);
     wcscpy_s(pendingSelectName, MAX_PATH, isoFileName);
     
     // 如果搜索还在运行，先取消
@@ -1476,6 +1806,8 @@ static void initGdiplus(void) {
    Returns an HICON or NULL on failure. Caller must DestroyIcon(). */
 static HICON createIconFromPngData(const BYTE* data, DWORD dataSize) {
     if (!data || dataSize < 8) return NULL;
+    // 上限校验：这是不受信任的 PNG 数据交给 GDI+ 解析的攻击面，先限制体积
+    if (dataSize > 64u * 1024u * 1024u) return NULL;
 
     /* Verify PNG signature: 0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A */
     static const BYTE pngSig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
@@ -1535,35 +1867,39 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
     int height = bih->biHeight ? bih->biHeight / 2 : 0;
     int bpp = bih->biBitCount;
 
-    if (width <= 0 || height <= 0) return NULL;
+    // 尺寸上限：宽高直接来自被解析文件，必须限制，否则下面的乘法会溢出
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return NULL;
 
     const BYTE* xorData = data + sizeof(BITMAPINFOHEADER);
-    int xorRowSize;
+    size_t xorRowSize;
 
     if (bpp == 32) {
-        xorRowSize = width * 4;
+        xorRowSize = (size_t)width * 4;
     } else if (bpp == 24) {
-        xorRowSize = ((width * 3 + 3) / 4) * 4;
+        xorRowSize = ((size_t)width * 3 + 3) / 4 * 4;
     } else if (bpp == 8) {
-        xorRowSize = ((width + 3) / 4) * 4;
+        xorRowSize = ((size_t)width + 3) / 4 * 4;
     } else if (bpp == 4) {
-        xorRowSize = (((width + 1) / 2 + 3) / 4) * 4;
+        xorRowSize = (((size_t)width + 1) / 2 + 3) / 4 * 4;
     } else {
         return NULL;
     }
 
     // For palettized formats, skip the palette
-    int paletteEntries = 0;
+    size_t paletteEntries = 0;
     if (bpp == 8) paletteEntries = 256;
     else if (bpp == 4) paletteEntries = 16;
-    const BYTE* xorPixels = xorData + paletteEntries * 4;
-    int xorTotalSize = xorRowSize * height;
-    const BYTE* andData = xorPixels + xorTotalSize;
-    int andRowSize = ((width + 31) / 32) * 4;
+    size_t paletteSize = paletteEntries * 4;
+    size_t xorTotalSize = xorRowSize * (size_t)height;
+    size_t andRowSize = ((size_t)width + 31) / 32 * 4;
 
-    // Bounds check
-    DWORD requiredSize = sizeof(BITMAPINFOHEADER) + paletteEntries * 4 + xorTotalSize + andRowSize * height;
+    // 边界检查全部用 size_t 计算：旧实现用 int，宽高过大时 xorTotalSize 溢出为小值，
+    // 于是这里检查通过，随后按巨大尺寸越界读取像素
+    size_t requiredSize = sizeof(BITMAPINFOHEADER) + paletteSize + xorTotalSize + andRowSize * (size_t)height;
     if (requiredSize > dataSize) return NULL;
+
+    const BYTE* xorPixels = xorData + paletteSize;
+    const BYTE* andData = xorPixels + xorTotalSize;
 
     // Create 32bpp ARGB DIB section
     HDC hdc = GetDC(NULL);
@@ -1585,8 +1921,8 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
 
     // Convert XOR data to 32bpp ARGB (source is bottom-up in ICO format)
     for (int y = 0; y < height; y++) {
-        const BYTE* srcRow = xorPixels + (height - 1 - y) * xorRowSize;
-        BYTE* dstRow = bits + y * width * 4;
+        const BYTE* srcRow = xorPixels + (size_t)(height - 1 - y) * xorRowSize;
+        BYTE* dstRow = bits + (size_t)y * width * 4;
         if (bpp == 32) {
             memcpy(dstRow, srcRow, width * 4);
         } else if (bpp == 24) {
@@ -1666,6 +2002,7 @@ struct GroupIconEnumData {
 };
 
 static BOOL CALLBACK enumGroupIconProc(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam) {
+    (void)lpType;   // 枚举时只关心 RT_GROUP_ICON，类型参数不使用
     struct GroupIconEnumData* data = (struct GroupIconEnumData*)lParam;
     if (data->count < MAX_ICON_GROUPS) {
         HRSRC hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
@@ -1822,7 +2159,7 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     DrawIconEx(hdcMem, 0, 0, hIcon, iconWidth, iconHeight, 0, NULL, DI_NORMAL);
     GdiFlush();
 
-    int colorSize = iconWidth * iconHeight * 4;
+    size_t colorSize = (size_t)iconWidth * (size_t)iconHeight * 4;
     BYTE* colorBits = (BYTE*)malloc(colorSize);
     if (colorBits) {
         memcpy(colorBits, dibBits, colorSize);
@@ -1835,10 +2172,20 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
 
     if (!colorBits) return FALSE;
 
-    int maskSize = ((iconWidth + 31) / 32) * 4 * iconHeight;
+    size_t maskSize = ((size_t)(iconWidth + 31) / 32) * 4 * (size_t)iconHeight;
     BYTE* maskBits = (BYTE*)calloc(1, maskSize);
     if (!maskBits) {
         free(colorBits);
+        return FALSE;
+    }
+
+    // 行缓冲在打开文件之前分配：分配失败就整体失败，
+    // 而不是退化写入导致生成的 .ico 上下颠倒却毫无提示
+    size_t rowSize = (size_t)iconWidth * 4;
+    BYTE* rowBuf = (BYTE*)malloc(rowSize);
+    if (!rowBuf) {
+        free(colorBits);
+        free(maskBits);
         return FALSE;
     }
 
@@ -1847,7 +2194,7 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD written;
         DWORD dibSize = sizeof(BITMAPINFOHEADER);
-        DWORD totalImageSize = dibSize + colorSize + maskSize;
+        DWORD totalImageSize = dibSize + (DWORD)colorSize + (DWORD)maskSize;
         DWORD dataOffset = 6 + 16;
 
         WORD reserved = 0, type = 1, count = 1;
@@ -1877,24 +2224,18 @@ static BOOL saveIconToFile(HICON hIcon, const wchar_t* filePath) {
         bih.biCompression = BI_RGB;
         WriteFile(hFile, &bih, sizeof(bih), &written, NULL);
 
-        int rowSize = iconWidth * 4;
-        BYTE* rowBuf = (BYTE*)malloc(rowSize);
-        if (rowBuf) {
-            for (int row = 0; row < iconHeight; row++) {
-                memcpy(rowBuf, colorBits + (iconHeight - 1 - row) * rowSize, rowSize);
-                WriteFile(hFile, rowBuf, rowSize, &written, NULL);
-            }
-            free(rowBuf);
-        } else {
-            WriteFile(hFile, colorBits, colorSize, &written, NULL);
+        for (int row = 0; row < iconHeight; row++) {
+            memcpy(rowBuf, colorBits + (size_t)(iconHeight - 1 - row) * rowSize, rowSize);
+            WriteFile(hFile, rowBuf, (DWORD)rowSize, &written, NULL);
         }
 
-        WriteFile(hFile, maskBits, maskSize, &written, NULL);
+        WriteFile(hFile, maskBits, (DWORD)maskSize, &written, NULL);
 
         CloseHandle(hFile);
         result = TRUE;
     }
 
+    free(rowBuf);
     free(colorBits);
     free(maskBits);
 
@@ -2137,13 +2478,13 @@ static LRESULT CALLBACK IconViewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                     HICON hCurrent = getCurrentIcon();
                     if (!hCurrent) break;
 
-                    wchar_t filePath[MAX_PATH] = {0};
-                    swprintf_s(filePath, MAX_PATH, L"%ls.ico", iconViewerFileName);
+                    wchar_t filePath[MAX_PATH + 8] = {0};
+                    swprintfTrunc(filePath, MAX_PATH + 8, L"%ls.ico", iconViewerFileName);
                     OPENFILENAMEW ofn = {0};
                     ofn.lStructSize = sizeof(ofn);
                     ofn.hwndOwner = hwnd;
                     ofn.lpstrFile = filePath;
-                    ofn.nMaxFile = MAX_PATH;
+                    ofn.nMaxFile = MAX_PATH + 8;
                     ofn.lpstrFilter = L"Icon Files (*.ico)\0*.ico\0All Files (*.*)\0*.*\0";
                     ofn.nFilterIndex = 1;
                     ofn.lpstrDefExt = L"ico";
@@ -2386,143 +2727,118 @@ static void onMenuItemShowIconClick() {
     showIconInNewWindow(path, node->name);
 }
 
-static void ensureItemTypeLoaded(struct ListItem* item) {
+
+// ===== 排序键 =====
+// 排序键严格无副作用：不查图标缓存、不访问文件系统。
+// 旧实现的比较器会调用 ensureItemTypeLoaded（内部走 SHGetFileInfo / 路径拼接），
+// 而 qsort 必然触达每个元素 —— 连「按名称排序」都会把整个目录的图标物化一遍，
+// LVS_OWNERDATA 的懒加载设计被完全抵消（含 exe 的目录会白屏数百毫秒）。
+static void getSortTypeName(const struct ListItem* item, wchar_t* buf, int bufSize) {
+    buf[0] = L'\0';
     if (!item || !item->node) return;
-    if (item->loaded) return;
-    
-    // 查询文件属性，标记隐藏文件
-    wchar_t itemPath[MAX_PATH] = {0};
-    getFileNodePath(item->node, itemPath);
-    DWORD attrs = GetFileAttributes(itemPath);
-    item->isHidden = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_HIDDEN));
-    
-    if (item->node->type == TYPE_DIR) {
-        if (!folderIconCached) {
-            wchar_t path[MAX_PATH] = {0};
-            getFileNodePath(item->node, path);
-            struct FileInfo fi = {0};
-            getFileInfo(path, TYPE_DIR, viewStyle == STYLE_LARGE_ICON, &fi);
-            folderIconIndex = fi.icon;
-            folderIconCached = 1;
-        }
-        item->icon = folderIconIndex;
-        wcscpy_s(item->type, 64, lc_str.folder);
+    const struct FileNode* node = item->node;
+
+    switch (node->type) {
+        case TYPE_DIR:
+        case TYPE_PERSONAL:
+        case TYPE_USERPROFILE:
+            wcsncpy_s(buf, (size_t)bufSize, lc_str.folder, _TRUNCATE);
+            return;
+        case TYPE_DRIVE:
+            wcsncpy_s(buf, (size_t)bufSize,
+                      isCDDrivePath(node->name) ? lc_str.cd_drive : lc_str.local_drive, _TRUNCATE);
+            return;
+        case TYPE_DESKTOP:
+            wcsncpy_s(buf, (size_t)bufSize, lc_str.desktop, _TRUNCATE);
+            return;
+        case TYPE_COMPUTER:
+            wcsncpy_s(buf, (size_t)bufSize, lc_str.computer, _TRUNCATE);
+            return;
+        default:
+            break;
     }
-    else if (item->node->type == TYPE_FILE) {
-        wchar_t* ext = wcsrchr(item->node->name, L'.');
-        bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
-        
-        if (isExeOrLnk) {
-            wchar_t path[MAX_PATH] = {0};
-            getFileNodePath(item->node, path);
-            int cachedIcon = findExeIconCache(path);
-            const wchar_t* typeName = ext && wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
-            if (cachedIcon >= 0) {
-                item->icon = cachedIcon;
-            } else {
-                struct FileInfo fi = {0};
-                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                item->icon = fi.icon;
-                addExeIconCache(path, fi.icon);
-            }
-            wcscpy_s(item->type, 64, typeName);
-        } else {
-            int ci = findExtIconCache(ext);
-            if (ci >= 0) {
-                item->icon = ci;
-                const wchar_t* ct = findExtTypeNameCache(ext);
-                if (ct && ct[0]) wcscpy_s(item->type, 64, ct);
-                else {
-                    wchar_t upper[30] = {0};
-                    if (ext && ext[1]) strToUpper(ext + 1, upper);
-                    swprintf_s(item->type, 64, lc_str.fmt_file, upper);
-                }
-            } else {
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(item->node, path);
-                struct FileInfo fi = {0};
-                getFileInfo(path, TYPE_FILE, viewStyle == STYLE_LARGE_ICON, &fi);
-                item->icon = fi.icon;
-                wcscpy_s(item->type, 64, fi.typeName);
-                addExtIconCache(ext, fi.icon, fi.typeName);
-            }
-        }
+
+    wchar_t* ext = wcsrchr(node->name, L'.');
+    if (!ext || ext == node->name) {
+        wcsncpy_s(buf, (size_t)bufSize, lc_str.file, _TRUNCATE);
+        return;
     }
-    else {
-        wchar_t path[MAX_PATH] = {0};
-        getFileNodePath(item->node, path);
-        struct FileInfo fi = {0};
-        getFileInfo(path, item->node->type, viewStyle == STYLE_LARGE_ICON, &fi);
-        item->icon = fi.icon;
-        wcscpy_s(item->type, 64, fi.typeName);
-        if (item->node->type == TYPE_DRIVE) {
-            wchar_t rootPath[4] = {0};
-            swprintf_s(rootPath, 4, L"%lc:\\", path[0]);
-            ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
-            if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
-                item->driveTotalBytes = totalBytes.QuadPart;
-                item->driveFreeBytes = freeBytesAvail.QuadPart;
-                formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
-            }
-        }
+    if (wcsicmp(ext, L".exe") == 0) {
+        wcsncpy_s(buf, (size_t)bufSize, lc_str.application, _TRUNCATE);
+        return;
     }
-    
-    if (item->node->type == TYPE_FILE) {
-        formatFileSize(item->size, item->formattedSize);
-        SYSTEMTIME systemTime = {0};
-        FILETIME localFiletime;
-        if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
-            formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
-        }
+    if (wcsicmp(ext, L".lnk") == 0) {
+        wcsncpy_s(buf, (size_t)bufSize, lc_str.shortcut, _TRUNCATE);
+        return;
     }
-    
-    item->loaded = true;
+    wchar_t upper[30] = {0};
+    strToUpper(ext + 1, upper, 30);
+    swprintfTrunc(buf, (size_t)bufSize, lc_str.fmt_file, upper);
 }
 
-static int compareType(const void* a, const void* b) {
-    struct ListItem* ia = (struct ListItem*)a;
-    struct ListItem* ib = (struct ListItem*)b;
-    
-    ensureItemTypeLoaded(ia);
-    ensureItemTypeLoaded(ib);
-    
-    int res = sortAscending ? wcscmp(ia->type, ib->type) : wcscmp(ib->type, ia->type);
-    if (res == 0) {
-        res = sortAscending ? wcscmp(ia->node->name, ib->node->name) : wcscmp(ib->node->name, ia->node->name);
-    }
-    return res;
+static int compareTypeName(const struct ListItem* ia, const struct ListItem* ib) {
+    wchar_t typeA[64] = {0};
+    wchar_t typeB[64] = {0};
+    getSortTypeName(ia, typeA, 64);
+    getSortTypeName(ib, typeB, 64);
+    return wcscmp(typeA, typeB);
+}
+
+static int compareNameOnly(const struct ListItem* ia, const struct ListItem* ib) {
+    const wchar_t* na = (ia->node && ia->node->name) ? ia->node->name : L"";
+    const wchar_t* nb = (ib->node && ib->node->name) ? ib->node->name : L"";
+    return wcscmp(na, nb);
+}
+
+static int finalizeCompare(int res) {
+    return sortAscending ? res : -res;
 }
 
 static int compareName(const void* a, const void* b) {
-    struct ListItem* ia = (struct ListItem*)a;
-    struct ListItem* ib = (struct ListItem*)b;
-    int res = compareType(a, b);
-    if (res == 0) res = sortAscending ? wcscmp(ia->node->name, ib->node->name) : wcscmp(ib->node->name, ia->node->name);
-    return res;
+    const struct ListItem* ia = (const struct ListItem*)a;
+    const struct ListItem* ib = (const struct ListItem*)b;
+    int res = compareNameOnly(ia, ib);
+    if (res == 0) res = compareTypeName(ia, ib);
+    return finalizeCompare(res);
+}
+
+static int compareType(const void* a, const void* b) {
+    const struct ListItem* ia = (const struct ListItem*)a;
+    const struct ListItem* ib = (const struct ListItem*)b;
+    int res = compareTypeName(ia, ib);
+    if (res == 0) res = compareNameOnly(ia, ib);
+    return finalizeCompare(res);
 }
 
 static int compareSize(const void* a, const void* b) {
-    struct ListItem* ia = (struct ListItem*)a;
-    struct ListItem* ib = (struct ListItem*)b;
-    int res = compareType(a, b);
-    if (res == 0) res = sortAscending ? ia->size - ib->size : ib->size - ia->size;
-    return res;
+    const struct ListItem* ia = (const struct ListItem*)a;
+    const struct ListItem* ib = (const struct ListItem*)b;
+    // 主键就是大小。旧实现先比类型/名称，而且用 uint64 相减截断成 int，
+    // 两个 >2GB 的文件差值超过 INT_MAX 时排序结果随机错乱。
+    int res = 0;
+    if (ia->size < ib->size) res = -1;
+    else if (ia->size > ib->size) res = 1;
+    if (res == 0) res = compareTypeName(ia, ib);
+    if (res == 0) res = compareNameOnly(ia, ib);
+    return finalizeCompare(res);
 }
 
 static int compareDate(const void* a, const void* b) {
-    struct ListItem* ia = (struct ListItem*)a;
-    struct ListItem* ib = (struct ListItem*)b;
-    int res = compareType(a, b);
-    if (res == 0) res = sortAscending ? CompareFileTime(&ia->modifiedTime, &ib->modifiedTime) : CompareFileTime(&ib->modifiedTime, &ia->modifiedTime);
-    return res;
+    const struct ListItem* ia = (const struct ListItem*)a;
+    const struct ListItem* ib = (const struct ListItem*)b;
+    int res = CompareFileTime(&ia->modifiedTime, &ib->modifiedTime);
+    if (res == 0) res = compareNameOnly(ia, ib);
+    return finalizeCompare(res);
 }
 
 void clearIconCaches() {
     extCacheCount = 0;
-    folderIconCached = 0;
     exeIconCacheCount = 0;
+    folderIconCachedForStyle = -1;
 }
+
 void sortItems() {
+    if (!items || numItems <= 0) return;
     switch (sortColumnIdx) {
         case COLUMN_NAME_IDX:
             qsort(items, numItems, sizeof(struct ListItem), compareName);
@@ -2634,16 +2950,14 @@ void refreshContentView() {
     }
 
     if (sortColumnIdx != -1) sortItems();
-    ListView_SetItemCountEx(hwndContentView, numItems, 0);
-    
-    // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时
-    // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
-    // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
-    if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
-        ListView_Arrange(hwndContentView, LVA_DEFAULT);
-        ListView_SetItemCountEx(hwndContentView, numItems, 0);
-    }
-    
-    InvalidateRect(hwndContentView, NULL, TRUE);
-    updateStatusbar();  
+
+    // 合并重绘：一次设置条目数 + 一次滚动更新即完成刷新。
+    // 旧实现每次导航触发 4 次整表失效（SetItemCountEx(0) → SetItemCountEx(n) →
+    // icon 视图的 Arrange + 再次 SetItemCountEx → InvalidateRect），每次失效都会
+    // 为所有可见行重新派发 LVN_GETDISPINFO。
+    // 注意：Wine 在图标视图下会强制丢弃 LVSICF_NOINVALIDATEALL（见
+    // dlls/comctl32/listview.c LISTVIEW_SetItemCount），此时退化为整表失效，仍然正确。
+    ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+
+    updateStatusbar();
 }
