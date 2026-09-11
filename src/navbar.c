@@ -10,6 +10,10 @@ struct AddrButton {
 
 static const int buttonSize = 30;
 
+// 地址栏最多显示的路径段数。每段在完整路径里至少占 2 个字符（"x\\"），
+// 故 MAX_PATH 深度下不会超过这个值；用固定上限替代变长数组（S10）。
+#define MAX_ADDR_BUTTONS (MAX_PATH / 2 + 2)
+
 static WNDPROC OrigWndProc;
 static WNDPROC AddrEditOrigWndProc;
 static WNDPROC SearchEditOrigWndProc;
@@ -37,34 +41,122 @@ extern HWND hwndContentView;
 
 HWND hwndNavbar = NULL;
 
-static void createMorePopupMenu(struct FileNode* parent) {  
+// 地址栏箭头按钮的下拉菜单：列出该路径段下的子目录。
+//
+// 旧实现直接调用 buildChildNodes(parent)，而它的第一步就是 freeChildNodes ——
+// 会释放 UI 线程正在使用的节点（items[].node、TreeView 的 lParam 全部悬空 →
+// 使用后释放），而且每次点击都新建 HMENU 却从不销毁（内存泄漏）。
+// 这里改成「只读快照」：把目录名与完整路径拷进局部数组，菜单项只引用这些字符串，
+// 菜单用完立即销毁。
+#define MORE_MENU_MAX 256
+struct MoreMenuItem {
+    wchar_t* text;
+    wchar_t* path;
+};
+
+static void addMoreMenuItem(struct MoreMenuItem* entries, int* count, const wchar_t* name,
+                            const wchar_t* parentDir, bool nameIsFullPath) {
+    if (*count >= MORE_MENU_MAX) return;
+
+    wchar_t fullPath[MAX_PATH] = {0};
+    if (nameIsFullPath) wcsncpy_s(fullPath, MAX_PATH, name, _TRUNCATE);
+    else joinPaths((wchar_t*)parentDir, (wchar_t*)name, fullPath, MAX_PATH);
+
+    wchar_t* text = wcsdup(name);
+    wchar_t* path = wcsdup(fullPath);
+    if (!text || !path) {
+        free(text);
+        free(path);
+        return;
+    }
+    entries[*count].text = text;
+    entries[*count].path = path;
+    (*count)++;
+}
+
+static void createMorePopupMenu(struct FileNode* node) {
+    if (!node) return;
+
+    struct MoreMenuItem entries[MORE_MENU_MAX];
+    int count = 0;
+
+    if (node->type == TYPE_COMPUTER) {
+        // "此电脑" 没有文件系统路径，子项是驱动器
+        wchar_t drives[MAX_PATH] = {0};
+        if (GetLogicalDriveStrings(MAX_PATH, drives)) {
+            int i = 0;
+            while (drives[i] != L'\0' && count < MORE_MENU_MAX) {
+                wchar_t* drive = &drives[i];
+                i += (int)wcslen(drive) + 1;
+                addMoreMenuItem(entries, &count, drive, NULL, true);
+            }
+        }
+    }
+    else {
+        wchar_t dirPath[MAX_PATH] = {0};
+        getFileNodePath(node, dirPath);
+        if (dirPath[0] != L'\0') {
+            wchar_t pattern[MAX_PATH] = {0};
+            swprintfTrunc(pattern, MAX_PATH, L"%ls%ls*", dirPath,
+                          dirPath[wcslen(dirPath) - 1] == L'\\' ? L"" : L"\\");
+
+            WIN32_FIND_DATA wfd = {0};
+            HANDLE handle = FindFirstFile(pattern, &wfd);
+            if (handle != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (wcscmp(wfd.cFileName, L".") == 0 || wcscmp(wfd.cFileName, L"..") == 0) continue;
+                    if (!g_showHiddenFiles && (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
+                    if (count >= MORE_MENU_MAX) break;
+                    addMoreMenuItem(entries, &count, wfd.cFileName, dirPath, false);
+                }
+                while (FindNextFile(handle, &wfd));
+                FindClose(handle);
+            }
+        }
+    }
+
+    if (count == 0) return;   // 没有子目录就不弹空菜单
+
     HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        for (int i = 0; i < count; i++) { free(entries[i].text); free(entries[i].path); }
+        return;
+    }
+    hMorePopupMenu = menu;
 
     MENUITEMINFO item = {0};
     item.cbSize = sizeof(MENUITEMINFO);
     item.fMask = MIIM_TYPE | MIIM_DATA | MIIM_ID;
     item.fType = MFT_STRING;
 
-    buildChildNodes(parent, false);
-    
-    struct FileNode* child = parent->children;
-    int index = 0;
-    while (child) {
-        if (child->type != TYPE_FILE) {         
-            item.dwTypeData = child->name;
-            item.cch = wcslen(child->name);
-            item.wID = index++;
-            item.dwItemData = (ULONG_PTR)child;         
+    for (int i = 0; i < count; i++) {
+        item.dwTypeData = entries[i].text;
+        item.cch = (UINT)wcslen(entries[i].text);
+        item.wID = (UINT)(i + 1);
+        item.dwItemData = (ULONG_PTR)entries[i].path;
+        InsertMenuItem(menu, -1, TRUE, &item);
+    }
 
-            InsertMenuItem(menu, -1, TRUE, &item);          
-        }
-        child = child->sibling;
-    }       
-    
-    hMorePopupMenu = menu;
     POINT cursor;
     GetCursorPos(&cursor);
-    TrackPopupMenu(menu, 0, cursor.x, cursor.y, 0, hwndNavbar, NULL);
+
+    // 关键：必须用 TPM_RETURNCMD 让 TrackPopupMenu 同步返回选中项 ID。
+    // 否则 Wine 会用 NtUserPostMessage 投递 WM_COMMAND（win32u/menu.c:3510），
+    // 该消息在 TrackPopupMenu 返回之后才被处理 —— 那时菜单已销毁、entries 已释放，
+    // 处理器再去 GetMenuItemInfo / 读 dwItemData 就是野指针。
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, cursor.x, cursor.y, 0, hwndNavbar, NULL);
+    if (cmd > 0 && cmd <= count) {
+        navigateToPath(entries[cmd - 1].path);
+        SetFocus(hwndContentView);
+    }
+
+    hMorePopupMenu = NULL;
+    DestroyMenu(menu);
+    for (int i = 0; i < count; i++) {
+        free(entries[i].text);
+        free(entries[i].path);
+    }
 }
 
 static void resizeAddrButtons() {
@@ -186,9 +278,10 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             }
 
             if (hwndControl == hwndGoButton) {
-                int len = GetWindowTextLength(hwndAddrEdit);
-                wchar_t path[len + 1];
-                SendMessage(hwndAddrEdit, WM_GETTEXT, len + 1, (LPARAM)path);
+                // 固定缓冲 + 由控件裁剪长度：原来按 GetWindowTextLength 开 VLA，
+                // 极端长文本会在栈上开大数组（S10）
+                wchar_t path[MAX_PATH] = {0};
+                SendMessage(hwndAddrEdit, WM_GETTEXT, MAX_PATH, (LPARAM)path);
                 setEditMode(false);
                 navigateToPath(path);
                 SetFocus(hwndContentView);
@@ -205,15 +298,18 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 else refreshContentView();
             }
             else if (hwndControl == 0) {
-                MENUITEMINFO item;
+                // 下拉菜单现已改用 TPM_RETURNCMD 同步处理（见 createMorePopupMenu），
+                // 不会再投递 WM_COMMAND。此处保留为防御性分支：初始化结构体并检查返回值，
+                // 避免读栈垃圾当指针（S5）。
+                MENUITEMINFO item = {0};
                 item.cbSize = sizeof(MENUITEMINFO);
                 item.fMask = MIIM_DATA;
-                GetMenuItemInfo(hMorePopupMenu, LOWORD(wParam), FALSE, &item);
-                struct FileNode* node = (struct FileNode*)item.dwItemData;
-                
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(node, path);
-                
+                if (!hMorePopupMenu) return 0;
+                if (!GetMenuItemInfo(hMorePopupMenu, LOWORD(wParam), FALSE, &item)) return 0;
+
+                wchar_t* path = (wchar_t*)item.dwItemData;
+                if (!path) return 0;
+
                 navigateToPath(path);
                 SetFocus(hwndContentView);
             }
@@ -279,7 +375,12 @@ int getNavbarHeight() {
 
 static struct AddrButton* addAddrButton() {
     int index = numAddrButtons++;
-    addrButtons = realloc(addrButtons, numAddrButtons * sizeof(struct AddrButton));
+    struct AddrButton* tmp = realloc(addrButtons, numAddrButtons * sizeof(struct AddrButton));
+    if (!tmp) {                    // realloc 失败时保留旧指针，回滚计数，避免泄漏与 NULL 解引用
+        numAddrButtons--;
+        return NULL;
+    }
+    addrButtons = tmp;
     struct AddrButton* button = &addrButtons[index];
     button->hwnd = CreateWindowEx(0, WC_BUTTON, NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
     button->isArrow = false;
@@ -289,6 +390,8 @@ static struct AddrButton* addAddrButton() {
 
 static void addArrowAddrButton(struct FileNode* node) {
     struct AddrButton* button = addAddrButton();
+    if (!button) return;
+
     button->isArrow = true;
     button->node = node;
 
@@ -323,23 +426,26 @@ void clearAddrButtons() {
 void updateAddrButtons() {
     clearAddrButtons();
     
+    // 路径分段数受 MAX_PATH 约束（每段至少 2 字符 "x\\"），用固定上限替代 VLA
     int count = 0;
     struct FileNode* node = currPathFileNode;
-    while (node) {
+    while (node && count < MAX_ADDR_BUTTONS) {
         count++;
         node = node->parent;
     }
     
-    struct FileNode* nodes[count];
+    struct FileNode* nodes[MAX_ADDR_BUTTONS];
     node = currPathFileNode;
     int i = 0;
-    while (node) {
+    while (node && i < MAX_ADDR_BUTTONS) {
         nodes[i++] = node;
         node = node->parent;
     }   
 
     for (i = count-1; i >= 0; i--) {
         struct AddrButton* button = addAddrButton();
+        if (!button) continue;
+
         button->node = nodes[i];
         SendMessage(button->hwnd, WM_SETTEXT, 0, (LPARAM)nodes[i]->name);
         calcAddrButtonWidth(button);
