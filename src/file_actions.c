@@ -161,9 +161,14 @@ static void extractSingleISOFile(void* handle, bool isCDImage, iso9660_stat_t* i
     FILE* outFile = fopen(filename, "wb");
     if (!outFile) return;
     
-    const uint32_t isoBlocks = CEILING(isoStat->total_size, ISO_BLOCKSIZE);
-    for (int i = 0; i < isoBlocks; i++) {
-        char buffer[ISO_BLOCKSIZE] = {0};
+    const uint64_t totalSize = isoStat->total_size;
+    const uint64_t isoBlocks = CDIO_EXTENT_BLOCKS(totalSize);
+
+    // 缓冲移出循环：每轮都会被完整覆写，原来在循环内做 2KB 清零纯属浪费
+    char buffer[ISO_BLOCKSIZE];
+    uint64_t written = 0;
+
+    for (uint64_t i = 0; i < isoBlocks; i++) {
         const lsn_t lsn = isoStat->lsn + i;
 
         if (isCDImage) {
@@ -171,15 +176,19 @@ static void extractSingleISOFile(void* handle, bool isCDImage, iso9660_stat_t* i
         }
         else if (ptr_iso9660_iso_seek_read((iso9660_t*)handle, buffer, lsn, 1) != ISO_BLOCKSIZE) goto end;
 
-        fwrite(buffer, ISO_BLOCKSIZE, 1, outFile);
-        if (ferror(outFile)) goto end;
+        // 最后一块只写入 ISO 记录的真实长度，而不是写满整块再 ftruncate。
+        // ftruncate 的返回值原先未检查，失败时会静默留下带填充的截断文件。
+        uint64_t remain = totalSize - written;
+        size_t chunk = remain < (uint64_t)ISO_BLOCKSIZE ? (size_t)remain : (size_t)ISO_BLOCKSIZE;
+        if (chunk == 0) break;
+        if (fwrite(buffer, 1, chunk, outFile) != chunk) goto end;
+        written += chunk;
     }
     
     fflush(outFile);
-    ftruncate(fileno(outFile), isoStat->total_size);
     
 end:    
-    if (outFile) fclose(outFile);
+    fclose(outFile);
 }
 
 static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wchar_t* dstPath) {
@@ -208,10 +217,10 @@ static void extractAllISOFiles(void* handle, bool isCDImage, char* srcPath, wcha
         memset(srcName, 0, MAX_PATH);
         ptr_iso9660_name_translate_ext(isoStat->filename, srcName, jolietLevel);
         
-        joinUnixPaths(srcPath, srcName, fullSrcPath);
+        joinUnixPaths(srcPath, srcName, fullSrcPath, MAX_PATH);
         
         MultiByteToWideChar(CP_ACP, 0, srcName, -1, dstName, MAX_PATH);
-        joinPaths(dstPath, dstName, fullDstPath);
+        joinPaths(dstPath, dstName, fullDstPath, MAX_PATH);
         
         if (isoStat->type == _STAT_DIR) {
             CreateDirectory(fullDstPath, NULL);
@@ -281,7 +290,9 @@ static DWORD WINAPI fileActionTask(void* param) {
                 SHFILEOPSTRUCT sfo = {0};
                 sfo.hwnd = hwndDlg;
                 sfo.wFunc = FO_DELETE;
-                sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+                // FOF_ALLOWUNDO：可用时送入回收站（Wine 的 shlfileop.c 会检查 is_trash_available()，
+                // 不可用时自动退化为永久删除，故在 Winlator 上无副作用）
+                sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_ALLOWUNDO;
                 sfo.pTo = NULL;
                 sfo.pFrom = actionData->srcPaths[i];
                 
@@ -315,13 +326,24 @@ static DWORD WINAPI fileActionTask(void* param) {
 }
 
 static wchar_t** createPathsFromFileNodes(struct FileNode** nodes, int count) {
+    if (!nodes || count <= 0) return NULL;
+
     wchar_t** paths = calloc(count, sizeof(wchar_t*));
+    if (!paths) return NULL;
     
     wchar_t tmp[MAX_PATH] = {0};
     for (int i = 0; i < count; i++) {
+        if (!nodes[i]) continue;
+
         getFileNodePath(nodes[i], tmp);
         int len = wcslen(tmp);
         wchar_t* path = calloc(len + 2, sizeof(wchar_t));
+        if (!path) {
+            // 分配失败：释放已分配的部分，整体返回 NULL，避免部分为 NULL 的数组
+            for (int j = 0; j < i; j++) free(paths[j]);
+            free(paths);
+            return NULL;
+        }
         wcscpy_s(path, len + 2, tmp);
         path[len+0] = L'\0';
         path[len+1] = L'\0';         
@@ -338,7 +360,7 @@ void deleteFiles(struct FileNode** nodes, int count) {
     }
     else swprintf_s(msg, 128, lc_str.msg_confirm_delete_multiple_items, count);
 
-    if (MessageBox(NULL, msg, lc_str.confirm_delete, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+    if (MessageBox(hwndMain, msg, lc_str.confirm_delete, MB_YESNO | MB_ICONQUESTION) == IDYES) {
         actionData = calloc(1, sizeof(struct ActionData));
         if (!actionData) return;
         
@@ -365,14 +387,15 @@ void deleteFiles(struct FileNode** nodes, int count) {
 void copyFiles(struct FileNode** nodes, int count) {
     clearClipboard();
     clipboard = createPathsFromFileNodes(nodes, count);
-    clipboardSize = count;
+    // 分配失败时不能留下「计数非 0 但指针为 NULL」的状态，否则粘贴会解引用空指针
+    clipboardSize = clipboard ? count : 0;
     clipboardIsCut = false;
 }
 
 void cutFiles(struct FileNode** nodes, int count) {
     clearClipboard();
     clipboard = createPathsFromFileNodes(nodes, count);
-    clipboardSize = count;
+    clipboardSize = clipboard ? count : 0;
     clipboardIsCut = true;
 }
 
@@ -442,7 +465,7 @@ void pasteShortcuts(wchar_t* dstDir) {
     for (int i = 0; i < clipboardSize; i++) {
         wchar_t* srcPath = clipboard[i];
         if (wcscmp(srcPath, L".lnk") != 0) {
-            getBasenameFromPath(srcPath, basename, true);
+            getBasenameFromPath(srcPath, basename, 80, true);
             swprintf_s(dstPath, MAX_PATH, L"%ls\\%ls.lnk", dstDir, basename);
             createShortcut(srcPath, dstPath);           
         }
@@ -454,6 +477,8 @@ void pasteShortcuts(wchar_t* dstDir) {
 
 void createDesktopShortcuts(struct FileNode** nodes, int count) {
     wchar_t** srcPaths = createPathsFromFileNodes(nodes, count);
+    if (!srcPaths) return;
+
     wchar_t* desktopPath = getDesktopPath();
     wchar_t dstPath[MAX_PATH] = {0};
     wchar_t basename[80] = {0};
@@ -461,7 +486,7 @@ void createDesktopShortcuts(struct FileNode** nodes, int count) {
     for (int i = 0; i < count; i++) {
         wchar_t* srcPath = srcPaths[i];
         if (wcscmp(srcPath, L".lnk") != 0) {
-            getBasenameFromPath(srcPath, basename, true);
+            getBasenameFromPath(srcPath, basename, 80, true);
             swprintf_s(dstPath, MAX_PATH, L"%ls\\%ls.lnk", desktopPath, basename);
             createShortcut(srcPath, dstPath);           
         }
