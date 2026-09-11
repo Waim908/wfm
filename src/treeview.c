@@ -47,7 +47,7 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
             tvis.itemex.state = node->children ? TVIS_EXPANDED : 0;
             tvis.itemex.stateMask = TVIS_EXPANDED;
             tvis.itemex.pszText = node->name;
-            tvis.itemex.cchTextMax = wcslen(node->name);
+            tvis.itemex.cchTextMax = (int)wcslen(node->name) + 1;
             tvis.itemex.iImage = iconIndex;
             tvis.itemex.iSelectedImage = iconIndex;
             tvis.itemex.lParam = (LPARAM)node;
@@ -114,7 +114,7 @@ static void updateTreeItems() {
         tvis.itemex.state = node->children ? TVIS_EXPANDED : 0;
         tvis.itemex.stateMask = TVIS_EXPANDED;
         tvis.itemex.pszText = node->name;
-        tvis.itemex.cchTextMax = wcslen(node->name);
+        tvis.itemex.cchTextMax = (int)wcslen(node->name) + 1;
         tvis.itemex.iImage = sfi.iIcon;
         tvis.itemex.iSelectedImage = sfi.iIcon;
         tvis.itemex.lParam = (LPARAM)node;

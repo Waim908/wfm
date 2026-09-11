@@ -30,7 +30,24 @@
     BOOL libcdio_load(void) {
         if (hLibcdio) return TRUE;
         
-        hLibcdio = LoadLibraryA("libcdio.dll");
+        // S13：不要用相对文件名 LoadLibraryA("libcdio.dll")——它走默认搜索顺序，
+        // 会优先命中「当前工作目录」，攻击者只要诱使 WFM 在含恶意 libcdio.dll 的
+        // 目录下启动即可实现 DLL 劫持。这里改成从 wfm.exe 自身所在目录取绝对路径。
+        wchar_t self[MAX_PATH] = {0};
+        wchar_t dllPath[MAX_PATH] = {0};
+        if (GetModuleFileNameW(NULL, self, MAX_PATH) == 0) return FALSE;
+        
+        // 截断到最后一个路径分隔符（保留分隔符本身）
+        int cut = -1;
+        for (int i = 0; self[i] != L'\0'; i++) {
+            if (self[i] == L'\\' || self[i] == L'/') cut = i;
+        }
+        if (cut < 0 || cut + 1 + (int)wcslen(L"libcdio.dll") >= MAX_PATH) return FALSE;
+        
+        wcsncpy_s(dllPath, MAX_PATH, self, (size_t)(cut + 1));
+        if (wcscat_s(dllPath, MAX_PATH, L"libcdio.dll") != 0) return FALSE;
+        
+        hLibcdio = LoadLibraryW(dllPath);
         if (!hLibcdio) return FALSE;
         
         LOAD_FUNC(hLibcdio, cdio_open, cdio_open_fn);

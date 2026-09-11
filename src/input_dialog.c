@@ -14,13 +14,18 @@ extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 
 INT_PTR CALLBACK InputDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;   // 本对话框不依赖 LPARAM 初始化数据
     switch (msg) {      
         case WM_COMMAND: {
             if (LOWORD(wParam) == IDOK) {
                 HWND hwndEdit = GetDlgItem(hwndDlg, IDC_EDIT);
                 int len = GetWindowTextLength(hwndEdit);
                 if (len > 0) {
-                    result = calloc(len + 1, sizeof(wchar_t));
+                    result = calloc((size_t)len + 1, sizeof(wchar_t));
+                    if (!result) {           // S15：分配失败时必须中止，否则 WM_GETTEXT 会写入 NULL
+                        EndDialog(hwndDlg, IDCANCEL);
+                        return (INT_PTR)TRUE;
+                    }
                     SendMessage(hwndEdit, WM_GETTEXT, len + 1, (LPARAM)result);
                 }
                 EndDialog(hwndDlg, LOWORD(wParam));

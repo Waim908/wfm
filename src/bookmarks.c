@@ -87,9 +87,11 @@ void loadBookmarks() {
     DWORD index = 0;
     while (g_bookmarkCount < MAX_BOOKMARKS) {
         wchar_t valueName[MAX_PATH] = {0};
-        DWORD valueNameLen = MAX_PATH;
+        // S12：RegEnumValue 的 lpcbValueName 单位是「字节」，必须乘以 sizeof(wchar_t)，
+        // 否则较长名称会被静默截断/返回失败。（valueDataLen 本来就已是字节，正确）
+        DWORD valueNameLen = sizeof(valueName);
         wchar_t valueData[MAX_PATH] = {0};
-        DWORD valueDataLen = MAX_PATH * sizeof(wchar_t);
+        DWORD valueDataLen = sizeof(valueData);
         DWORD type = 0;
         
         LONG result = RegEnumValue(hkey, index, valueName, &valueNameLen, NULL, &type, (LPBYTE)valueData, &valueDataLen);
@@ -275,15 +277,16 @@ void buildBookmarkTree() {
         DWORD dwAttrib = GetFileAttributes(g_bookmarks[i].path);
         BOOL pathExists = (dwAttrib != INVALID_FILE_ATTRIBUTES);
         
-        wchar_t displayText[MAX_PATH + 32];
+        // 用截断版格式化，避免超长收藏路径触发 swprintf_s 的无效参数处理器
+        wchar_t displayText[MAX_PATH + 32] = {0};
         if (i == g_autoOpenBookmarkIndex) {
-            swprintf_s(displayText, MAX_PATH + 32, L"[启动] %ls", g_bookmarks[i].path);
+            swprintfTrunc(displayText, MAX_PATH + 32, L"[启动] %ls", g_bookmarks[i].path);
         } else {
-            wcsncpy_s(displayText, MAX_PATH + 32, g_bookmarks[i].path, MAX_PATH + 31);
+            wcsncpy_s(displayText, MAX_PATH + 32, g_bookmarks[i].path, _TRUNCATE);
         }
         
         tvis.itemex.pszText = displayText;
-        tvis.itemex.cchTextMax = wcslen(displayText);
+        tvis.itemex.cchTextMax = (int)wcslen(displayText) + 1;
         tvis.itemex.lParam = (LPARAM)(TYPE_BOOKMARK_ITEM | (i << 16));
         
         if (pathExists) {

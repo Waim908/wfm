@@ -322,7 +322,13 @@ void navigateUp() {
 void navigateRefresh() {
     if (currPathFileNode) {
         buildChildNodes(currPathFileNode, false);
-        SetWindowText(hwndMain, currPathFileNode->name);    
+
+        // S15：标题栏显示完整路径（原来只有最后一级目录名，用户无从判断所在位置）。
+        // 「此电脑」「书签」等虚拟节点没有文件系统路径，退回显示节点名。
+        wchar_t fullPath[MAX_PATH] = {0};
+        getFileNodePath(currPathFileNode, fullPath);
+        SetWindowText(hwndMain, fullPath[0] != L'\0' ? fullPath : currPathFileNode->name);
+
         updateAddrButtons();
         refreshContentView();
     }
@@ -342,11 +348,10 @@ void openFileNode(struct FileNode* node) {
             // 使用自定义关联程序打开
             ShellExecute(hwndMain, L"open", program, path, parentPath, SW_SHOW);
         } else {
-            // 尝试系统默认关联
+            // 和 Explorer 一样：先让 Wine 处理（Windows exe / Linux 程序都支持）
             HINSTANCE hInst = ShellExecute(hwndMain, L"open", path, NULL, parentPath, SW_SHOW);
-            // 如果系统无法打开（错误码 > 32 表示成功）
             if ((INT_PTR)hInst <= 32) {
-                // 显示"打开方式"对话框
+                // Wine 也打不开，显示"打开方式"对话框
                 bool removeAssoc = false;
                 wchar_t* chosen = showOpenWithDialog(path, ext, &removeAssoc);
                 if (removeAssoc && ext) {
@@ -466,6 +471,9 @@ static void createMainMenu() {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow) {
+    (void)hPrevInstance;   // Win32 下恒为 NULL
+    (void)lpCmdLine;       // 改用 GetCommandLineW()/CommandLineToArgvW 解析
+    (void)nCmdShow;
     SetProcessDPIAware();
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
