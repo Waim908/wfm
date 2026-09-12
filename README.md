@@ -115,8 +115,6 @@ echo "58000000" > .windows-serial
 
 无论X盘在winecfg中的定义是光驱还是自动检测都是可以正常解压文件进去的，你也可以手动在winecfg中定义X盘为光驱类型
 
-![Screenshort](winecfg1.png)
-
 Q：如何卸载wfm？
 
 A: 确保你的挂载盘取消挂载后，删除*wfm.exe*和*libcdio.dll*，执行bat脚本*del-reg.bat*或者删除注册表
