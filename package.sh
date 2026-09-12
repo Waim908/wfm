@@ -34,6 +34,8 @@ EOF
 
 echo "Building version ${getVersion}..."
 
+make clean
+
 case $1 in
 	nolibcdio)
 		make USE_LIBCDIO=0 -j$(nproc)
