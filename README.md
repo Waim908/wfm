@@ -52,6 +52,9 @@ Windows Registry Editor Version 5.00
 12. 搜索结果右键指定文件的菜单里可以直接定位到文件所在位置
 13. 加入了explorer启动，cmd启动的按钮（请务必在进入有效路径后，这两个按钮才会生效）
 14. 使用挂载功能不再需要*libcdio.dll*文件了-> by [nostalgia296](https://github.com/Waim908/wfm/pull/2)
+15. 可以查看隐藏文件了
+16. 可以设置或选择文件类型的打开程序（不干预系统全局文件类型设置）
+17. 文件排序可以在查看中切换为windows资源管理器的同款文件夹在上的排序，如果你习惯dolpin或者explorer的排序可以快速上手
 
 相较于原版wfm
 
@@ -66,7 +69,7 @@ Windows Registry Editor Version 5.00
 
 Q: 没有显示`.XXX`的Linux隐藏文件？
 
-A: ![Screenshot](winecfg2.png)
+A: ![Screenshot](showHideFile.png)
 
 Q: 文件图标出现了混淆？
 

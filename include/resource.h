@@ -100,7 +100,7 @@ void freeUIcons();
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5-mod.2.5"
+#define APP_VERSION L"1.5-mod.2.6"
 #define APP_DEV_NAME L"BrunoSX"
 
 #ifndef RESOURCE_H
