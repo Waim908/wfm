@@ -13,22 +13,26 @@
 
 ![Screenshot](wfm3.png)
 
-# 注册表结构
+# 注册表结构（示例）
 ```
-Windows Registry Editor Version 5.00
+WWindows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM]
+"FolderSortMode"=dword:00000000
+"ShowHidden"=dword:00000001
 "ViewStyle"=dword:00000003
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM\Bookmarks]
-"Bookmark0"="Z:\\tmp"
+"Bookmark0"="Z:\\bin"
+"Bookmark1"="Z:\\home\\waim\\Game"
 
-[HKEY_CURRENT_USER\Software\Winlator\WFM\ContextMenu]
+[HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations]
 
-[HKEY_CURRENT_USER\Software\Winlator\WFM\ContextMenu\7-Zip]
-"Extract Here"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zG.exe x \"%FILE%\" -r -o\"%DIR%\" -y"
-"Extract to Folder"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zG.exe x \"%FILE%\" -r -o\"%DIR%\\\\%BASENAME%\" -y"
-"Open Archive"="Z:\\\\opt\\\\apps\\\\7-Zip\\\\7zFM.exe \"%FILE%\""
+[HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations\.aaa]
+"Program"="C:\\windows\\notepad.exe"
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations\.md]
+"Program"="C:\\windows\\notepad.exe"
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM\Language]
 "lang"="zh"
@@ -50,11 +54,12 @@ Windows Registry Editor Version 5.00
 10. 可以查看盘符剩余空间大小
 11. 查看视图（大图标，小图标）持久保存在注册表
 12. 搜索结果右键指定文件的菜单里可以直接定位到文件所在位置
-13. 加入了explorer启动，cmd启动的按钮（请务必在进入有效路径后，这两个按钮才会生效）
+13. 加入了explorer启动，cmd启动的按钮
 14. 使用挂载功能不再需要*libcdio.dll*文件了-> by [nostalgia296](https://github.com/Waim908/wfm/pull/2)
 15. 可以查看隐藏文件了
 16. 可以设置或选择文件类型的打开程序（不干预系统全局文件类型设置）
 17. 文件排序可以在查看中切换为windows资源管理器的同款文件夹在上的排序，如果你习惯dolpin或者explorer的排序可以快速上手
+18. 长路径在代码上限内可以有效支持，如果太长可以在地址栏...菜单选择路径跳转
 
 相较于原版wfm
 
