@@ -114,6 +114,12 @@ static inline void loadStrings_pt() {
     lc_str.browse = L"Procurar...";
     lc_str.always_use = L"Sempre usar este programa para este tipo de arquivo";
     lc_str.open_with_menu = L"Abrir Com...";
+
+    // Posição das pastas (política de ordenação)
+    lc_str.folder_position = L"Posição das Pastas";
+    lc_str.folder_pos_top = L"No topo (Explorer)";
+    lc_str.folder_pos_bottom = L"No fim (WFM clássico)";
+    lc_str.folder_pos_plain = L"Não agrupar (por coluna)";
 }
 
 #endif

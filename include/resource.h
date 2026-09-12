@@ -66,6 +66,9 @@
 #define ID_LANG_PT  318
 #define ID_LANG_RU  319
 #define ID_VIEW_SHOW_HIDDEN 320
+#define ID_VIEW_FOLDER_TOP     321
+#define ID_VIEW_FOLDER_BOTTOM  322
+#define ID_VIEW_FOLDER_PLAIN   323
 #define IDD_OPEN_WITH 260
 #define IDC_EDIT_PROGRAM 261
 #define IDC_BTN_BROWSE 262
@@ -213,6 +216,10 @@ struct LC_STR {
     wchar_t* browse;
     wchar_t* always_use;
     wchar_t* open_with_menu;
+    wchar_t* folder_position;
+    wchar_t* folder_pos_top;
+    wchar_t* folder_pos_bottom;
+    wchar_t* folder_pos_plain;
 };
 
 extern struct LC_STR lc_str;

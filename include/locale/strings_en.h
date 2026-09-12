@@ -115,6 +115,12 @@ static inline void loadStrings_en() {
     lc_str.browse = L"Browse...";
     lc_str.always_use = L"Always use this program for this file type";
     lc_str.open_with_menu = L"Open With...";
+
+    // Folder position (sort policy)
+    lc_str.folder_position = L"Folder Position";
+    lc_str.folder_pos_top = L"Top (Explorer style)";
+    lc_str.folder_pos_bottom = L"Bottom (WFM classic)";
+    lc_str.folder_pos_plain = L"Don't group (sort by column)";
 }
 
 #endif

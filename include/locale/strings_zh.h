@@ -114,6 +114,12 @@ static inline void loadStrings_zh() {
     lc_str.browse = L"浏览...";
     lc_str.always_use = L"始终使用此程序打开此类文件";
     lc_str.open_with_menu = L"打开方式...";
+
+    // 文件夹位置（排序策略）
+    lc_str.folder_position = L"文件夹位置";
+    lc_str.folder_pos_top = L"置顶（资源管理器）";
+    lc_str.folder_pos_bottom = L"沉底（WFM 经典）";
+    lc_str.folder_pos_plain = L"不区分（纯按本列）";
 }
 
 #endif

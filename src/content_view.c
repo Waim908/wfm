@@ -223,6 +223,9 @@ static enum ViewStyle viewStyle = STYLE_DETAILS;
 static HMENU hContextMenu;
 static char sortColumnIdx = COLUMN_NAME_IDX;
 static bool sortAscending = true;
+// 文件夹位置策略的当前值。默认「沉底」——沿用 WFM 的经典观感，
+// 与注册表缺失该项时的默认值保持一致（见 loadFolderSortMode）。
+static enum FolderSortMode folderSortMode = FOLDER_SORT_BOTTOM;
 
 static struct FileNode** selectedItems = NULL;
 static int numSelectedItems = 0;
@@ -258,6 +261,7 @@ extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 extern HMENU hMenuView;
+extern HMENU hMenuFolderSort;
 
 HWND hwndContentView = NULL;
 
@@ -1437,6 +1441,57 @@ void updateViewMenuCheckmarks(void) {
         default:                check = ID_VIEW_DETAILS;    break;
     }
     CheckMenuRadioItem(hMenuView, first, last, check, MF_BYCOMMAND);
+}
+
+static void saveFolderSortMode(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, NULL,
+                       REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS) {
+        DWORD val = (DWORD)folderSortMode;
+        RegSetValueEx(hkey, L"FolderSortMode", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        RegCloseKey(hkey);
+    }
+}
+
+void loadFolderSortMode(void) {
+    HKEY hkey;
+    // 未配置时默认「沉底」——与 folderSortMode 的静态初值保持一致
+    DWORD val = (DWORD)FOLDER_SORT_BOTTOM;
+    DWORD size = sizeof(val);
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+        RegQueryValueEx(hkey, L"FolderSortMode", NULL, NULL, (BYTE*)&val, &size);
+        RegCloseKey(hkey);
+    }
+    // 注册表可能被写入了越界值或根本不是 REG_DWORD，这里统一回落到默认值
+    if (val > (DWORD)FOLDER_SORT_PLAIN) val = (DWORD)FOLDER_SORT_BOTTOM;
+    folderSortMode = (enum FolderSortMode)val;
+}
+
+void updateFolderSortMenuCheckmarks(void) {
+    if (!hMenuFolderSort) return;
+    UINT check;
+    switch (folderSortMode) {
+        case FOLDER_SORT_TOP:   check = ID_VIEW_FOLDER_TOP;    break;
+        case FOLDER_SORT_PLAIN: check = ID_VIEW_FOLDER_PLAIN;  break;
+        case FOLDER_SORT_BOTTOM:
+        default:                check = ID_VIEW_FOLDER_BOTTOM; break;
+    }
+    CheckMenuRadioItem(hMenuFolderSort, ID_VIEW_FOLDER_TOP, ID_VIEW_FOLDER_PLAIN,
+                       check, MF_BYCOMMAND);
+}
+
+void setFolderSortMode(enum FolderSortMode newMode) {
+    if (newMode < FOLDER_SORT_TOP || newMode > FOLDER_SORT_PLAIN) {
+        newMode = FOLDER_SORT_BOTTOM;
+    }
+    folderSortMode = newMode;
+
+    // 不需要重新枚举目录：refreshContentView() 会从 currPathFileNode 的子链表
+    // 重建 items[] 并在末尾 sortItems()，所以策略切换是「就地重排」级别的开销。
+    refreshContentView();
+
+    saveFolderSortMode();
+    updateFolderSortMenuCheckmarks();
 }
 
 void createLVColumns() {
@@ -2784,13 +2839,22 @@ static int compareTypeName(const struct ListItem* ia, const struct ListItem* ib)
     return wcscmp(typeA, typeB);
 }
 
-// 文件夹永远排在文件前面 —— 这是资源管理器（以及几乎所有文件管理器）的固定行为：
-// 点列头只改变「文件之间」的次序，文件夹始终置顶，升降序都不翻转。
+// 文件夹相对文件的次序，由 folderSortMode 决定：
+//   置顶   → 文件夹在前（Windows 资源管理器）
+//   沉底   → 文件夹在后（WFM 经典观感）
+//   不区分 → 一律返回 0，交给后续主键
+// 返回值必须被调用方**直接 return**，不能进 finalizeCompare —— 升降序只应
+// 作用于「同类之间」，否则降序时文件夹会被翻到另一头。
 static int compareFoldersFirst(const struct ListItem* ia, const struct ListItem* ib) {
+    if (folderSortMode == FOLDER_SORT_PLAIN) return 0;
+
     bool fa = (ia->node && ia->node->type != TYPE_FILE);
     bool fb = (ib->node && ib->node->type != TYPE_FILE);
     if (fa == fb) return 0;
-    return fa ? -1 : 1;
+
+    // 置顶时「a 是文件夹」则 a 在前；沉底时「b 是文件夹」则 a 在前
+    bool aComesFirst = (folderSortMode == FOLDER_SORT_BOTTOM) ? fb : fa;
+    return aComesFirst ? -1 : 1;
 }
 
 static int compareNameOnly(const struct ListItem* ia, const struct ListItem* ib) {

@@ -115,6 +115,12 @@ static inline void loadStrings_ru() {
     lc_str.browse = L"Обзор...";
     lc_str.always_use = L"Всегда использовать эту программу для этого типа файлов";
     lc_str.open_with_menu = L"Открыть с помощью...";
+
+    // Положение папок (политика сортировки)
+    lc_str.folder_position = L"Положение папок";
+    lc_str.folder_pos_top = L"Сверху (как в Проводнике)";
+    lc_str.folder_pos_bottom = L"Снизу (классический WFM)";
+    lc_str.folder_pos_plain = L"Не группировать (по столбцу)";
 }
 
 #endif

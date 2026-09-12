@@ -15,6 +15,9 @@ extern HWND hwndTreeview;
 
 HMENU hMenuView = NULL;
 HMENU hMenuLang = NULL;
+// 「查看 → 文件夹位置」子菜单。由 content_view.c 负责打单选勾，
+// 这里只创建并暴露句柄（与 hMenuView 同一种做法）。
+HMENU hMenuFolderSort = NULL;
 static wchar_t currentLocale[16] = {0};
 
 bool g_showHiddenFiles = false;
@@ -189,6 +192,15 @@ void mainMenuCommand(WPARAM wParam) {
             break;
         case ID_VIEW_SHOW_HIDDEN:
             toggleShowHidden();
+            break;
+        case ID_VIEW_FOLDER_TOP:
+            setFolderSortMode(FOLDER_SORT_TOP);
+            break;
+        case ID_VIEW_FOLDER_BOTTOM:
+            setFolderSortMode(FOLDER_SORT_BOTTOM);
+            break;
+        case ID_VIEW_FOLDER_PLAIN:
+            setFolderSortMode(FOLDER_SORT_PLAIN);
             break;
         case ID_MOUNT_LOCATE_ISO:
 #ifdef USE_LIBCDIO
@@ -439,6 +451,14 @@ static void createMainMenu() {
     
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_SHOW_HIDDEN, lc_str.show_hidden_files);
+
+    HMENU hmFolderSort = CreatePopupMenu();
+    hMenuFolderSort = hmFolderSort;
+    AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_TOP, lc_str.folder_pos_top);
+    AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_BOTTOM, lc_str.folder_pos_bottom);
+    AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_PLAIN, lc_str.folder_pos_plain);
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmFolderSort, lc_str.folder_position);
+
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
 #ifdef USE_LIBCDIO
     HMENU hmMount = CreatePopupMenu();
@@ -548,7 +568,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     
     setViewStyle(loadViewStyle());
     loadShowHidden();
+    loadFolderSortMode();
     updateViewMenuCheckmarks();
+    updateFolderSortMenuCheckmarks();
     if (hMenuView) {
         CheckMenuItem(hMenuView, ID_VIEW_SHOW_HIDDEN,
             MF_BYCOMMAND | (g_showHiddenFiles ? MF_CHECKED : MF_UNCHECKED));
