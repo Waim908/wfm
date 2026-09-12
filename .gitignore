@@ -18,3 +18,6 @@ readme.txt
 
 # 代码审查报告，仅本地留存
 CODE_REVIEW_PERF_SECURITY.md
+
+# 回归审计报告，仅本地留存
+REGRESSION_AUDIT_2026-09-12.md

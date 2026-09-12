@@ -131,6 +131,7 @@ struct SearchData {
 struct SearchCache {
     wchar_t path[MAX_PATH];
     wchar_t keyword[64];
+    bool showHidden;               // 缓存生成时的隐藏文件开关：切换开关后缓存必须失效
     struct FileNode** results;
     int count;
     struct SearchNodePool* pool;   // results 指向的节点由该池拥有
@@ -138,6 +139,10 @@ struct SearchCache {
 };
 
 static struct SearchCache searchCache = {0};
+
+// 搜索进行中用户又发起了新搜索：先取消当前搜索，关键词暂存在这里，
+// 等 MSG_SEARCH_DONE 清理完 searchData 后自动重新发起（模式同 pendingNavigatePath）
+static wchar_t pendingSearchKeyword[64] = {0};
 
 // ===== 搜索节点池 =====
 // 池中记录搜索线程分配过的每一个节点，释放时不依赖链表结构，
@@ -393,31 +398,6 @@ static void execCommandLine(wchar_t* command) {
 
 LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-        case WM_COMMAND: {
-            if ((HWND)lParam == 0) {
-                // dwItemData 只在 GetMenuItemInfo 成功后才有效，否则是栈垃圾
-                MENUITEMINFO item = {0};
-                item.cbSize = sizeof(MENUITEMINFO);
-                item.fMask = MIIM_DATA;
-                if (!GetMenuItemInfo(hContextMenu, LOWORD(wParam), FALSE, &item)) break;
-                struct ContextMenuItem* cmItem = (struct ContextMenuItem*)item.dwItemData;
-                if (!cmItem) break;
-
-                if (cmItem->cmdData) {
-                    // 缓冲区按命令实际长度分配：固定 MAX_PATH 会静默丢弃较长的自定义命令
-                    size_t cmdLen = wcslen(cmItem->cmdData) + 4;
-                    wchar_t* command = malloc(cmdLen * sizeof(wchar_t));
-                    if (command) {
-                        wcscpy_s(command, cmdLen, L"/C ");
-                        wcscat_s(command, cmdLen, cmItem->cmdData);
-                        execCommandLine(command);   // 所有权移交（内部线程负责释放）
-                    }
-                    navigateRefresh();
-                }
-                else if (cmItem->proc) cmItem->proc();
-            }           
-            break;
-        }
         case MSG_ADD_ITEMS_BATCH: {
             if (searchData != NULL && searchData->active) {
                 struct BatchItems* batch = (struct BatchItems*)lParam;
@@ -468,6 +448,7 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 searchCache.pool = searchData->pool;
                 searchCache.count = searchData->resultCount;
                 searchCache.timestamp = time(NULL);
+                searchCache.showHidden = g_showHiddenFiles;
                 wcsncpy_s(searchCache.path, MAX_PATH, searchData->rootPath, _TRUNCATE);
                 wcscpy_s(searchCache.keyword, 64, searchData->keyword);
                 searchData->results = NULL;
@@ -482,7 +463,15 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             free(searchData);
             searchData = NULL;
-            if (canceled) {
+            if (pendingSearchKeyword[0]) {
+                // 消费挂起的新关键词：searchData 已清理完毕，这里可以直接重新发起。
+                // 不再走 refreshContentView()，马上就会被新搜索的 clearContentView 覆盖。
+                wchar_t keyword[64] = {0};
+                wcscpy_s(keyword, 64, pendingSearchKeyword);
+                pendingSearchKeyword[0] = L'\0';
+                searchFor(keyword);
+            }
+            else if (canceled) {
                 refreshContentView();
             }
             else updateStatusbar();
@@ -632,6 +621,13 @@ static wchar_t* buildContextMenuCommand(const wchar_t* tmpl, const wchar_t* file
     return cmdData;
 }
 
+// 文件名含 " 或 % 时无法安全构造 cmd 命令行（引号内无法转义，% 会被 cmd 展开）。
+// 菜单项仍然显示，点击时给出明确提示 —— 不能让整项从菜单里凭空消失。
+static void onUnsafeCmdItemClick() {
+    MessageBox(hwndMain, L"文件名含有引号或 % 字符，无法安全用于该命令模板",
+               lc_str.alert, MB_OK | MB_ICONINFORMATION);
+}
+
 static void createContextMenuFromRegistry(int* id) {
     freeMenuItems();
     HKEY hkeyContextMenu, hkeyItem;
@@ -678,10 +674,9 @@ static void createContextMenuFromRegistry(int* id) {
                 itemValueLen = sizeof(itemValue);
                 if (RegEnumValue(hkeyItem, j++, subitemName, &itemNameLen, NULL, NULL, (LPBYTE)itemValue, &itemValueLen) != ERROR_SUCCESS) break;
 
-                // 无法安全替换（值里含 " 或 %）时放弃该菜单项：
-                // 宁可少一项，也不执行被文件名篡改过的命令
+                // 文件名含 " 或 % 时无法安全替换：保留菜单项（点击时提示原因），
+                // 但绝不执行被文件名篡改过的命令
                 wchar_t* cmdData = buildContextMenuCommand(itemValue, filePath, basename, dirPath);
-                if (!cmdData) break;
                 if (numMenuItems >= 100) { free(cmdData); break; }
 
                 struct ContextMenuItem* tmp = realloc(menuItems, (numMenuItems + 1) * sizeof(struct ContextMenuItem));
@@ -693,7 +688,7 @@ static void createContextMenuFromRegistry(int* id) {
 
                 struct ContextMenuItem* cmItem = &menuItems[numMenuItems];
                 cmItem->text = text;
-                cmItem->proc = NULL;
+                cmItem->proc = cmdData ? NULL : onUnsafeCmdItemClick;
                 cmItem->cmdData = cmdData;
                 numMenuItems++;
 
@@ -765,7 +760,8 @@ static void createContextMenu(enum ContextMenuType type) {
     HMENU hMenu = CreatePopupMenu();
     hContextMenu = hMenu;
 
-    int id = 0;
+    // ID 从 1 开始：TPM_RETURNCMD 用返回值 0 表示"未选中任何项"（同 navbar.c）
+    int id = 1;
 
     if (type == MENU_SINGLE || type == MENU_MULTIPLE) {
         if (type == MENU_SINGLE) {
@@ -815,12 +811,38 @@ static void createContextMenu(enum ContextMenuType type) {
 
     POINT cursor;
     GetCursorPos(&cursor);
-    TrackPopupMenu(hMenu, 0, cursor.x, cursor.y, 0, hwndContentView, NULL);
+    // 必须用 TPM_RETURNCMD 同步取回选中项（同 navbar.c/treeview.c 的写法）。
+    // Wine 选中菜单项后是 PostMessage 投递 WM_COMMAND（win32u/menu.c），在
+    // TrackPopupMenu 返回之后才被派发 —— 若返回后就销毁菜单，WM_COMMAND
+    // 到达时 hContextMenu 已为 NULL，分发永远失败，右键菜单全部静默无反应。
+    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD, cursor.x, cursor.y, 0, hwndContentView, NULL);
 
-    // 菜单在 TrackPopupMenu 的模态循环里被使用，返回后才能安全销毁。
-    // 旧实现从不销毁，每次右键泄漏一个 HMENU 及其全部菜单项。
+    // dwItemData 会随菜单一起销毁，必须在 DestroyMenu 前取回。
+    // GetMenuItemInfo 按命令 ID 查找时 Wine 会递归子菜单（挂载镜像/注册表命令都在子菜单里）。
+    struct ContextMenuItem* cmItem = NULL;
+    if (cmd) {
+        MENUITEMINFO item = {0};
+        item.cbSize = sizeof(MENUITEMINFO);
+        item.fMask = MIIM_DATA;
+        if (GetMenuItemInfo(hMenu, cmd, FALSE, &item)) cmItem = (struct ContextMenuItem*)item.dwItemData;
+    }
     hContextMenu = NULL;
     DestroyMenu(hMenu);
+
+    if (!cmItem) return;
+
+    if (cmItem->cmdData) {
+        // 缓冲区按命令实际长度分配：固定 MAX_PATH 会静默丢弃较长的自定义命令
+        size_t cmdLen = wcslen(cmItem->cmdData) + 4;
+        wchar_t* command = malloc(cmdLen * sizeof(wchar_t));
+        if (command) {
+            wcscpy_s(command, cmdLen, L"/C ");
+            wcscat_s(command, cmdLen, cmItem->cmdData);
+            execCommandLine(command);   // 所有权移交（内部线程负责释放）
+        }
+        navigateRefresh();
+    }
+    else if (cmItem->proc) cmItem->proc();
 }
 
 // 绘制时反复 CreateSolidBrush/DeleteObject 会带来可观的 GDI 开销，这里按颜色复用
@@ -1256,6 +1278,8 @@ static bool isSearchCacheValid(const wchar_t* path, const wchar_t* keyword) {
     if (searchCache.count == 0) return false;
     if (wcscmp(searchCache.path, path) != 0) return false;
     if (wcscmp(searchCache.keyword, keyword) != 0) return false;
+    // 搜索线程按当时的 g_showHiddenFiles 过滤：开关变了，旧结果就不再可信
+    if (searchCache.showHidden != g_showHiddenFiles) return false;
     time_t now = time(NULL);
     if (now - searchCache.timestamp > 30) return false;
     return true;
@@ -1274,12 +1298,16 @@ static void cancelSearch() {
 
 void searchFor(wchar_t* keyword) {
     if (wcslen(keyword) == 0) return;
-    // 如果有搜索正在进行或正在清理中，取消并等待 MSG_SEARCH_DONE 自然清理
+    // 如果有搜索正在进行或正在清理中，取消并把新关键词挂起：
+    // 等 MSG_SEARCH_DONE 清理完 searchData 后自动用新关键词重新发起。
+    // 旧实现直接 return，用户必须再点一次搜索按钮才生效。
     if (searchData != NULL) {
         if (searchData->active) {
             searchData->active = false;
             searchData->canceled = true;
         }
+        // 截断拷贝：搜索框文本超长时 wcscpy_s 会触发约束处理器而非静默截断
+        wcsncpy_s(pendingSearchKeyword, 64, keyword, _TRUNCATE);
         return;
     }
     
@@ -1521,9 +1549,9 @@ void createContentView() {
     hwndContentView = CreateWindowEx(0, WC_LISTVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_BORDER | LVS_OWNERDATA | LVS_REPORT | LVS_SHAREIMAGELISTS,
                                      0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
 
-    // LVS_EX_DOUBLEBUFFER：Wine 的 comctl32 完整实现（拦截 WM_ERASEBKGND + 内存 DC 绘制），
-    // 同时改善闪烁与重绘开销；LVS_EX_FULLROWSELECT：整行可选中
-    ListView_SetExtendedListViewStyle(hwndContentView, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
+    // 不启用 LVS_EX_DOUBLEBUFFER：它会把 Wine 的列表绘制切到"拦截 WM_ERASEBKGND +
+    // 内存 DC"路径，在 Winlator 的 GL 合成环境下出现列表内容（含图标）不显示/不刷新。
+    // 恢复原版绘制路径；LVS_EX_FULLROWSELECT 也一并去掉，保持与原版渲染行为一致。
 
     cmiOpen.text = lc_str.open;
     cmiEdit.text = lc_str.edit;
@@ -3105,14 +3133,20 @@ void refreshContentView() {
     }
 
     if (sortColumnIdx != -1) sortItems();
+    ListView_SetItemCountEx(hwndContentView, numItems, 0);
 
-    // 合并重绘：一次设置条目数 + 一次滚动更新即完成刷新。
-    // 旧实现每次导航触发 4 次整表失效（SetItemCountEx(0) → SetItemCountEx(n) →
-    // icon 视图的 Arrange + 再次 SetItemCountEx → InvalidateRect），每次失效都会
-    // 为所有可见行重新派发 LVN_GETDISPINFO。
-    // 注意：Wine 在图标视图下会强制丢弃 LVSICF_NOINVALIDATEALL（见
-    // dlls/comctl32/listview.c LISTVIEW_SetItemCount），此时退化为整表失效，仍然正确。
-    ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+    // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时
+    // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
+    // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
+    if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
+        ListView_Arrange(hwndContentView, LVA_DEFAULT);
+        ListView_SetItemCountEx(hwndContentView, numItems, 0);
+    }
+
+    // 整表失效重绘，恢复原版绘制路径。不用 LVSICF_NOINVALIDATEALL 做增量刷新：
+    // Wine/Winlator 上增量路径会让旧行不重画（图标、文字残缺或滞留旧内容），
+    // 渲染正确性优先于这点重绘开销。
+    InvalidateRect(hwndContentView, NULL, TRUE);
 
     // 排序指示箭头：列结构或排序状态一变就重设（建列、点列头、切视图都汇到这里）
     updateSortIndicator();

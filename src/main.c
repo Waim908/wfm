@@ -395,10 +395,15 @@ void openFileNode(struct FileNode* node) {
         // 检查是否有自定义文件关联
         wchar_t* ext = wcsrchr(node->name, L'.');
         wchar_t program[MAX_PATH] = {0};
+        bool openedByAssoc = false;
         if (ext && getFileAssociation(ext, program, MAX_PATH)) {
             // 使用自定义关联程序打开
-            ShellExecute(hwndMain, L"open", program, path, parentPath, SW_SHOW);
-        } else {
+            HINSTANCE hInst = ShellExecute(hwndMain, L"open", program, path, parentPath, SW_SHOW);
+            // 关联程序启动失败（返回值 <= 32）时必须落回常规流程：
+            // 否则双击静默无反应，"打开方式"弹窗也永远回不来
+            openedByAssoc = ((INT_PTR)hInst > 32);
+        }
+        if (!openedByAssoc) {
             // 和 Explorer 一样：先让 Wine 处理（Windows exe / Linux 程序都支持）
             HINSTANCE hInst = ShellExecute(hwndMain, L"open", path, NULL, parentPath, SW_SHOW);
             if ((INT_PTR)hInst <= 32) {

@@ -72,6 +72,7 @@
 #define IDC_EDIT_PROGRAM 261
 #define IDC_BTN_BROWSE 262
 #define IDC_CHECK_ALWAYS 263
+#define IDC_BTN_REMOVE_ASSOC 264
 
 #define ICON_UP          0
 #define ICON_COPY        1
