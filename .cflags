@@ -1,1 +1,0 @@
--O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall -Wextra -flto -ffunction-sections -fdata-sections -I./include

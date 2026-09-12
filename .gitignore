@@ -8,6 +8,10 @@ wine-10.10-custom/
 wfm-vanilla/
 package-lock.json
 readme.txt
+.cflags
+.cflags.*
+.variant
 
 # 本地工作区数据（记忆/技能等），不入版本库
 .workbuddy/
+.zcode/
