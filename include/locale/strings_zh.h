@@ -117,8 +117,9 @@ static inline void loadStrings_zh() {
 
     // 文件夹位置（排序策略）
     lc_str.folder_position = L"文件夹位置";
+    lc_str.folder_pos_classic = L"跟随排序方向（经典）";
     lc_str.folder_pos_top = L"置顶（资源管理器）";
-    lc_str.folder_pos_bottom = L"沉底（WFM 经典）";
+    lc_str.folder_pos_bottom = L"沉底（固定）";
     lc_str.folder_pos_plain = L"不区分（纯按本列）";
 }
 

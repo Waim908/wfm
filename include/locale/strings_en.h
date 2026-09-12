@@ -118,8 +118,9 @@ static inline void loadStrings_en() {
 
     // Folder position (sort policy)
     lc_str.folder_position = L"Folder Position";
+    lc_str.folder_pos_classic = L"Follow sort direction (classic)";
     lc_str.folder_pos_top = L"Top (Explorer style)";
-    lc_str.folder_pos_bottom = L"Bottom (WFM classic)";
+    lc_str.folder_pos_bottom = L"Bottom (fixed)";
     lc_str.folder_pos_plain = L"Don't group (sort by column)";
 }
 

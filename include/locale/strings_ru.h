@@ -118,8 +118,9 @@ static inline void loadStrings_ru() {
 
     // Положение папок (политика сортировки)
     lc_str.folder_position = L"Положение папок";
+    lc_str.folder_pos_classic = L"Следовать направлению сортировки (классика)";
     lc_str.folder_pos_top = L"Сверху (как в Проводнике)";
-    lc_str.folder_pos_bottom = L"Снизу (классический WFM)";
+    lc_str.folder_pos_bottom = L"Снизу (фиксировано)";
     lc_str.folder_pos_plain = L"Не группировать (по столбцу)";
 }
 

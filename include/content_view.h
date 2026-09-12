@@ -9,14 +9,15 @@ enum ViewStyle {
 };
 
 // 文件夹在列表中的位置策略。
-// 注意「沉底」不是「类型名当主键」的旧实现——旧实现是把本地化类型名
-// （文件夹 / Folder / Папка …）当排序键，结果随界面语言变化：中文/葡文下
-// 文件夹恰好沉底，英文/俄文下却夹在中间。这里改成显式策略，排序结果与
-// 语言无关，观感（文件夹沉底）则与旧版一致。
+// 「经典」是原版 WFM 的排序语义：文件夹/文件分组是类型主键的一部分，
+// 随升降序一起翻转 —— 升序文件夹在前、降序在后（TYPE_DIR=0 < TYPE_FILE=1，
+// 原版把 type 差值放进统一的升降序翻转里）。
+// 置顶/沉底/不区分是后加的可选项，位置不随方向变化。
 enum FolderSortMode {
-    FOLDER_SORT_TOP = 0,     // 置顶：Windows 资源管理器语义
-    FOLDER_SORT_BOTTOM = 1,  // 沉底：WFM 经典观感
-    FOLDER_SORT_PLAIN = 2    // 不区分：纯按本列排，文件夹与文件混排
+    FOLDER_SORT_CLASSIC = 0, // 经典：分组随排序方向翻转（原版行为，默认）
+    FOLDER_SORT_TOP = 1,     // 恒置顶：Windows 资源管理器语义
+    FOLDER_SORT_BOTTOM = 2,  // 恒沉底：WFM 观感的固定版
+    FOLDER_SORT_PLAIN = 3    // 不分组：纯按本列排，文件夹与文件混排
 };
 
 LRESULT contentViewNotify(NMHDR* nmhdr);

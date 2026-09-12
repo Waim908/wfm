@@ -229,6 +229,9 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_SHOW_HIDDEN:
             toggleShowHidden();
             break;
+        case ID_VIEW_FOLDER_CLASSIC:
+            setFolderSortMode(FOLDER_SORT_CLASSIC);
+            break;
         case ID_VIEW_FOLDER_TOP:
             setFolderSortMode(FOLDER_SORT_TOP);
             break;
@@ -490,6 +493,7 @@ static void createMainMenu() {
 
     HMENU hmFolderSort = CreatePopupMenu();
     hMenuFolderSort = hmFolderSort;
+    AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_CLASSIC, lc_str.folder_pos_classic);
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_TOP, lc_str.folder_pos_top);
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_BOTTOM, lc_str.folder_pos_bottom);
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_PLAIN, lc_str.folder_pos_plain);

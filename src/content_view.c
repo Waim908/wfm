@@ -223,9 +223,10 @@ static enum ViewStyle viewStyle = STYLE_DETAILS;
 static HMENU hContextMenu;
 static char sortColumnIdx = COLUMN_NAME_IDX;
 static bool sortAscending = true;
-// 文件夹位置策略的当前值。默认「沉底」——沿用 WFM 的经典观感，
-// 与注册表缺失该项时的默认值保持一致（见 loadFolderSortMode）。
-static enum FolderSortMode folderSortMode = FOLDER_SORT_BOTTOM;
+// 文件夹位置策略的当前值。默认「经典」= 原版 WFM 行为：分组随升降序翻转
+// （升序文件夹在前、降序在后），与注册表缺失该项时的默认值保持一致
+// （见 loadFolderSortMode）。
+static enum FolderSortMode folderSortMode = FOLDER_SORT_CLASSIC;
 
 static struct FileNode** selectedItems = NULL;
 static int numSelectedItems = 0;
@@ -1455,15 +1456,15 @@ static void saveFolderSortMode(void) {
 
 void loadFolderSortMode(void) {
     HKEY hkey;
-    // 未配置时默认「沉底」——与 folderSortMode 的静态初值保持一致
-    DWORD val = (DWORD)FOLDER_SORT_BOTTOM;
+    // 未配置时默认「经典」——与 folderSortMode 的静态初值保持一致
+    DWORD val = (DWORD)FOLDER_SORT_CLASSIC;
     DWORD size = sizeof(val);
     if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
         RegQueryValueEx(hkey, L"FolderSortMode", NULL, NULL, (BYTE*)&val, &size);
         RegCloseKey(hkey);
     }
     // 注册表可能被写入了越界值或根本不是 REG_DWORD，这里统一回落到默认值
-    if (val > (DWORD)FOLDER_SORT_PLAIN) val = (DWORD)FOLDER_SORT_BOTTOM;
+    if (val > (DWORD)FOLDER_SORT_PLAIN) val = (DWORD)FOLDER_SORT_CLASSIC;
     folderSortMode = (enum FolderSortMode)val;
 }
 
@@ -1471,18 +1472,19 @@ void updateFolderSortMenuCheckmarks(void) {
     if (!hMenuFolderSort) return;
     UINT check;
     switch (folderSortMode) {
-        case FOLDER_SORT_TOP:   check = ID_VIEW_FOLDER_TOP;    break;
-        case FOLDER_SORT_PLAIN: check = ID_VIEW_FOLDER_PLAIN;  break;
-        case FOLDER_SORT_BOTTOM:
-        default:                check = ID_VIEW_FOLDER_BOTTOM; break;
+        case FOLDER_SORT_TOP:    check = ID_VIEW_FOLDER_TOP;     break;
+        case FOLDER_SORT_BOTTOM: check = ID_VIEW_FOLDER_BOTTOM;  break;
+        case FOLDER_SORT_PLAIN:  check = ID_VIEW_FOLDER_PLAIN;   break;
+        case FOLDER_SORT_CLASSIC:
+        default:                 check = ID_VIEW_FOLDER_CLASSIC; break;
     }
-    CheckMenuRadioItem(hMenuFolderSort, ID_VIEW_FOLDER_TOP, ID_VIEW_FOLDER_PLAIN,
+    CheckMenuRadioItem(hMenuFolderSort, ID_VIEW_FOLDER_CLASSIC, ID_VIEW_FOLDER_PLAIN,
                        check, MF_BYCOMMAND);
 }
 
 void setFolderSortMode(enum FolderSortMode newMode) {
-    if (newMode < FOLDER_SORT_TOP || newMode > FOLDER_SORT_PLAIN) {
-        newMode = FOLDER_SORT_BOTTOM;
+    if (newMode < FOLDER_SORT_CLASSIC || newMode > FOLDER_SORT_PLAIN) {
+        newMode = FOLDER_SORT_CLASSIC;
     }
     folderSortMode = newMode;
 
@@ -2873,81 +2875,35 @@ static void onMenuItemShowIconClick() {
 // 旧实现的比较器会调用 ensureItemTypeLoaded（内部走 SHGetFileInfo / 路径拼接），
 // 而 qsort 必然触达每个元素 —— 连「按名称排序」都会把整个目录的图标物化一遍，
 // LVS_OWNERDATA 的懒加载设计被完全抵消（含 exe 的目录会白屏数百毫秒）。
-static void getSortTypeName(const struct ListItem* item, wchar_t* buf, int bufSize) {
-    buf[0] = L'\0';
-    if (!item || !item->node) return;
-    const struct FileNode* node = item->node;
 
-    switch (node->type) {
-        case TYPE_DIR:
-        case TYPE_PERSONAL:
-        case TYPE_USERPROFILE:
-            wcsncpy_s(buf, (size_t)bufSize, lc_str.folder, _TRUNCATE);
-            return;
-        case TYPE_DRIVE:
-            wcsncpy_s(buf, (size_t)bufSize,
-                      isCDDrivePath(node->name) ? lc_str.cd_drive : lc_str.local_drive, _TRUNCATE);
-            return;
-        case TYPE_DESKTOP:
-            wcsncpy_s(buf, (size_t)bufSize, lc_str.desktop, _TRUNCATE);
-            return;
-        case TYPE_COMPUTER:
-            wcsncpy_s(buf, (size_t)bufSize, lc_str.computer, _TRUNCATE);
-            return;
-        default:
-            break;
-    }
-
-    wchar_t* ext = wcsrchr(node->name, L'.');
-    if (!ext || ext == node->name) {
-        wcsncpy_s(buf, (size_t)bufSize, lc_str.file, _TRUNCATE);
-        return;
-    }
-    if (wcsicmp(ext, L".exe") == 0) {
-        wcsncpy_s(buf, (size_t)bufSize, lc_str.application, _TRUNCATE);
-        return;
-    }
-    if (wcsicmp(ext, L".lnk") == 0) {
-        wcsncpy_s(buf, (size_t)bufSize, lc_str.shortcut, _TRUNCATE);
-        return;
-    }
-    wchar_t upper[30] = {0};
-    strToUpper(ext + 1, upper, 30);
-    swprintfTrunc(buf, (size_t)bufSize, lc_str.fmt_file, upper);
-}
-
-static int compareTypeName(const struct ListItem* ia, const struct ListItem* ib) {
-    wchar_t typeA[64] = {0};
-    wchar_t typeB[64] = {0};
-    getSortTypeName(ia, typeA, 64);
-    getSortTypeName(ib, typeB, 64);
-    return wcscmp(typeA, typeB);
-}
-
-// 文件夹相对文件的次序，由 folderSortMode 决定：
-//   置顶   → 文件夹在前（Windows 资源管理器）
-//   沉底   → 文件夹在后（WFM 经典观感）
-//   不区分 → 一律返回 0，交给后续主键
-// 返回值必须被调用方**直接 return**，不能进 finalizeCompare —— 升降序只应
-// 作用于「同类之间」，否则降序时文件夹会被翻到另一头。
-static int compareFoldersFirst(const struct ListItem* ia, const struct ListItem* ib) {
+// 文件夹组相对文件组的次序（文件夹组 = 非 TYPE_FILE 的虚拟节点一起算）。
+// 返回值符号已按模式含方向语义，调用方必须**直接 return**，不能再过
+// finalizeCompare：
+//   经典   → 随升降序翻转：升序文件夹在前、降序在后。原版 WFM 即此行为
+//            （TYPE_DIR=0 < TYPE_FILE=1，type 差值放进统一的升降序翻转里）
+//   置顶   → 恒在前（Windows 资源管理器语义）
+//   沉底   → 恒在后
+//   不区分 → 返回 0，组间次序交还给本列主键
+static int compareFolderGroup(const struct ListItem* ia, const struct ListItem* ib) {
     if (folderSortMode == FOLDER_SORT_PLAIN) return 0;
 
     bool fa = (ia->node && ia->node->type != TYPE_FILE);
     bool fb = (ib->node && ib->node->type != TYPE_FILE);
     if (fa == fb) return 0;
 
-    // 置顶时「a 是文件夹」则 a 在前；沉底时「b 是文件夹」则 a 在前
-    bool aComesFirst = (folderSortMode == FOLDER_SORT_BOTTOM) ? fb : fa;
-    return aComesFirst ? -1 : 1;
+    int res = fa ? -1 : 1;    // 文件夹组在前
+    if (folderSortMode == FOLDER_SORT_BOTTOM) return -res;
+    if (folderSortMode == FOLDER_SORT_CLASSIC) return sortAscending ? res : -res;
+    return res;               // 置顶
 }
 
 static int compareNameOnly(const struct ListItem* ia, const struct ListItem* ib) {
     const wchar_t* na = (ia->node && ia->node->name) ? ia->node->name : L"";
     const wchar_t* nb = (ib->node && ib->node->name) ? ib->node->name : L"";
-    // 先做大小写无关比较（与资源管理器一致，README.md 会排在 abc.txt 前面），
-    // 完全相同时再按大小写敏感收敛 —— 保证是个确定的全序，qsort 不会因"相等"漂移。
-    int res = wcsicmp(na, nb);
+    // 原版用 wcscoll（项目从未 setlocale，实际即 C locale 的二进制序）。
+    // 个别 locale 下 wcscoll 可能对同形异码串返回 0，补 wcscmp 收敛成
+    // 确定的全序，qsort 不会因“相等”漂移。
+    int res = wcscoll(na, nb);
     if (res == 0) res = wcscmp(na, nb);
     return res;
 }
@@ -2956,24 +2912,26 @@ static int finalizeCompare(int res) {
     return sortAscending ? res : -res;
 }
 
-// 四个比较器统一结构：文件夹置顶 → 本列主键 → 名称 → 类型。
-// 「文件夹置顶」必须直接 return，不能进 finalizeCompare —— 否则降序时会被翻到最底部。
+// 四个比较器统一结构：文件夹组（模式相关、已含方向语义）→ 本列主键 → 名称。
+// compareFolderGroup 的结果必须直接 return，不能进 finalizeCompare。
 static int compareName(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareFoldersFirst(ia, ib);
+    int res = compareFolderGroup(ia, ib);
     if (res != 0) return res;
     res = compareNameOnly(ia, ib);
-    if (res == 0) res = compareTypeName(ia, ib);
     return finalizeCompare(res);
 }
 
+// 「类型」列主键：原版按 FileType 枚举值排，显示的类型名字符串
+// （文本文档/应用程序…）与排序解耦。
 static int compareType(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareFoldersFirst(ia, ib);
+    int res = compareFolderGroup(ia, ib);
     if (res != 0) return res;
-    res = compareTypeName(ia, ib);
+    res = (int)(ia->node ? ia->node->type : TYPE_FILE)
+        - (int)(ib->node ? ib->node->type : TYPE_FILE);
     if (res == 0) res = compareNameOnly(ia, ib);
     return finalizeCompare(res);
 }
@@ -2981,14 +2939,13 @@ static int compareType(const void* a, const void* b) {
 static int compareSize(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareFoldersFirst(ia, ib);
+    int res = compareFolderGroup(ia, ib);
     if (res != 0) return res;
-    // 主键就是大小。旧实现先比类型/名称，而且用 uint64 相减截断成 int，
-    // 两个 >2GB 的文件差值超过 INT_MAX 时排序结果随机错乱。
+    // 主键就是大小。逐字段比较而非 uint64 相减：差值超过 INT_MAX 时
+    // 截断成错误符号（原版的 int 相减 bug）。
     res = 0;
     if (ia->size < ib->size) res = -1;
     else if (ia->size > ib->size) res = 1;
-    if (res == 0) res = compareTypeName(ia, ib);
     if (res == 0) res = compareNameOnly(ia, ib);
     return finalizeCompare(res);
 }
@@ -2996,7 +2953,7 @@ static int compareSize(const void* a, const void* b) {
 static int compareDate(const void* a, const void* b) {
     const struct ListItem* ia = (const struct ListItem*)a;
     const struct ListItem* ib = (const struct ListItem*)b;
-    int res = compareFoldersFirst(ia, ib);
+    int res = compareFolderGroup(ia, ib);
     if (res != 0) return res;
     res = CompareFileTime(&ia->modifiedTime, &ib->modifiedTime);
     if (res == 0) res = compareNameOnly(ia, ib);

@@ -117,8 +117,9 @@ static inline void loadStrings_pt() {
 
     // Posição das pastas (política de ordenação)
     lc_str.folder_position = L"Posição das Pastas";
+    lc_str.folder_pos_classic = L"Seguir a direção da ordenação (clássico)";
     lc_str.folder_pos_top = L"No topo (Explorer)";
-    lc_str.folder_pos_bottom = L"No fim (WFM clássico)";
+    lc_str.folder_pos_bottom = L"No fim (fixo)";
     lc_str.folder_pos_plain = L"Não agrupar (por coluna)";
 }
 
