@@ -5,6 +5,12 @@
 
 #define ID_EVENT_PRELOADER 100
 #define PRELOADER_PERIOD 120
+#define ID_EVENT_SHOW 101
+// 进度对话框延迟显示：删除/复制少量文件往往几百毫秒内就完成，
+// 立即显示只会得到一闪而过的小窗，以及在 Winlator 上跟随而来的
+// 主窗口花屏/残影（确认框关闭 → 小窗创建销毁 → 整表重绘挤在一起）。
+// 操作在延迟内完成时，MSG_CLOSE 直接销毁隐藏窗口，进度窗全程不可见。
+#define SHOW_DELAY_MS 300
 #define CEILING(x, y) ((x+(y-1))/y)
 
 enum Msg {
@@ -120,13 +126,20 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
                     SetWindowText(hwndLabel, lc_str.msg_extracting_files);
                     break;
                 }
-                case ACTION_NONE:
-                    return (INT_PTR)FALSE;
+            case ACTION_NONE:
+                return (INT_PTR)FALSE;
             }
+
+            // 不在创建后立即 ShowWindow，由定时器延迟弹出（见 SHOW_DELAY_MS）
+            SetTimer(hwndDlg, ID_EVENT_SHOW, SHOW_DELAY_MS, NULL);
             return (INT_PTR)TRUE;
         }
         case WM_TIMER: {
-            if (wParam == ID_EVENT_PRELOADER) animatePreloader();
+            if (wParam == ID_EVENT_SHOW) {
+                KillTimer(hwndDlg, ID_EVENT_SHOW);
+                ShowWindow(hwndDlg, SW_SHOW);
+            }
+            else if (wParam == ID_EVENT_PRELOADER) animatePreloader();
             break;
         }
         case WM_COMMAND: {
@@ -142,6 +155,9 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
             DestroyWindow(hwndDlg);
             hwndDlg = NULL;
             navigateRefresh();
+            // 强制同步整窗重绘：确认框/进度窗关闭留下的残影不能指望
+            // 系统后续的激活重绘来清除（Winlator 上表现为短暂花屏）
+            RedrawWindow(hwndMain, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             break;
         }
         case MSG_NAVIGATE_REFRESH: {
@@ -380,7 +396,6 @@ void deleteFiles(struct FileNode** nodes, int count) {
         }
         SetTimer(hwndDlg, ID_EVENT_PRELOADER, PRELOADER_PERIOD, NULL);
         CreateThread(NULL, 0, fileActionTask, actionData, 0, NULL);
-        ShowWindow(hwndDlg, SW_SHOW);
     }
 }
 
@@ -428,7 +443,6 @@ void pasteFiles(wchar_t* dstDir) {
     }
     SetTimer(hwndDlg, ID_EVENT_PRELOADER, PRELOADER_PERIOD, NULL);
     CreateThread(NULL, 0, fileActionTask, actionData, 0, NULL);
-    ShowWindow(hwndDlg, SW_SHOW);
 }
 
 static void createShortcut(wchar_t* srcPath, wchar_t* dstPath) {
@@ -544,5 +558,4 @@ void extractFilesFromISOImage(wchar_t* isoPath, wchar_t* dstPath) {
     }
     SetTimer(hwndDlg, ID_EVENT_PRELOADER, PRELOADER_PERIOD, NULL);
     CreateThread(NULL, 0, fileActionTask, actionData, 0, NULL);
-    ShowWindow(hwndDlg, SW_SHOW);
 }
