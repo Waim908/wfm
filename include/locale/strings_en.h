@@ -69,6 +69,7 @@ static inline void loadStrings_en() {
     lc_str.remove_bookmark = L"Remove Bookmark";
     lc_str.bookmark_exists = L"This path is already in bookmarks";
     lc_str.bookmark_path_not_found = L"Bookmarked path does not exist: %ls";
+    lc_str.msg_cannot_launch_system_app = L"Failed to launch system application: %ls";
     lc_str.auto_open_on_start = L"Open on Startup";
     lc_str.cancel_auto_open = L"Cancel Startup";
     lc_str.auto_open_path_not_found = L"Cannot open path on startup (not found): %ls";

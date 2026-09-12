@@ -172,6 +172,7 @@ struct LC_STR {
     wchar_t* remove_bookmark;
     wchar_t* bookmark_exists;
     wchar_t* bookmark_path_not_found;
+    wchar_t* msg_cannot_launch_system_app;
     wchar_t* auto_open_on_start;
     wchar_t* cancel_auto_open;
     wchar_t* auto_open_path_not_found;

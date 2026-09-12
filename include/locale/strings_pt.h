@@ -68,6 +68,7 @@ static inline void loadStrings_pt() {
     lc_str.remove_bookmark = L"Remover Favorito";
     lc_str.bookmark_exists = L"Este caminho já está nos favoritos";
     lc_str.bookmark_path_not_found = L"Caminho favorito não existe: %ls";
+    lc_str.msg_cannot_launch_system_app = L"Falha ao iniciar o aplicativo do sistema: %ls";
     lc_str.auto_open_on_start = L"Abrir na Inicialização";
     lc_str.cancel_auto_open = L"Cancelar Inicialização";
     lc_str.auto_open_path_not_found = L"Não foi possível abrir o caminho na inicialização (não encontrado): %ls";

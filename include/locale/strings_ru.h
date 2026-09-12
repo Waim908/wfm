@@ -69,6 +69,7 @@ static inline void loadStrings_ru() {
     lc_str.remove_bookmark = L"Удалить закладку";
     lc_str.bookmark_exists = L"Этот путь уже в закладках";
     lc_str.bookmark_path_not_found = L"Путь закладки не существует: %ls";
+    lc_str.msg_cannot_launch_system_app = L"Не удалось запустить системное приложение: %ls";
     lc_str.auto_open_on_start = L"Открыть при запуске";
     lc_str.cancel_auto_open = L"Отменить запуск";
     lc_str.auto_open_path_not_found = L"Не удалось открыть путь при запуске (не найден): %ls";

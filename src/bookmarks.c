@@ -97,7 +97,8 @@ void loadBookmarks() {
         LONG result = RegEnumValue(hkey, index, valueName, &valueNameLen, NULL, &type, (LPBYTE)valueData, &valueDataLen);
         if (result != ERROR_SUCCESS) break;
         
-        if (type == REG_SZ && valueDataLen > 0) {
+        // 空串是历史遗留的无效收藏（虚拟节点曾被允许收藏），加载时一并丢弃
+        if (type == REG_SZ && valueDataLen > 0 && valueData[0] != L'\0') {
             wcsncpy_s(g_bookmarks[g_bookmarkCount].path, MAX_PATH, valueData, MAX_PATH - 1);
             wcsncpy_s(g_bookmarks[g_bookmarkCount].name, MAX_PATH, valueData, MAX_PATH - 1);
             g_bookmarkCount++;
@@ -187,6 +188,9 @@ void openAutoOpenBookmark() {
 }
 
 void addBookmark(const wchar_t* path) {
+    // 「此电脑」/盘符列表等虚拟节点没有文件系统路径（getFileNodePath
+    // 返回空串），收藏它只会产生一条打不开的空记录
+    if (!path || path[0] == L'\0') return;
     if (g_bookmarkCount >= MAX_BOOKMARKS) return;
     if (findBookmark(path) >= 0) return;
     

@@ -69,6 +69,7 @@ static inline void loadStrings_zh() {
     lc_str.remove_bookmark = L"移除收藏";
     lc_str.bookmark_exists = L"该路径已在收藏列表中";
     lc_str.bookmark_path_not_found = L"收藏的路径不存在：%ls";
+    lc_str.msg_cannot_launch_system_app = L"无法启动系统程序：%ls";
     lc_str.auto_open_on_start = L"启动时打开";
     lc_str.cancel_auto_open = L"取消启动";
     lc_str.auto_open_path_not_found = L"启动时无法打开路径（不存在）：%ls";

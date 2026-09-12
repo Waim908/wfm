@@ -86,15 +86,42 @@ void createToolButtons() {
     }   
 }
 
+// 用绝对路径启动系统程序：Winlator 等环境的 PATH 不一定包含
+// C:\windows\system32，裸名字的 ShellExecute 会静默失败（返回值 <= 32），
+// 表现为按钮点击毫无反应。先试系统目录绝对路径，失败退回裸名字，
+// 仍失败弹提示，绝不让点击无声无息。
+// dir/params 允许为 NULL：「此电脑」等虚拟节点没有文件系统路径，
+// 此时直接用系统程序的默认位置启动，而不是拒绝执行。
+static void shellLaunchSystemApp(BOOL useWindowsDir, const wchar_t* exeName, const wchar_t* params, const wchar_t* dir) {
+    wchar_t exePath[MAX_PATH] = {0};
+    UINT len = useWindowsDir ? GetWindowsDirectoryW(exePath, MAX_PATH)
+                             : GetSystemDirectoryW(exePath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) exePath[0] = L'\0';
+    else {
+        wcscat_s(exePath, MAX_PATH, L"\\");
+        wcscat_s(exePath, MAX_PATH, exeName);
+    }
+
+    HINSTANCE hInst = ShellExecute(hwndMain, L"open", exePath[0] ? exePath : exeName, params, dir, SW_SHOW);
+    if ((INT_PTR)hInst <= 32 && exePath[0]) {
+        hInst = ShellExecute(hwndMain, L"open", exeName, params, dir, SW_SHOW);
+    }
+    if ((INT_PTR)hInst <= 32) {
+        wchar_t msg[MAX_PATH + 128] = {0};
+        swprintfTrunc(msg, MAX_PATH + 128, lc_str.msg_cannot_launch_system_app,
+                      exePath[0] ? exePath : exeName);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONERROR);
+    }
+}
+
 static void onCmdButtonClick() {
     extern struct FileNode* currPathFileNode;
     if (!currPathFileNode) return;
 
     wchar_t path[MAX_PATH] = {0};
     getFileNodePath(currPathFileNode, path);
-    if (path[0] == L'\0') return;
-
-    ShellExecute(hwndMain, L"open", L"cmd.exe", NULL, path, SW_SHOW);
+    // 虚拟节点（此电脑/收藏等）path 为空串 → 不带工作目录启动
+    shellLaunchSystemApp(FALSE, L"cmd.exe", NULL, path[0] ? path : NULL);
 }
 
 static void onExplorerButtonClick() {
@@ -103,10 +130,9 @@ static void onExplorerButtonClick() {
 
     wchar_t path[MAX_PATH] = {0};
     getFileNodePath(currPathFileNode, path);
-    if (path[0] == L'\0') return;
-
-    // explorer.exe 需要将路径作为参数传递
-    ShellExecute(hwndMain, L"open", L"explorer.exe", path, NULL, SW_SHOW);
+    // explorer.exe 需要将路径作为参数传递；虚拟节点则不带参数，
+    // 让 explorer 用自己的默认位置（如“我的电脑”）
+    shellLaunchSystemApp(TRUE, L"explorer.exe", path[0] ? path : NULL, NULL);
 }
 
 void createToolbar() {
@@ -119,5 +145,7 @@ void createToolbar() {
 }
 
 void toolbarCommand(int command) {
-    (buttons[command - TBBUTTON_COMMAND_OFFSET].proc)();
+    int index = command - TBBUTTON_COMMAND_OFFSET;
+    if (index < 0 || index >= NUM_BUTTONS) return;
+    (buttons[index].proc)();
 }
