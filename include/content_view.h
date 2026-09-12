@@ -43,6 +43,11 @@ void onBookmarkButtonClick();
 void onMenuItemUnloadISOImageClick();
 void onMenuItemLocateISOImageClick();
 void clearIconCaches();
+
+// 从 PE 文件（exe/dll）提取第一个图标组（程序主图标）中最接近目标尺寸的
+// 图标。绕开 Wine 有颜色反转 bug 的 ExtractIconEx 系图标 API。返回的 HICON
+// 由调用方 DestroyIcon()，失败返回 NULL。
+HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired);
 enum ViewStyle loadViewStyle(void);
 void updateViewMenuCheckmarks(void);
 

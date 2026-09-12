@@ -67,16 +67,52 @@ static const struct IconMapping iconMap[] = {
     {ICON_SEARCH, IDI_SEARCH},
     {ICON_NAV_ARROW, IDI_NAV_ARROW},
     {ICON_BOOKMARK, IDI_BOOKMARK},
-    {ICON_CMD, IDI_CMD},
-    {ICON_EXPLORER, IDI_EXPLORER},
+    // ICON_CMD / ICON_EXPLORER 不内嵌 ico，见 loadIconFromSystemExe()
 };
 
+// CMD/Explorer 工具栏按钮的图标直接取系统 exe 的真实图标：
+// cmd.exe 在 %SystemRoot%\System32，explorer.exe 在 %SystemRoot%。
+// 依次尝试自有 PE 解析器 → shell 关联图标 → 共享应用图标，
+// 保证返回的句柄恒非 NULL，杜绝空 HICON 进 ImageList。
+static HICON loadIconFromSystemExe(const wchar_t* exeName, BOOL useWindowsDir) {
+    wchar_t dir[MAX_PATH];
+    UINT len = useWindowsDir ? GetWindowsDirectoryW(dir, MAX_PATH)
+                             : GetSystemDirectoryW(dir, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return LoadIconW(NULL, IDI_APPLICATION);
+
+    // 去掉可能的尾反斜杠，再用 strsafe 拼接，整体超界就走末级兜底
+    size_t dirLen = wcslen(dir);
+    if (dirLen > 0 && dir[dirLen - 1] == L'\\') dir[dirLen - 1] = L'\0';
+
+    wchar_t path[MAX_PATH];
+    if (SUCCEEDED(StringCchCopyW(path, MAX_PATH, dir)) &&
+        SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\")) &&
+        SUCCEEDED(StringCchCatW(path, MAX_PATH, exeName))) {
+        HICON hIcon = extractIconFromExe(path, 16, 16);
+        if (hIcon) return hIcon;
+
+        // 次选：shell 关联图标（项目已有 SHGetFileInfo 使用先例，Wine 可用）。
+        // 返回的 HICON 归调用方，与 uiIcons 的释放约定一致。
+        SHFILEINFOW sfi = {0};
+        if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon) {
+            return sfi.hIcon;
+        }
+    }
+
+    // 末选：共享应用图标（DestroyIcon 对共享图标无害失败）
+    return LoadIconW(NULL, IDI_APPLICATION);
+}
+
 void preloadIcons() {
-    for (int i = 0; i < NUM_UI_ICONS; i++) {
+    int mapCount = (int)(sizeof(iconMap) / sizeof(iconMap[0]));
+    for (int i = 0; i < mapCount; i++) {
         uiIcons[iconMap[i].iconId] = (HICON)LoadImage(
             globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
             IMAGE_ICON, 16, 16, 0);
     }
+    // 系统图标只在启动时各提取一次，之后运行期直接用缓存
+    uiIcons[ICON_CMD] = loadIconFromSystemExe(L"cmd.exe", FALSE);
+    uiIcons[ICON_EXPLORER] = loadIconFromSystemExe(L"explorer.exe", TRUE);
 }
 
 void freeUIcons() {
@@ -594,7 +630,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    
+
+    // 消息循环已退出、不会再有重绘引用，销毁 preloadIcons 缓存的 HICON
+    freeUIcons();
+
 #ifdef USE_LIBCDIO
     libcdio_free();
 #endif

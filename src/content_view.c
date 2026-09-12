@@ -2139,6 +2139,91 @@ static int extractAllIconGroupsFromPE(const wchar_t* filePath) {
     return totalGroups;
 }
 
+// ========== 单图标提取（工具栏 CMD/Explorer 按钮用） ==========
+
+struct FirstGroupIconData {
+    HRSRC hRes;
+};
+
+static BOOL CALLBACK firstGroupIconProc(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam) {
+    (void)lpType;   // 只枚举 RT_GROUP_ICON，类型参数不使用
+    struct FirstGroupIconData* data = (struct FirstGroupIconData*)lParam;
+    if (!data->hRes) data->hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
+    return !data->hRes; // 拿到第一个组（程序主图标）就停
+}
+
+// 从 PE 文件提取第一个图标组中最接近目标尺寸的图标，与上面的批量提取
+// 一样绕开 Wine 有颜色反转 bug 的 ExtractIconEx 系图标 API。只在启动时
+// 对系统 exe 各调用一次，之后由调用方缓存，运行期无重复解析。
+// 返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL。
+HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired) {
+    if (!exePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+
+    HICON result = NULL;
+    HMODULE hModule = LoadLibraryExW(exePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!hModule) return NULL;
+
+    struct FirstGroupIconData enumData = {0};
+    EnumResourceNamesW(hModule, RT_GROUP_ICON, firstGroupIconProc, (LONG_PTR)&enumData);
+
+    HGLOBAL hGroupGlob = enumData.hRes ? LoadResource(hModule, enumData.hRes) : NULL;
+    const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
+
+    if (grpDir && grpDir->idType == 1 && grpDir->idCount > 0) {
+        // 防畸形 PE：目录声明的条目数必须落在资源实际大小内，否则越界读
+        DWORD groupSize = SizeofResource(hModule, enumData.hRes);
+        if (groupSize >= 6 &&
+            (DWORD)grpDir->idCount <= (groupSize - 6) / sizeof(GRPICONDIRENTRY)) {
+
+            // 最优条目：先取不小于目标的尺寸中最小的（精确命中自然胜出），
+            // 都不够大则取最大的；尺寸并列取位深更高的。bWidth==0 表示 256。
+            int bestIndex = -1;
+            int bestOver = 0;
+            int bestDepth = 0;
+            for (WORD i = 0; i < grpDir->idCount; i++) {
+                const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
+                int w = entry->bWidth ? entry->bWidth : 256;
+                int h = entry->bHeight ? entry->bHeight : 256;
+                int side = (w > h) ? w : h;
+                int over = side - cxDesired;
+                int depth = entry->wBitCount;
+
+                BOOL take;
+                if (bestIndex < 0) take = TRUE;
+                else if ((over >= 0) != (bestOver >= 0)) take = (over >= 0);
+                else if (over != bestOver) take = (over >= 0) ? (over < bestOver) : (over > bestOver);
+                else take = (depth > bestDepth);
+                if (take) {
+                    bestIndex = i;
+                    bestOver = over;
+                    bestDepth = depth;
+                }
+            }
+
+            if (bestIndex >= 0) {
+                const GRPICONDIRENTRY* entry = &grpDir->idEntries[bestIndex];
+                HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
+                HGLOBAL hIconGlob = hIconRes ? LoadResource(hModule, hIconRes) : NULL;
+                const BYTE* iconData = hIconGlob ? (const BYTE*)LockResource(hIconGlob) : NULL;
+                DWORD iconResSize = hIconRes ? SizeofResource(hModule, hIconRes) : 0;
+
+                if (iconData && iconResSize > 0) {
+                    // 与 extractAllIconGroupsFromPE 相同的三级 fallback
+                    result = createIconFromRawData(iconData, iconResSize);
+                    if (!result) result = createIconFromPngData(iconData, iconResSize);
+                    if (!result) {
+                        result = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
+                            TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
+                    }
+                }
+            }
+        }
+    }
+
+    FreeLibrary(hModule);
+    return result;
+}
+
 // ========== Icon viewer window ==========
 
 static void cleanupIconGroups(void) {
