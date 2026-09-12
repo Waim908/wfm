@@ -14,6 +14,9 @@ static const int buttonSize = 30;
 // 故 MAX_PATH 深度下不会超过这个值；用固定上限替代变长数组（S10）。
 #define MAX_ADDR_BUTTONS (MAX_PATH / 2 + 2)
 
+// "…" 按钮宽度：路径段溢出时显示在地址栏左侧，点击弹出被隐藏的上级目录
+#define ELLIPSIS_WIDTH 24
+
 static WNDPROC OrigWndProc;
 static WNDPROC AddrEditOrigWndProc;
 static WNDPROC SearchEditOrigWndProc;
@@ -26,6 +29,10 @@ static HWND hwndSearchEdit;
 static HWND hwndGoButton;
 static HWND hwndRefreshButton;
 static HWND hwndSearchButton;
+// "…"：路径段溢出时显示在地址栏左侧，点击弹出被隐藏的上级目录
+static HWND hwndEllipsisButton;
+// 溢出时第一个可见按钮的下标（其左侧全部隐藏），由 resizeAddrButtons 维护
+static int firstVisibleAddrButton = 0;
 static HANDLE hMorePopupMenu;
 
 static bool isEditMode;
@@ -163,23 +170,86 @@ static void resizeAddrButtons() {
     RECT addrEditRect;
     GetWindowRectInParent(hwndAddrEditWrapper, &addrEditRect);
     int maxWidth = (addrEditRect.right - addrEditRect.left) - 50;
-    int currX = addrEditRect.left + 1;
-    int height = (addrEditRect.bottom - addrEditRect.top) - 2;  
+    int height = (addrEditRect.bottom - addrEditRect.top) - 2;
 
-    int currWidth = 0;
+    // 溢出时保留最深层（最右侧）的段 —— 那才是用户当前所在位置；
+    // 被挤掉的左侧段（含盘符）收进 "…" 按钮的弹出菜单，点击仍可跳转。
+    // 旧实现从右往左隐藏，恰好把当前层藏掉且无任何提示。
+    int totalWidth = 0;
+    for (int i = 0; i < numAddrButtons; i++) totalWidth += addrButtons[i].width;
+
+    int ellipsisReserve = (totalWidth > maxWidth && numAddrButtons > 0) ? ELLIPSIS_WIDTH : 0;
+    int acc = ellipsisReserve;
+    firstVisibleAddrButton = numAddrButtons;
+    while (firstVisibleAddrButton > 0 && acc + addrButtons[firstVisibleAddrButton - 1].width <= maxWidth) {
+        firstVisibleAddrButton--;
+        acc += addrButtons[firstVisibleAddrButton].width;
+    }
+    if (firstVisibleAddrButton == numAddrButtons && numAddrButtons > 0) {
+        // 宽度连最深一段都放不下：保底显示最深一段，当前层至少可见
+        firstVisibleAddrButton = numAddrButtons - 1;
+        ellipsisReserve = 0;
+    }
+
+    int currX = addrEditRect.left + 1;
+    if (ellipsisReserve > 0 && firstVisibleAddrButton > 0) {
+        SetWindowPos(hwndEllipsisButton, NULL, currX, addrEditRect.top + 1,
+                     ELLIPSIS_WIDTH, height, SWP_SHOWWINDOW);
+        currX += ELLIPSIS_WIDTH;
+    }
+    else ShowWindow(hwndEllipsisButton, SW_HIDE);
+
     for (int i = 0; i < numAddrButtons; i++) {
         struct AddrButton* button = &addrButtons[i];
-        currWidth += button->width;
-        button->isHidden = currWidth > maxWidth;
-        
+        button->isHidden = i < firstVisibleAddrButton;
+
         if (button->isHidden) {
             ShowWindow(button->hwnd, SW_HIDE);
         }
         else {
             SetWindowPos(button->hwnd, NULL, currX, addrEditRect.top + 1, button->width, height, SWP_SHOWWINDOW);
             currX += button->width;
-        }       
+        }
     }
+}
+
+// "…" 菜单：列出被宽度挤掉的左侧上级段（盘符……中间层），点击跳转。
+// TPM_RETURNCMD 同步取回选中项（原因见 createMorePopupMenu）；
+// 菜单为模态，期间目录树不会变化，菜单项直接引用节点是安全的。
+static void createHiddenAncestorsMenu() {
+    if (firstVisibleAddrButton <= 0) return;
+
+    struct FileNode* hidden[MAX_ADDR_BUTTONS];
+    int count = 0;
+    for (int i = 0; i < firstVisibleAddrButton && count < MAX_ADDR_BUTTONS; i++) {
+        // addAddrButton 的 realloc 不清零，node 由调用方补设；防御性跳过未设的段
+        if (addrButtons[i].isArrow || !addrButtons[i].node || !addrButtons[i].node->name) continue;
+        hidden[count++] = addrButtons[i].node;
+    }
+    if (count == 0) return;
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    MENUITEMINFO item = {0};
+    item.cbSize = sizeof(MENUITEMINFO);
+    item.fMask = MIIM_TYPE | MIIM_ID;
+    item.fType = MFT_STRING;
+    for (int i = 0; i < count; i++) {
+        item.dwTypeData = hidden[i]->name;
+        item.cch = (UINT)wcslen(hidden[i]->name);
+        item.wID = (UINT)(i + 1);
+        InsertMenuItem(menu, -1, TRUE, &item);
+    }
+
+    POINT cursor;
+    GetCursorPos(&cursor);
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, cursor.x, cursor.y, 0, hwndNavbar, NULL);
+    if (cmd > 0 && cmd <= count) {
+        navigateToFileNode(hidden[cmd - 1]);
+        SetFocus(hwndContentView);
+    }
+    DestroyMenu(menu);
 }
 
 static void setEditMode(bool value) {
@@ -188,6 +258,7 @@ static void setEditMode(bool value) {
         struct AddrButton* button = &addrButtons[i];
         if (!button->isHidden) ShowWindow(button->hwnd, isEditMode ? SW_HIDE : SW_SHOW);
     }
+    ShowWindow(hwndEllipsisButton, isEditMode ? SW_HIDE : SW_SHOW);
 
     SendMessage(hwndAddrEdit, EM_SETREADONLY, isEditMode ? FALSE : TRUE, 0);
 
@@ -277,7 +348,11 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 }
             }
 
-            if (hwndControl == hwndGoButton) {
+            if (hwndControl == hwndEllipsisButton) {
+                createHiddenAncestorsMenu();
+                return 0;
+            }
+            else if (hwndControl == hwndGoButton) {
                 // 固定缓冲 + 由控件裁剪长度：原来按 GetWindowTextLength 开 VLA，
                 // 极端长文本会在栈上开大数组（S10）
                 wchar_t path[MAX_PATH] = {0};
@@ -496,7 +571,11 @@ void createNavbar() {
     hwndSearchEdit = CreateWindowEx(0, WC_EDIT, NULL, WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL | ES_LEFT, 
                                     0, 0, 0, 0, hwndSearchEditWrapper, (HMENU)NULL, globalHInstance, NULL);
     SendMessage(hwndSearchEdit, WM_SETFONT, (WPARAM)hGuiFont, 0);
-    SearchEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditWndProc);           
+    SearchEditOrigWndProc = (WNDPROC)SetWindowLongPtr(hwndSearchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditWndProc);
+
+    hwndEllipsisButton = CreateWindowEx(0, WC_BUTTON, L"...", WS_CHILD | WS_CLIPSIBLINGS,
+                                        0, 0, ELLIPSIS_WIDTH, buttonSize, hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
+    SendMessage(hwndEllipsisButton, WM_SETFONT, (WPARAM)hGuiFont, 0);
 
     setEditMode(false);
     createNavButtons(); 

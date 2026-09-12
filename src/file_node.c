@@ -272,13 +272,16 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
     int count = 0;
     
     // 收集路径片段（从叶到根）
-    wchar_t* parts[32] = {0};   // 显式清零：拼接阶段按 numParts 反向读取，避免读到未初始化指针
+    // 段数上限与地址栏一致：每段在完整路径里至少占 2 字符（"x\\"），
+    // MAX_PATH 深度内不会超过 MAX_PATH/2+2 段。旧上限 32 会在深层目录
+    // （≥31 层）尚未走到根时就停止收集，拼出丢失 "C:" 前缀的路径
+    wchar_t* parts[MAX_PATH / 2 + 2] = {0};
     int numParts = 0;
     // 盘符片段需要一块在整个函数内都有效的存储（parts[] 会一直引用它到拼接阶段）。
     // 旧实现用 static，会让搜索线程与 UI 线程互相覆盖；改为函数局部。
     wchar_t drivePath[4] = {0};
-    
-    while (currNode && numParts < 32) {
+
+    while (currNode && numParts < (int)(MAX_PATH / 2 + 2)) {
         wchar_t* filename = NULL;
         
         if (currNode->name == userProfileNodeName) {
