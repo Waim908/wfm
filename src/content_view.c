@@ -3053,18 +3053,86 @@ static const BYTE* getShortcutOverlayPixels(int size, int* outSize) {
     return cached[slot];
 }
 
-// 用 shell 的快捷方式箭头在目标图标左下角合成角标。箭头是独立渲染的固定
-// 分辨率图层，与目标图标的像素网格/分辨率完全解耦：不做任何缩放，按素材
-// 原生帧整帧叠加，目标尺寸不一致时只取两者左下角的重叠区，再按标准
-// src-over alpha 合成。失败返回 NULL，调用方回退到不带角标的目标图标。
-static HICON composeShortcutIcon(HICON hTarget) {
-    if (!hTarget) return NULL;
+// 双线性缩放 32bpp RGBA 像素（预乘后插值，透明像素不会拉出脏色边）。
+// 用于把低分辨率目标图标平滑缩放到列表槽位尺寸——箭头角标随后按素材
+// 原生帧叠加，不随目标图标一起被放大成马赛克。srcSize/dstSize 为边长。
+static BYTE* scaleIconPixelsBilinear(const BYTE* src, int srcSize, int dstSize) {
+    if (srcSize <= 0 || dstSize <= 0 || srcSize == dstSize) return NULL;
+    BYTE* out = (BYTE*)malloc((size_t)dstSize * dstSize * 4);
+    if (!out) return NULL;
+
+    for (int y = 0; y < dstSize; y++) {
+        double fy = (y + 0.5) * srcSize / dstSize - 0.5;
+        if (fy < 0) fy = 0;
+        if (fy > srcSize - 1) fy = srcSize - 1;
+        int y0 = (int)fy;
+        int y1 = (y0 + 1 < srcSize) ? y0 + 1 : srcSize - 1;
+        double wy = fy - y0;
+
+        for (int x = 0; x < dstSize; x++) {
+            double fx = (x + 0.5) * srcSize / dstSize - 0.5;
+            if (fx < 0) fx = 0;
+            if (fx > srcSize - 1) fx = srcSize - 1;
+            int x0 = (int)fx;
+            int x1 = (x0 + 1 < srcSize) ? x0 + 1 : srcSize - 1;
+            double wx = fx - x0;
+
+            // 预乘 RGB 后做四角插值，再按合成 alpha 还原 straight alpha
+            double r = 0, g = 0, b = 0, a = 0;
+            const int px[2] = { x0, x1 };
+            const int py[2] = { y0, y1 };
+            const double wgt[2][2] = {
+                { (1 - wx) * (1 - wy), wx * (1 - wy) },
+                { (1 - wx) * wy,       wx * wy       },
+            };
+            for (int j = 0; j < 2; j++) {
+                for (int i = 0; i < 2; i++) {
+                    const BYTE* p = src + ((size_t)py[j] * srcSize + px[i]) * 4;
+                    double wa = wgt[j][i] * p[3];
+                    r += p[0] * wa;
+                    g += p[1] * wa;
+                    b += p[2] * wa;
+                    a += wgt[j][i] * p[3];
+                }
+            }
+            BYTE* q = out + ((size_t)y * dstSize + x) * 4;
+            unsigned outA = (unsigned)(a + 0.5);
+            if (outA) {
+                int v;
+                v = (int)(r / a + 0.5); q[0] = (BYTE)(v > 255 ? 255 : v);
+                v = (int)(g / a + 0.5); q[1] = (BYTE)(v > 255 ? 255 : v);
+                v = (int)(b / a + 0.5); q[2] = (BYTE)(v > 255 ? 255 : v);
+            }
+            else q[0] = q[1] = q[2] = 0;
+            q[3] = (BYTE)(outA > 255 ? 255 : outA);
+        }
+    }
+    return out;
+}
+
+// 用 shell 的快捷方式箭头在目标图标左下角合成角标。合成始终发生在列表
+// 槽位尺寸（outSize，16/32）上：目标图标若是低分辨率源，先双线性平滑
+// 缩放到槽位尺寸，箭头再以 shortcut.ico 原生帧的固定像素叠加——箭头的
+// 清晰度与目标图标的实际分辨率完全无关。失败返回 NULL，调用方回退到
+// 不带角标的目标图标。
+static HICON composeShortcutIcon(HICON hTarget, int outSize) {
+    if (!hTarget || outSize <= 0) return NULL;
 
     int width = 0, height = 0;
     BYTE* dst = getIconPixels(hTarget, &width, &height);
     if (!dst || width != height) {
         free(dst);
         return NULL;
+    }
+
+    if (width != outSize) {
+        BYTE* scaled = scaleIconPixelsBilinear(dst, width, outSize);
+        if (scaled) {
+            free(dst);
+            dst = scaled;
+            width = outSize;
+            height = outSize;
+        }
     }
 
     int overlaySize = 0;
@@ -3195,7 +3263,7 @@ static int getLnkIconIndex(const wchar_t* path, bool large) {
             hIcon = extractIconFromPeIndexed(iconPath, 0, cx, cx);
 
         if (hIcon) {
-            HICON hComposed = composeShortcutIcon(hIcon);
+            HICON hComposed = composeShortcutIcon(hIcon, cx);
             if (hComposed) {
                 DestroyIcon(hIcon);
                 hIcon = hComposed;
