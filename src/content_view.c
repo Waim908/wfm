@@ -2967,6 +2967,11 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
 // IDI_SHELL_SHORTCUT）。
 #define SHELL32_IDI_SHELL_SHORTCUT 30
 
+// 箭头角标尺寸：素材帧整体缩放到图标边长的这个百分比后叠在左下角。
+// 素材 glyph 占帧的一半边长略少（48px 帧为 20/48≈42%），75% 帧叠加后
+// 箭头实际约占图标边长的 31%（整帧叠加则是 50%，观感偏大）。
+#define SHORTCUT_ARROW_PERCENT 75
+
 // 整数倍盒式均值降采样（预乘后平均，避免透明像素拉暗边缘）。仅用于
 // stock icon 兜底路径的尺寸适配，正常路径直接取素材原生帧，不缩放。
 static BYTE* downsampleIconPixels(const BYTE* src, int srcSize, int dstSize) {
@@ -3000,57 +3005,46 @@ static BYTE* downsampleIconPixels(const BYTE* src, int srcSize, int dstSize) {
     return out;
 }
 
-// shell 的快捷方式箭头像素（SIID_LINK → shortcut.ico，与 Windows 同款素材；
-// 32px 帧的 glyph 恰好占满左下 1/4 象限，整帧叠加位置即正确）。16/32 各取
-// 素材原生帧并按尺寸缓存：箭头分辨率固定，不跟随目标图标的实际分辨率做
-// 重采样，画面风格与 shell 保持一致。
-static const BYTE* getShortcutOverlayPixels(int size, int* outSize) {
-    static BYTE* cached[2];      // [0] = 16px，[1] = 32px
-    static int cachedSize[2];
-    int slot = (size >= 32) ? 1 : 0;
-    int want = slot ? 32 : 16;
-    *outSize = cachedSize[slot];
-    if (cached[slot]) return cached[slot];
+// shell 的快捷方式箭头像素（SIID_LINK → shortcut.ico，与 Windows 同款素材）。
+// 取 48px 原生帧：素材各帧的 glyph 都固定在帧左下角，48px 帧占比最小
+// （20/48≈42%，16/32px 帧是 50%），且 48 能被常用叠加尺寸整除，缩小走
+// 盒式均值即可保持像素干净。加载失败退回 stock icon API。
+static const BYTE* getShortcutOverlayPixels(int* outSize) {
+    static BYTE* cached = NULL;
+    static int cachedSize = 0;
+    *outSize = cachedSize;
+    if (cached) return cached;
 
     HICON hOverlay = LoadImageW(GetModuleHandleW(L"shell32.dll"),
                                 MAKEINTRESOURCEW(SHELL32_IDI_SHELL_SHORTCUT),
-                                IMAGE_ICON, want, want, LR_DEFAULTCOLOR);
+                                IMAGE_ICON, 48, 48, LR_DEFAULTCOLOR);
     if (hOverlay) {
         int w = 0, h = 0;
         BYTE* pixels = getIconPixels(hOverlay, &w, &h);
         DestroyIcon(hOverlay);   // LoadImageW 的 HICON 非 shared，需要销毁
         if (pixels && w == h) {
-            cached[slot] = pixels;
-            cachedSize[slot] = w;
+            cached = pixels;
+            cachedSize = w;
         }
         else free(pixels);
     }
     else {
         // 非 Wine 环境（真 Windows 的 shell32 资源 ID 30 不是 shortcut.ico）：
-        // 退回 stock icon API。Wine 的 semi-stub 只回 32px，小尺寸做一次
-        // 降采样兜底。
+        // 退回 stock icon API（LoadIconW 返回共享 HICON，不能 DestroyIcon）
         SHSTOCKICONINFO sii = {0};
         sii.cbSize = sizeof(sii);
         if (SUCCEEDED(SHGetStockIconInfo(SIID_LINK, SHGSI_ICON, &sii)) && sii.hIcon) {
-            // LoadIconW 返回共享 HICON，不能 DestroyIcon
             int w = 0, h = 0;
             BYTE* pixels = getIconPixels(sii.hIcon, &w, &h);
             if (pixels && w == h) {
-                if (w == want) {
-                    cached[slot] = pixels;
-                    cachedSize[slot] = w;
-                }
-                else {
-                    cached[slot] = downsampleIconPixels(pixels, w, want);
-                    if (cached[slot]) cachedSize[slot] = want;
-                    free(pixels);
-                }
+                cached = pixels;
+                cachedSize = w;
             }
             else free(pixels);
         }
     }
-    *outSize = cachedSize[slot];
-    return cached[slot];
+    *outSize = cachedSize;
+    return cached;
 }
 
 // 双线性缩放 32bpp RGBA 像素（预乘后插值，透明像素不会拉出脏色边）。
@@ -3136,19 +3130,35 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     }
 
     int overlaySize = 0;
-    const BYTE* overlay = getShortcutOverlayPixels(width, &overlaySize);
+    const BYTE* overlay = getShortcutOverlayPixels(&overlaySize);
     if (!overlay) {
         free(dst);
         return NULL;
     }
 
-    // 固定分辨率整帧叠加：glyph 固定在素材左下角，尺寸不一致时裁掉越界部分
-    int stamp = (width < overlaySize) ? width : overlaySize;
-    int srcSkip = overlaySize - stamp;   // 覆盖层顶部跳过的行
+    // 箭头尺寸：素材帧整体缩到图标边长的 75% 后叠在左下角
+    int stamp = width * SHORTCUT_ARROW_PERCENT / 100;
+    if (stamp > width) stamp = width;
+
+    // 覆盖层缩放到叠加尺寸：整数倍用盒式均值（预乘后平均，像素干净），
+    // 否则双线性。缩放只发生在素材帧这一步，与目标图标的分辨率无关
+    const BYTE* scaled = overlay;
+    BYTE* scaledBuf = NULL;
+    if (stamp != overlaySize) {
+        if (overlaySize % stamp == 0) scaledBuf = downsampleIconPixels(overlay, overlaySize, stamp);
+        else scaledBuf = scaleIconPixelsBilinear(overlay, overlaySize, stamp);
+        if (!scaledBuf) {
+            free(dst);
+            return NULL;
+        }
+        scaled = scaledBuf;
+    }
+
+    // 标准 src-over alpha 合成，固定在左下角（glyph 在素材帧内自带定位）
     int dstSkip = width - stamp;
     for (int y = 0; y < stamp; y++) {
         for (int x = 0; x < stamp; x++) {
-            const BYTE* s = overlay + ((size_t)(y + srcSkip) * overlaySize + x) * 4;
+            const BYTE* s = scaled + ((size_t)y * stamp + x) * 4;
             BYTE* d = dst + ((size_t)(y + dstSkip) * width + x) * 4;
             unsigned aO = s[3];
             if (!aO) continue;
@@ -3163,6 +3173,7 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
             d[3] = (BYTE)outA;
         }
     }
+    free(scaledBuf);
 
     // 合成结果转 HICON（CreateIconIndirect 复制位图，随后即可释放）
     HICON result = NULL;
