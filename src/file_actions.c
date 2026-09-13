@@ -37,10 +37,8 @@ struct ActionData {
 static HWND hwndDlg;
 static HICON preloaderIcons[8] = {0};
 static int preloaderIconIndex = 0;
-static wchar_t** clipboard = NULL;
-static int clipboardSize = 0;
-static bool clipboardIsCut = false;
 static struct ActionData* actionData = NULL;
+static UINT cfDropEffect = 0;   // "Preferred DropEffect" 注册格式 id 缓存
 
 extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
@@ -50,56 +48,230 @@ static void animatePreloader() {
     preloaderIconIndex = (preloaderIconIndex + 1) % 8;
 }
 
+// ===== 系统剪贴板（CF_HDROP）实现 =====
+// 与 Windows 资源管理器同款格式：文件列表放 CF_HDROP，剪切/复制语义放
+// "Preferred DropEffect" 注册格式。Wine 的剪贴板数据由 wineserver 全局
+// 保存（dlls/user32/clipboard.c 的 marshal_data 对 CF_HDROP 走 default
+// 分支原样转发，读取进程再 unmarshal_data 本地重建），因此跨进程可用：
+// 多个 wfm 窗口之间、乃至 wfm 与资源管理器之间都能互相复制粘贴。
+
+static UINT dropEffectFormatId() {
+    if (!cfDropEffect) cfDropEffect = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+    return cfDropEffect;
+}
+
+static void freePathList(wchar_t** paths, int count) {
+    if (!paths) return;
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
+}
+
+// 把文件路径列表写入系统剪贴板。paths 各条目为单 \0 结尾即可（内部按
+// multi-sz 拼接）；cut 决定 DropEffect 写 DROPEFFECT_MOVE 还是 _COPY。
+static bool setClipboardFiles(wchar_t** paths, int count, bool cut) {
+    if (!paths || count <= 0) return false;
+
+    // multi-sz 总长：每条含结尾 \0，末尾再补一个 \0 表示列表结束
+    size_t totalChars = 1;
+    for (int i = 0; i < count; i++) totalChars += wcslen(paths[i]) + 1;
+
+    HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE, sizeof(DROPFILES) + totalChars * sizeof(wchar_t));
+    if (!hDrop) return false;
+
+    DROPFILES* df = (DROPFILES*)GlobalLock(hDrop);
+    if (!df) {
+        GlobalFree(hDrop);
+        return false;
+    }
+    ZeroMemory(df, sizeof(DROPFILES));
+    df->pFiles = sizeof(DROPFILES);
+    df->fWide = TRUE;
+    wchar_t* out = (wchar_t*)((char*)df + df->pFiles);
+    for (int i = 0; i < count; i++) {
+        size_t l = wcslen(paths[i]);
+        memcpy(out, paths[i], l * sizeof(wchar_t));
+        out += l;
+        *out++ = L'\0';
+    }
+    *out = L'\0';
+    GlobalUnlock(hDrop);
+
+    HGLOBAL hEffect = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (!hEffect) {
+        GlobalFree(hDrop);
+        return false;
+    }
+    DWORD* eff = (DWORD*)GlobalLock(hEffect);
+    if (!eff) {
+        GlobalFree(hEffect);
+        GlobalFree(hDrop);
+        return false;
+    }
+    *eff = cut ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    GlobalUnlock(hEffect);
+
+    bool ok = false;
+    if (OpenClipboard(hwndMain)) {
+        EmptyClipboard();
+        // SetClipboardData 成功后内存归系统所有；失败才需要自己释放
+        if (SetClipboardData(CF_HDROP, hDrop)) {
+            if (!SetClipboardData(dropEffectFormatId(), hEffect)) GlobalFree(hEffect);
+            ok = true;
+        }
+        else GlobalFree(hDrop);
+        CloseClipboard();
+    }
+    else {
+        GlobalFree(hDrop);
+        GlobalFree(hEffect);
+    }
+    return ok;
+}
+
+// 从系统剪贴板读出文件路径列表。每个条目按 SHFileOperation 的要求以
+// 双 \0 结尾，由调用方（或 freePathList）逐条释放；返回 NULL 表示
+// 剪贴板上没有可用文件。*outCut 依据 Preferred DropEffect 判断，与
+// Explorer 一致（未放 DropEffect 的来源一律视为复制）。
+static wchar_t** readClipboardFiles(int* outCount, bool* outCut) {
+    *outCount = 0;
+    *outCut = false;
+    if (!IsClipboardFormatAvailable(CF_HDROP) || !OpenClipboard(hwndMain)) return NULL;
+
+    wchar_t** paths = NULL;
+    int count = 0;
+    HANDLE h = GetClipboardData(CF_HDROP);
+    if (h) {
+        DROPFILES* df = (DROPFILES*)GlobalLock(h);
+        if (df) {
+            if (df->fWide) {
+                const wchar_t* s = (const wchar_t*)((const char*)df + df->pFiles);
+                for (const wchar_t* p = s; *p; p += wcslen(p) + 1) count++;
+                if (count > 0) {
+                    paths = calloc(count, sizeof(wchar_t*));
+                    if (paths) {
+                        int i = 0;
+                        for (const wchar_t* p = s; *p && i < count; p += wcslen(p) + 1) {
+                            size_t l = wcslen(p);
+                            wchar_t* copy = calloc(l + 2, sizeof(wchar_t)); // 双 \0 结尾
+                            if (!copy) break;
+                            memcpy(copy, p, l * sizeof(wchar_t));   // calloc 已补两个 \0
+                            paths[i++] = copy;
+                        }
+                        count = i;
+                    }
+                    else count = 0;
+                }
+            }
+            else {
+                // ANSI 版本（个别老程序放入的）：转换成宽字符
+                const char* s = (const char*)df + df->pFiles;
+                for (const char* p = s; *p; p += strlen(p) + 1) count++;
+                if (count > 0) {
+                    paths = calloc(count, sizeof(wchar_t*));
+                    if (paths) {
+                        int i = 0;
+                        for (const char* p = s; *p && i < count; p += strlen(p) + 1) {
+                            int wl = MultiByteToWideChar(CP_ACP, 0, p, -1, NULL, 0);
+                            wchar_t* copy = calloc(wl + 1, sizeof(wchar_t));
+                            if (!copy) break;
+                            MultiByteToWideChar(CP_ACP, 0, p, -1, copy, wl);
+                            copy[wl] = L'\0';   // 已写入一个 \0，再补一个成双 \0
+                            paths[i++] = copy;
+                        }
+                        count = i;
+                    }
+                    else count = 0;
+                }
+            }
+            GlobalUnlock(h);
+        }
+    }
+
+    if (dropEffectFormatId()) {
+        HANDLE he = GetClipboardData(dropEffectFormatId());
+        if (he) {
+            DWORD* eff = (DWORD*)GlobalLock(he);
+            if (eff) {
+                *outCut = (*eff & DROPEFFECT_MOVE) != 0;
+                GlobalUnlock(he);
+            }
+        }
+    }
+    CloseClipboard();
+
+    if (count <= 0) {
+        freePathList(paths, count);
+        return NULL;
+    }
+    *outCount = count;
+    return paths;
+}
+
 bool clipboardHasItems() {
-    return clipboardSize > 0 && clipboard != NULL;
+    return IsClipboardFormatAvailable(CF_HDROP);
 }
 
 int getClipboardCount() {
-    return clipboardHasItems() ? clipboardSize : 0;
+    int count = 0;
+    bool cut;
+    wchar_t** paths = readClipboardFiles(&count, &cut);
+    freePathList(paths, count);
+    return count;
 }
 
 bool isClipboardCut() {
-    return clipboardIsCut;
+    bool cut = false;
+    UINT fmt = dropEffectFormatId();
+    if (fmt && IsClipboardFormatAvailable(fmt) && OpenClipboard(hwndMain)) {
+        HANDLE he = GetClipboardData(fmt);
+        if (he) {
+            DWORD* eff = (DWORD*)GlobalLock(he);
+            if (eff) {
+                cut = (*eff & DROPEFFECT_MOVE) != 0;
+                GlobalUnlock(he);
+            }
+        }
+        CloseClipboard();
+    }
+    return cut;
 }
 
+// 返回指向 static 缓冲的指针，仅适合立即使用（调用方都是取完即用）
 wchar_t* getClipboardFirstPath() {
-    return clipboardHasItems() ? clipboard[0] : NULL;
+    static wchar_t first[MAX_PATH];
+    first[0] = L'\0';
+    int count = 0;
+    bool cut;
+    wchar_t** paths = readClipboardFiles(&count, &cut);
+    if (paths && count > 0) wcsncpy_s(first, MAX_PATH, paths[0], _TRUNCATE);
+    freePathList(paths, count);
+    return paths ? first : NULL;
 }
 
 void clearClipboard() {
-    if (clipboard) {
-        for (int i = 0; i < clipboardSize; i++) free(clipboard[i]);
-        MEMFREE(clipboard);
+    // 仅当剪贴板上还是文件数据时才清空，避免误伤其他程序放入的内容
+    if (IsClipboardFormatAvailable(CF_HDROP) && OpenClipboard(hwndMain)) {
+        EmptyClipboard();
+        CloseClipboard();
     }
-    clipboardSize = 0;
     onClipboardChanged();
 }
 
 static void freeActionData() {
     if (!actionData) return;
-    
-    // 对于复制操作，srcPaths 指向 clipboard，不应该被释放
-    // 对于剪切/移动操作，srcPaths 也指向 clipboard，但操作完成后应该清空 clipboard
-    // 对于删除操作，srcPaths 是单独分配的，需要被释放
-    // 对于 ISO 提取操作，srcPaths 也是单独分配的，需要被释放
-    
-    if (actionData->action == ACTION_DELETE || actionData->action == ACTION_ISO_EXTRACT) {
-        if (actionData->srcPaths) {
-            for (int i = 0; i < actionData->numSrcPaths; i++) {
-                if (actionData->srcPaths[i]) {
-                    free(actionData->srcPaths[i]);
-                }
-            }
-            free(actionData->srcPaths);
+
+    // 各操作的 srcPaths 都是独立分配的（粘贴时从系统剪贴板读出，
+    // 删除/ISO 提取时由 createPathsFromFileNodes 生成），统一释放
+    if (actionData->srcPaths) {
+        for (int i = 0; i < actionData->numSrcPaths; i++) {
+            free(actionData->srcPaths[i]);
         }
+        free(actionData->srcPaths);
     }
-    else if (actionData->action == ACTION_MOVE) {
-        // 移动操作完成后清空 clipboard
-        clearClipboard();
-        clipboardIsCut = false;
-    }
-    // 对于 ACTION_COPY，不释放 srcPaths（因为指向 clipboard）
-    
+
+    // 移动完成后按 Explorer 语义清空剪贴板（剪切+粘贴是一次性操作）
+    if (actionData->action == ACTION_MOVE) clearClipboard();
+
     if (actionData->dstPath) {
         free(actionData->dstPath);
     }
@@ -417,44 +589,55 @@ void deleteFiles(struct FileNode** nodes, int count) {
 }
 
 void copyFiles(struct FileNode** nodes, int count) {
-    clearClipboard();
-    clipboard = createPathsFromFileNodes(nodes, count);
-    // 分配失败时不能留下「计数非 0 但指针为 NULL」的状态，否则粘贴会解引用空指针
-    clipboardSize = clipboard ? count : 0;
-    clipboardIsCut = false;
+    wchar_t** paths = createPathsFromFileNodes(nodes, count);
+    if (!paths) return;
+    setClipboardFiles(paths, count, false);
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
     onClipboardChanged();
 }
 
 void cutFiles(struct FileNode** nodes, int count) {
-    clearClipboard();
-    clipboard = createPathsFromFileNodes(nodes, count);
-    clipboardSize = clipboard ? count : 0;
-    clipboardIsCut = true;
+    wchar_t** paths = createPathsFromFileNodes(nodes, count);
+    if (!paths) return;
+    setClipboardFiles(paths, count, true);
+    for (int i = 0; i < count; i++) free(paths[i]);
+    free(paths);
     onClipboardChanged();
 }
 
 void pasteFiles(wchar_t* dstDir) {
-    if (clipboardSize == 0) return;
-    if (!dstDir || dstDir[0] == L'\0') return;
-    
+    int count = 0;
+    bool isCut = false;
+    wchar_t** paths = readClipboardFiles(&count, &isCut);
+    if (!paths) return;
+    if (!dstDir || dstDir[0] == L'\0') {
+        freePathList(paths, count);
+        return;
+    }
+
     actionData = calloc(1, sizeof(struct ActionData));
-    if (!actionData) return;
-    
+    if (!actionData) {
+        freePathList(paths, count);
+        return;
+    }
+
     int len = wcslen(dstDir);
     actionData->dstPath = calloc(len + 2, sizeof(wchar_t));
     if (!actionData->dstPath) {
         free(actionData);
         actionData = NULL;
+        freePathList(paths, count);
         return;
     }
     wcscpy_s(actionData->dstPath, len + 2, dstDir);
     actionData->dstPath[len+0] = L'\0';
     actionData->dstPath[len+1] = L'\0';
-    
-    actionData->action = clipboardIsCut ? ACTION_MOVE : ACTION_COPY;
-    actionData->srcPaths = clipboard;
-    actionData->numSrcPaths = clipboardSize;
-    
+
+    actionData->action = isCut ? ACTION_MOVE : ACTION_COPY;
+    actionData->srcPaths = paths;   // 所有权移交，freeActionData 统一释放
+    actionData->numSrcPaths = count;
+
     hwndDlg = CreateDialogParam(globalHInstance, MAKEINTRESOURCE(IDD_FILE_ACTION), hwndMain, &FileActionDialogProc, 0);
     if (!hwndDlg) {
         freeActionData();
@@ -490,21 +673,25 @@ static void createShortcut(wchar_t* srcPath, wchar_t* dstPath) {
 }
 
 void pasteShortcuts(wchar_t* dstDir) {
-    if (clipboardSize == 0) return;
-    
+    int count = 0;
+    bool isCut = false;
+    wchar_t** paths = readClipboardFiles(&count, &isCut);
+    if (!paths) return;
+
     wchar_t dstPath[MAX_PATH] = {0};
     wchar_t basename[80] = {0};
-    
-    for (int i = 0; i < clipboardSize; i++) {
-        wchar_t* srcPath = clipboard[i];
+
+    for (int i = 0; i < count; i++) {
+        wchar_t* srcPath = paths[i];
         if (wcscmp(srcPath, L".lnk") != 0) {
             getBasenameFromPath(srcPath, basename, 80, true);
             swprintf_s(dstPath, MAX_PATH, L"%ls\\%ls.lnk", dstDir, basename);
-            createShortcut(srcPath, dstPath);           
+            createShortcut(srcPath, dstPath);
         }
     }
-    
-    if (clipboardIsCut) clearClipboard();
+    freePathList(paths, count);
+
+    if (isCut) clearClipboard();
     navigateRefresh();
 }
 
