@@ -128,6 +128,20 @@ static bool setClipboardFiles(wchar_t** paths, int count, bool cut) {
     return ok;
 }
 
+// 有界求长：最多扫 limit 个字符，返回值等于 limit 说明该段没有 \0 结尾
+// （畸形数据），调用方据此停止解析，避免越过剪贴板分配块读内存
+static size_t boundedWLen(const wchar_t* s, size_t limit) {
+    size_t l = 0;
+    while (l < limit && s[l]) l++;
+    return l;
+}
+
+static size_t boundedLen(const char* s, size_t limit) {
+    size_t l = 0;
+    while (l < limit && s[l]) l++;
+    return l;
+}
+
 // 从系统剪贴板读出文件路径列表。每个条目按 SHFileOperation 的要求以
 // 双 \0 结尾，由调用方（或 freePathList）逐条释放；返回 NULL 表示
 // 剪贴板上没有可用文件。*outCut 依据 Preferred DropEffect 判断，与
@@ -142,20 +156,32 @@ static wchar_t** readClipboardFiles(int* outCount, bool* outCut) {
     HANDLE h = GetClipboardData(CF_HDROP);
     if (h) {
         DROPFILES* df = (DROPFILES*)GlobalLock(h);
-        if (df) {
+        SIZE_T blockBytes = df ? GlobalSize(h) : 0;
+        if (df && blockBytes > df->pFiles) {
+            // 路径串区域的容量上限（字节）；解析一律限制在此范围内
+            SIZE_T payload = blockBytes - df->pFiles;
             if (df->fWide) {
                 const wchar_t* s = (const wchar_t*)((const char*)df + df->pFiles);
-                for (const wchar_t* p = s; *p; p += wcslen(p) + 1) count++;
+                size_t maxChars = payload / sizeof(wchar_t);
+                const wchar_t* end = s + maxChars;
+                for (const wchar_t* p = s; p < end && *p; ) {
+                    size_t l = boundedWLen(p, end - p);
+                    if (l == (size_t)(end - p)) break;  // 没有 \0 结尾，数据不完整
+                    count++;
+                    p += l + 1;
+                }
                 if (count > 0) {
                     paths = calloc(count, sizeof(wchar_t*));
                     if (paths) {
                         int i = 0;
-                        for (const wchar_t* p = s; *p && i < count; p += wcslen(p) + 1) {
-                            size_t l = wcslen(p);
+                        for (const wchar_t* p = s; *p && i < count; ) {
+                            size_t l = boundedWLen(p, end - p);
+                            if (l == (size_t)(end - p)) break;
                             wchar_t* copy = calloc(l + 2, sizeof(wchar_t)); // 双 \0 结尾
                             if (!copy) break;
                             memcpy(copy, p, l * sizeof(wchar_t));   // calloc 已补两个 \0
                             paths[i++] = copy;
+                            p += l + 1;
                         }
                         count = i;
                     }
@@ -165,18 +191,36 @@ static wchar_t** readClipboardFiles(int* outCount, bool* outCut) {
             else {
                 // ANSI 版本（个别老程序放入的）：转换成宽字符
                 const char* s = (const char*)df + df->pFiles;
-                for (const char* p = s; *p; p += strlen(p) + 1) count++;
+                const char* end = s + payload;
+                for (const char* p = s; p < end && *p; ) {
+                    size_t l = boundedLen(p, end - p);
+                    if (l == (size_t)(end - p)) break;
+                    count++;
+                    p += l + 1;
+                }
                 if (count > 0) {
                     paths = calloc(count, sizeof(wchar_t*));
                     if (paths) {
                         int i = 0;
-                        for (const char* p = s; *p && i < count; p += strlen(p) + 1) {
-                            int wl = MultiByteToWideChar(CP_ACP, 0, p, -1, NULL, 0);
-                            wchar_t* copy = calloc(wl + 1, sizeof(wchar_t));
-                            if (!copy) break;
-                            MultiByteToWideChar(CP_ACP, 0, p, -1, copy, wl);
-                            copy[wl] = L'\0';   // 已写入一个 \0，再补一个成双 \0
+                        for (const char* p = s; *p && i < count; ) {
+                            size_t l = boundedLen(p, end - p);
+                            if (l == (size_t)(end - p)) break;
+                            int wl = MultiByteToWideChar(CP_ACP, 0, p, (int)l, NULL, 0);
+                            // 转换结果最多 wl 个宽字符（不含 \0），分配 wl+1 补成双 \0
+                            wchar_t* copy = calloc(wl + 2, sizeof(wchar_t));
+                            if (!copy || wl == 0) {
+                                free(copy);
+                                break;
+                            }
+                            int got = MultiByteToWideChar(CP_ACP, 0, p, (int)l, copy, wl);
+                            if (got <= 0) {
+                                free(copy);
+                                break;
+                            }
+                            copy[got] = L'\0';      // 首个 \0
+                            copy[got + 1] = L'\0';  // 补成双 \0
                             paths[i++] = copy;
+                            p += l + 1;
                         }
                         count = i;
                     }
@@ -269,8 +313,9 @@ static void freeActionData() {
         free(actionData->srcPaths);
     }
 
-    // 移动完成后按 Explorer 语义清空剪贴板（剪切+粘贴是一次性操作）
-    if (actionData->action == ACTION_MOVE) clearClipboard();
+    // 移动完成后按 Explorer 语义清空剪贴板（剪切+粘贴是一次性操作）；
+    // 用户取消时不清，保留剪切内容以便重试
+    if (actionData->action == ACTION_MOVE && !actionData->cancel) clearClipboard();
 
     if (actionData->dstPath) {
         free(actionData->dstPath);
