@@ -250,6 +250,9 @@ static int iconViewIconSize = 32;
 // 1..5 = 固定行数。格子高度通过 LVM_SETICONSPACING 控制，行数 N 对应
 // 高度 = 图标高 + 间距 + N×行高。
 static int iconViewLabelLines = 0;
+// DrawTextW 的实际行进距离（默认不含外部行距）。updateIconViewLayout
+// 测出后存下来，绘制端用它夹住文字区底边，保证 N 行就是 N 行。
+static int iconViewLineHeight = 16;
 
 // 详细信息视图中驱动器"大小"列的磁盘占用显示模式（见 enum DriveBarMode）
 static int driveBarMode = DRIVE_BAR_GRAPH;
@@ -408,8 +411,12 @@ static void updateIconViewLayout(void) {
         HFONT oldFont = font ? (HFONT)SelectObject(hdc, font) : NULL;
 
         TEXTMETRICW tm;
+        // 行高必须与 DrawTextW 的实际行进距离一致：DrawText 默认不含外部
+        // 行距（没加 DT_EXTERNALLEADING 时每行只前进 tmHeight）。若按
+        // tmHeight+tmExternalLeading 算 N 行高度，N≥4 时累计省下的行距会
+        // 凑出一整行，绘制时就多画一行（4 行显示成 5 行）。
         if (GetTextMetricsW(hdc, &tm) && tm.tmHeight > 0)
-            lineHeight = tm.tmHeight + tm.tmExternalLeading;
+            lineHeight = tm.tmHeight;
 
         // 文字区宽度上限用行高的整数倍，随 DPI/字体缩放联动
         const int maxTextWidth = lineHeight * 10;
@@ -455,6 +462,8 @@ static void updateIconViewLayout(void) {
         if (oldFont) SelectObject(hdc, oldFont);
         ReleaseDC(hwndContentView, hdc);
     }
+
+    iconViewLineHeight = lineHeight;   // 供绘制端夹文字区底边用（取不到 DC 时也是回退值）
 
     int cx = textWidth + marginX * 2;
     int cy = iconViewIconSize + iconLabelGap + textHeight + bottomPad;
@@ -1308,11 +1317,15 @@ static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     }
 
     // 文件名：图标下方，文字区宽度与 updateIconViewLayout 的测量宽度严格
-    // 一致（格子宽 - 2×MARGIN_X），换行结果必然相同，预留高度必然够用
+    // 一致（格子宽 - 2×MARGIN_X），换行结果必然相同，预留高度必然够用。
+    // 固定行数模式把底边夹在恰好 N 行：格子自带的底部留白如果也留给
+    // DrawTextW，DT_EDITCONTROL 会把多出来的那几像素画成多出的一行
     RECT labelRc = rc;
     labelRc.top = iconY + iconSize + ICONVIEW_ICON_GAP;
     labelRc.left = rc.left + ICONVIEW_MARGIN_X;
     labelRc.right = rc.right - ICONVIEW_MARGIN_X;
+    if (iconViewLabelLines > 0)
+        labelRc.bottom = labelRc.top + iconViewLabelLines * iconViewLineHeight;
 
     if (selected) {
         RECT selRc = labelRc;
