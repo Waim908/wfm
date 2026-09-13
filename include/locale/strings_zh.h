@@ -122,6 +122,11 @@ static inline void loadStrings_zh() {
     lc_str.folder_pos_top = L"置顶（资源管理器）";
     lc_str.folder_pos_bottom = L"沉底（固定）";
     lc_str.folder_pos_plain = L"不区分（纯按本列）";
+
+    // 大图标视图选项
+    lc_str.icon_size = L"图标大小";
+    lc_str.label_lines = L"文件名行数";
+    lc_str.label_lines_auto = L"无限（自动适配）";
 }
 
 #endif

@@ -122,6 +122,11 @@ static inline void loadStrings_pt() {
     lc_str.folder_pos_top = L"No topo (Explorer)";
     lc_str.folder_pos_bottom = L"No fim (fixo)";
     lc_str.folder_pos_plain = L"Não agrupar (por coluna)";
+
+    // Opções da visualização de ícones grandes
+    lc_str.icon_size = L"Tamanho dos Ícones";
+    lc_str.label_lines = L"Linhas do Nome";
+    lc_str.label_lines_auto = L"Ilimitado (auto ajuste)";
 }
 
 #endif

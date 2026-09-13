@@ -233,6 +233,29 @@ static bool sortAscending = true;
 // （见 loadFolderSortMode）。
 static enum FolderSortMode folderSortMode = FOLDER_SORT_CLASSIC;
 
+// ---- 大图标视图设置 ----
+// 格子布局参数。TOP_PAD/MARGIN_X 对齐 Wine listview 自身的标签留白常量
+// (ICON_TOP_PADDING=4、TRAILING_LABEL_PADDING 等)：即使自绘不生效、由 Wine
+// 兜底绘制，BOTTOM_PAD 也必须覆盖它「图标高 + 6px 上留白 + 文字高 + 1px」
+// 的空间需求，否则它会把最后一行换成省略号。
+#define ICONVIEW_MARGIN_X     8
+#define ICONVIEW_TOP_PAD      4
+#define ICONVIEW_ICON_GAP     4
+#define ICONVIEW_BOTTOM_PAD   8
+
+// 图标尺寸：32 用系统大图像列表；更大尺寸自建缩放图像列表（Wine 没有
+// 超大系统图标，只能从 32px 源图标缩放，尺寸越大越模糊）。
+static int iconViewIconSize = 32;
+// 文件名行数：0 = 无限（格子高度按当前目录里最长的文件名自动测算），
+// 1..5 = 固定行数。格子高度通过 LVM_SETICONSPACING 控制，行数 N 对应
+// 高度 = 图标高 + 间距 + N×行高。
+static int iconViewLabelLines = 0;
+
+// 缩放图像列表（iconViewIconSize > 32 时启用）+ 系统 big 列表索引 → 缩放列表索引的懒映射
+static HIMAGELIST scaledImageList = NULL;
+static int* scaledIconMap = NULL;     // -1 表示尚未转换
+static int scaledIconMapCap = 0;
+
 static struct FileNode** selectedItems = NULL;
 static int numSelectedItems = 0;
 
@@ -268,6 +291,8 @@ extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 extern HMENU hMenuView;
 extern HMENU hMenuFolderSort;
+extern HMENU hMenuIconSize;
+extern HMENU hMenuLines;
 
 HWND hwndContentView = NULL;
 
@@ -276,6 +301,221 @@ static void fillFileInfo(struct FileNode* node, struct ListItem* item) {
     item->size = node->size;
     item->isHidden = node->isHidden;
     memcpy(&item->modifiedTime, &node->modifiedTime, sizeof(FILETIME));
+}
+
+// ---- 大图标视图：缩放图像列表 + 格子尺寸计算 ----
+
+static bool isScaledLargeIconView(void) {
+    return viewStyle == STYLE_LARGE_ICON && iconViewIconSize != 32;
+}
+
+static void resetScaledIconList(void) {
+    // 只能在列表控件已改挂其他图像列表之后调用（set 函数里先 reset 再 refresh）
+    if (scaledImageList) {
+        ImageList_Destroy(scaledImageList);
+        scaledImageList = NULL;
+    }
+    free(scaledIconMap);
+    scaledIconMap = NULL;
+    scaledIconMapCap = 0;
+}
+
+static HIMAGELIST getScaledImageList(void) {
+    if (!scaledImageList) {
+        // ILC_COLOR32 无掩码列表：加入的是带 alpha 的图标拷贝
+        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 32, 16);
+    }
+    return scaledImageList;
+}
+
+// 把系统 big 列表里的图标按需缩放进自建列表，返回自建列表内的索引。
+// 映射按系统索引缓存 —— 系统列表的索引在整个会话中稳定，清扩展名缓存
+// 不影响它，只有重建缩放列表时才需要重置映射。
+static int getScaledIconIndex(int sysIcon) {
+    HIMAGELIST himlBig = NULL, himlSmall = NULL;
+    Shell_GetImageLists(&himlBig, &himlSmall);
+    if (!himlBig || sysIcon < 0) return sysIcon;
+
+    int count = ImageList_GetImageCount(himlBig);
+    if (sysIcon >= count) return sysIcon;
+
+    if (!scaledIconMap || scaledIconMapCap < count) {
+        int* tmp = realloc(scaledIconMap, count * sizeof(int));
+        if (!tmp) return sysIcon;
+        for (int i = scaledIconMapCap; i < count; i++) tmp[i] = -1;
+        scaledIconMap = tmp;
+        scaledIconMapCap = count;
+    }
+    if (scaledIconMap[sysIcon] >= 0) return scaledIconMap[sysIcon];
+
+    HIMAGELIST himl = getScaledImageList();
+    if (!himl) return sysIcon;
+
+    HICON hicon = ImageList_GetIcon(himlBig, sysIcon, ILD_TRANSPARENT);
+    if (!hicon) return sysIcon;
+    // CopyImage：目标尺寸与原图不同时按位块拉伸缩放
+    HICON scaled = (HICON)CopyImage(hicon, IMAGE_ICON, iconViewIconSize, iconViewIconSize, 0);
+    DestroyIcon(hicon);
+    if (!scaled) return sysIcon;
+
+    int idx = ImageList_AddIcon(himl, scaled);
+    DestroyIcon(scaled);
+    if (idx < 0) return sysIcon;
+
+    scaledIconMap[sysIcon] = idx;
+    return idx;
+}
+
+// 计算并应用大图标视图的格子尺寸（LVM_SETICONSPACING）。
+// 宽度按当前目录最长文件名的单行宽度自适应（夹在图标宽与上限之间），
+// 高度按该宽度下实际换行数自适应 —— 短名目录紧凑，长名目录宽而不高。
+// 行数固定（1..5）时高度 = N×行高，超出部分绘制时加省略号；
+// 「无限」时任何长度的文件名都完整显示。
+static void updateIconViewLayout(void) {
+    if (viewStyle != STYLE_LARGE_ICON || !hwndContentView) return;
+
+    const int marginX = ICONVIEW_MARGIN_X;
+    const int iconLabelGap = ICONVIEW_ICON_GAP;
+    const int bottomPad = ICONVIEW_BOTTOM_PAD;
+
+    int lineHeight = 16;
+    int textWidth = iconViewIconSize;  // 文字区宽度，至少与图标同宽
+    int textHeight = lineHeight;       // 至少留一行，空目录也不至于挤成 0
+
+    HDC hdc = GetDC(hwndContentView);
+    if (hdc) {
+        HFONT font = (HFONT)SendMessage(hwndContentView, WM_GETFONT, 0, 0);
+        HFONT oldFont = font ? (HFONT)SelectObject(hdc, font) : NULL;
+
+        TEXTMETRICW tm;
+        if (GetTextMetricsW(hdc, &tm) && tm.tmHeight > 0)
+            lineHeight = tm.tmHeight + tm.tmExternalLeading;
+
+        // 文字区宽度上限用行高的整数倍，随 DPI/字体缩放联动
+        const int maxTextWidth = lineHeight * 10;
+        // 安全上限：超过 64 行的文件名（正常路径不可能出现）停止拉高格子
+        const int maxAutoTextHeight = lineHeight * 64;
+
+        if (items && numItems > 0) {
+            // 先取最长文件名的单行宽度，夹在 [图标宽, 上限] 之间作为文字区宽度
+            int maxNameWidth = 0;
+            for (int i = 0; i < numItems; i++) {
+                if (!items[i].node || !items[i].node->name) continue;
+                RECT rc = {0, 0, 0, 0};
+                DrawTextW(hdc, items[i].node->name, -1, &rc, DT_CALCRECT | DT_NOPREFIX);
+                if (rc.right > maxNameWidth) maxNameWidth = rc.right;
+            }
+            textWidth = maxNameWidth;
+            if (textWidth > maxTextWidth) textWidth = maxTextWidth;
+            if (textWidth < iconViewIconSize) textWidth = iconViewIconSize;
+        }
+
+        if (iconViewLabelLines > 0) {
+            textHeight = iconViewLabelLines * lineHeight;
+        }
+        else if (items && numItems > 0) {
+            // 无限行：按文字区宽度逐个测换行后的高度，取最大值。
+            // 测量宽度与绘制宽度严格一致（都是 textWidth），测量标志与绘制
+            // 标志一致，保证画的时候永远不需要省略号。
+            for (int i = 0; i < numItems; i++) {
+                if (!items[i].node || !items[i].node->name) continue;
+                RECT rc = {0, 0, textWidth, 0};
+                int h = DrawTextW(hdc, items[i].node->name, -1, &rc,
+                                  DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+                if (h > textHeight) textHeight = h;
+                if (textHeight >= maxAutoTextHeight) { textHeight = maxAutoTextHeight; break; }
+            }
+        }
+
+        if (oldFont) SelectObject(hdc, oldFont);
+        ReleaseDC(hwndContentView, hdc);
+    }
+
+    int cx = textWidth + marginX * 2;
+    int cy = iconViewIconSize + iconLabelGap + textHeight + bottomPad;
+
+    ListView_SetIconSpacing(hwndContentView, cx, cy);
+    ListView_Arrange(hwndContentView, LVA_DEFAULT);
+    InvalidateRect(hwndContentView, NULL, TRUE);
+}
+
+static void saveIconViewSettings(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, NULL,
+                       REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS) {
+        DWORD val = (DWORD)iconViewIconSize;
+        RegSetValueEx(hkey, L"IconViewIconSize", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        val = (DWORD)iconViewLabelLines;
+        RegSetValueEx(hkey, L"IconViewLabelLines", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        RegCloseKey(hkey);
+    }
+}
+
+void loadIconViewSettings(void) {
+    HKEY hkey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+        DWORD val = 0;
+        DWORD size = sizeof(val);
+        if (RegQueryValueEx(hkey, L"IconViewIconSize", NULL, NULL, (BYTE*)&val, &size) == ERROR_SUCCESS
+            && (val == 32 || val == 48 || val == 64 || val == 96 || val == 128)) {
+            iconViewIconSize = (int)val;
+        }
+        size = sizeof(val);
+        if (RegQueryValueEx(hkey, L"IconViewLabelLines", NULL, NULL, (BYTE*)&val, &size) == ERROR_SUCCESS
+            && val <= 5) {
+            iconViewLabelLines = (int)val;
+        }
+        RegCloseKey(hkey);
+    }
+}
+
+void setIconViewIconSize(int size) {
+    if (size != 32 && size != 48 && size != 64 && size != 96 && size != 128) size = 32;
+    if (size != iconViewIconSize) {
+        iconViewIconSize = size;
+        saveIconViewSettings();
+        if (viewStyle == STYLE_LARGE_ICON) {
+            resetScaledIconList();
+            refreshContentView();   // 重新挂图像列表（内部会调用 updateIconViewLayout）
+        }
+    }
+    updateIconViewMenuCheckmarks();
+}
+
+void setIconViewLabelLines(int lines) {
+    if (lines < 0 || lines > 5) lines = 0;
+    if (lines != iconViewLabelLines) {
+        iconViewLabelLines = lines;
+        saveIconViewSettings();
+        if (viewStyle == STYLE_LARGE_ICON) updateIconViewLayout();
+    }
+    updateIconViewMenuCheckmarks();
+}
+
+void updateIconViewMenuCheckmarks(void) {
+    if (hMenuIconSize) {
+        UINT check;
+        switch (iconViewIconSize) {
+            case 48:  check = ID_VIEW_ICONSIZE_48;  break;
+            case 64:  check = ID_VIEW_ICONSIZE_64;  break;
+            case 96:  check = ID_VIEW_ICONSIZE_96;  break;
+            case 128: check = ID_VIEW_ICONSIZE_128; break;
+            default:  check = ID_VIEW_ICONSIZE_32;  break;
+        }
+        CheckMenuRadioItem(hMenuIconSize, ID_VIEW_ICONSIZE_32, ID_VIEW_ICONSIZE_128, check, MF_BYCOMMAND);
+    }
+    if (hMenuLines) {
+        UINT check;
+        switch (iconViewLabelLines) {
+            case 1:  check = ID_VIEW_LINES_1;  break;
+            case 2:  check = ID_VIEW_LINES_2;  break;
+            case 3:  check = ID_VIEW_LINES_3;  break;
+            case 4:  check = ID_VIEW_LINES_4;  break;
+            case 5:  check = ID_VIEW_LINES_5;  break;
+            default: check = ID_VIEW_LINES_AUTO; break;
+        }
+        CheckMenuRadioItem(hMenuLines, ID_VIEW_LINES_AUTO, ID_VIEW_LINES_5, check, MF_BYCOMMAND);
+    }
 }
 
 static void updateStatusbar() {
@@ -850,6 +1090,7 @@ static HBRUSH brushDriveFree = NULL;
 static HBRUSH brushDriveLow = NULL;
 static HBRUSH brushDriveMid = NULL;
 static HBRUSH brushDriveHigh = NULL;
+static HBRUSH brushIconSelLabel = NULL;   // 大图标视图选中态的标签底色
 
 static HBRUSH getUiBrush(HBRUSH* slot, COLORREF color) {
     if (!*slot) *slot = CreateSolidBrush(color);
@@ -952,6 +1193,63 @@ static void loadItemData(struct ListItem* item) {
     item->loaded = true;
 }
 
+// 大图标视图条目自绘。Wine 的 ListView 默认只给非选中项画一行截断的文件名
+// （选中后才展开多行），这与 Windows 不一致，也无法靠调整格子高度改变，
+// 所以完全接管绘制：图标居中在上，文件名多行换行铺在下方。
+static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
+    HDC hdc = nmcd->hdc;
+
+    // 不信任通知携带的矩形（Wine 各版本给的矩形不一致），直接取完整格子
+    RECT rc;
+    if (!ListView_GetItemRect(hwndContentView, nmcd->dwItemSpec, &rc, LVIR_BOUNDS))
+        rc = nmcd->rc;
+
+    bool selected = (nmcd->uItemState & CDIS_SELECTED) != 0;
+    bool focused = (nmcd->uItemState & CDIS_FOCUS) != 0;
+
+    // 图标：水平居中放在格子顶部（TOP_PAD 与 Wine 的 ICON_TOP_PADDING 一致）
+    int iconSize = iconViewIconSize;
+    int iconX = rc.left + ((rc.right - rc.left) - iconSize) / 2;
+    int iconY = rc.top + ICONVIEW_TOP_PAD;
+    if (currentImageList && item->loaded) {
+        int imageIdx = isScaledLargeIconView() ? getScaledIconIndex(item->icon) : item->icon;
+        ImageList_DrawEx(currentImageList, imageIdx, hdc, iconX, iconY, 0, 0,
+                         CLR_NONE, CLR_NONE, ILD_TRANSPARENT);
+    }
+
+    // 文件名：图标下方，文字区宽度与 updateIconViewLayout 的测量宽度严格
+    // 一致（格子宽 - 2×MARGIN_X），换行结果必然相同，预留高度必然够用
+    RECT labelRc = rc;
+    labelRc.top = iconY + iconSize + ICONVIEW_ICON_GAP;
+    labelRc.left = rc.left + ICONVIEW_MARGIN_X;
+    labelRc.right = rc.right - ICONVIEW_MARGIN_X;
+
+    if (selected) {
+        RECT selRc = labelRc;
+        selRc.left -= 2;
+        selRc.right += 2;
+        FillRect(hdc, &selRc, getUiBrush(&brushIconSelLabel, GetSysColor(COLOR_HIGHLIGHT)));
+    }
+
+    SetBkMode(hdc, TRANSPARENT);
+    if (selected) SetTextColor(hdc, GetSysColor(COLOR_HIGHLIGHTTEXT));
+    else if (item->isHidden) SetTextColor(hdc, RGB(160, 160, 160));  // 与其他视图的隐藏文件颜色一致
+    else SetTextColor(hdc, ListView_GetTextColor(hwndContentView));
+
+    // 无限行模式：不带 DT_END_ELLIPSIS、带 DT_NOCLIP —— Wine 的 DrawTextW
+    // 只在 rect 装不下剩余文字时才画省略号，这里直接让它没有任何截断手段；
+    // 固定行数模式：超出 N 行的部分正常加省略号
+    UINT fmt = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL;
+    if (iconViewLabelLines > 0) fmt |= DT_END_ELLIPSIS;
+    else fmt |= DT_NOCLIP;
+
+    HFONT hOldFont = SelectObject(hdc, hGuiFont);
+    DrawTextW(hdc, item->node->name, -1, &labelRc, fmt);
+    SelectObject(hdc, hOldFont);
+
+    if (focused) DrawFocusRect(hdc, &labelRc);
+}
+
 LRESULT contentViewNotify(NMHDR* nmhdr) {
     switch (nmhdr->code) {
         case NM_CUSTOMDRAW: {
@@ -961,6 +1259,15 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     return CDRF_NOTIFYITEMDRAW;
                 case CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
+                    // 大图标视图：完全自绘条目（Wine 默认对非选中项只画一行文件名）
+                    if (viewStyle == STYLE_LARGE_ICON) {
+                        if (idx >= 0 && idx < numItems && items[idx].node) {
+                            if (!items[idx].loaded) loadItemData(&items[idx]);
+                            drawLargeIconItem(&lvcd->nmcd, &items[idx]);
+                            return CDRF_SKIPDEFAULT;
+                        }
+                        return CDRF_DODEFAULT;
+                    }
                     if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
                         && items[idx].driveTotalBytes > 0) {
                         return CDRF_NOTIFYSUBITEMDRAW;
@@ -1037,8 +1344,10 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             // 这里保持不修改，由控件决定。
 
             if (mask & LVIF_IMAGE) {
-                nmlvdi->item.iImage = item->icon;
-            }           
+                // 大图标视图 + 自定义尺寸时，item->icon 是系统 big 列表的索引，
+                // 必须经映射转换成缩放列表里的索引
+                nmlvdi->item.iImage = isScaledLargeIconView() ? getScaledIconIndex(item->icon) : item->icon;
+            }
             
             if (mask & LVIF_TEXT) {
                 switch (nmlvdi->item.iSubItem) {
@@ -1396,13 +1705,16 @@ static void saveViewStyle(void);
 void setViewStyle(enum ViewStyle newViewStyle) {
     LONG_PTR wndstyle = GetWindowLongPtr(hwndContentView, GWL_STYLE);
     wndstyle &= ~LVS_TYPEMASK;
+    // 图标视图必须带 LVS_AUTOARRANGE：Wine 的 WM_SIZE 处理只有在该样式下
+    // 才会随窗口宽度变化重排图标，否则窗口放大后右侧留白、缩小后要横向滚动
+    wndstyle &= ~LVS_AUTOARRANGE;
 
     switch (newViewStyle) {
         case STYLE_LARGE_ICON:
-            wndstyle |= LVS_ICON;
+            wndstyle |= LVS_ICON | LVS_AUTOARRANGE;
             break;
         case STYLE_SMALL_ICON:
-            wndstyle |= LVS_SMALLICON;
+            wndstyle |= LVS_SMALLICON | LVS_AUTOARRANGE;
             break;
         case STYLE_LIST:
             wndstyle |= LVS_LIST;
@@ -1423,10 +1735,14 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     viewStyle = newViewStyle;
     refreshContentView();
 
-    // 图标视图需要重新排列：样式切换时 LISTVIEW_StyleChanged 会按旧的条目数排布
+    // 图标视图需要重新排列：样式切换时 LISTVIEW_StyleChanged 会按旧的条目数排布。
+    // 大图标视图改用 updateIconViewLayout：先按设置定格子尺寸再 Arrange。
     if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
-        ListView_Arrange(hwndContentView, LVA_DEFAULT);
-        InvalidateRect(hwndContentView, NULL, FALSE);
+        if (viewStyle == STYLE_LARGE_ICON) updateIconViewLayout();
+        else {
+            ListView_Arrange(hwndContentView, LVA_DEFAULT);
+            InvalidateRect(hwndContentView, NULL, FALSE);
+        }
     }
 
     // 持久化视图样式到注册表
@@ -3120,14 +3436,29 @@ void refreshContentView() {
 
     // 图标缓存保留（不清空），以加速相邻导航
     // 视图切换时更新图像列表
-    HIMAGELIST himlBig, himlSmall;
-    Shell_GetImageLists(&himlBig, &himlSmall);
-    
     if (viewStyle == STYLE_LARGE_ICON) {
-        currentImageList = himlBig;
-        ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
+        if (iconViewIconSize != 32) {
+            HIMAGELIST himlScaled = getScaledImageList();
+            if (himlScaled) {
+                currentImageList = himlScaled;
+            }
+            else {
+                // 自建列表失败：退回系统 32px 列表，保证功能可用
+                HIMAGELIST himlBig = NULL, himlSmall = NULL;
+                Shell_GetImageLists(&himlBig, &himlSmall);
+                currentImageList = himlBig;
+            }
+        }
+        else {
+            HIMAGELIST himlBig = NULL, himlSmall = NULL;
+            Shell_GetImageLists(&himlBig, &himlSmall);
+            currentImageList = himlBig;
+        }
+        ListView_SetImageList(hwndContentView, currentImageList, LVSIL_NORMAL);
     }
     else {
+        HIMAGELIST himlBig = NULL, himlSmall = NULL;
+        Shell_GetImageLists(&himlBig, &himlSmall);
         currentImageList = himlSmall;
         ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
     }
@@ -3138,8 +3469,10 @@ void refreshContentView() {
     // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时
     // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
     // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
+    // 大图标视图下先把格子尺寸算好（内部含 Arrange），否则 Arrange 用旧格子排布。
     if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
-        ListView_Arrange(hwndContentView, LVA_DEFAULT);
+        if (viewStyle == STYLE_LARGE_ICON) updateIconViewLayout();
+        else ListView_Arrange(hwndContentView, LVA_DEFAULT);
         ListView_SetItemCountEx(hwndContentView, numItems, 0);
     }
 

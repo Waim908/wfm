@@ -18,6 +18,9 @@ HMENU hMenuLang = NULL;
 // 「查看 → 文件夹位置」子菜单。由 content_view.c 负责打单选勾，
 // 这里只创建并暴露句柄（与 hMenuView 同一种做法）。
 HMENU hMenuFolderSort = NULL;
+// 「查看 → 图标大小」「查看 → 文件名行数」子菜单（大图标视图设置）
+HMENU hMenuIconSize = NULL;
+HMENU hMenuLines = NULL;
 static wchar_t currentLocale[16] = {0};
 
 bool g_showHiddenFiles = false;
@@ -241,6 +244,17 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_FOLDER_PLAIN:
             setFolderSortMode(FOLDER_SORT_PLAIN);
             break;
+        case ID_VIEW_ICONSIZE_32:  setIconViewIconSize(32);  break;
+        case ID_VIEW_ICONSIZE_48:  setIconViewIconSize(48);  break;
+        case ID_VIEW_ICONSIZE_64:  setIconViewIconSize(64);  break;
+        case ID_VIEW_ICONSIZE_96:  setIconViewIconSize(96);  break;
+        case ID_VIEW_ICONSIZE_128: setIconViewIconSize(128); break;
+        case ID_VIEW_LINES_AUTO: setIconViewLabelLines(0); break;
+        case ID_VIEW_LINES_1:    setIconViewLabelLines(1); break;
+        case ID_VIEW_LINES_2:    setIconViewLabelLines(2); break;
+        case ID_VIEW_LINES_3:    setIconViewLabelLines(3); break;
+        case ID_VIEW_LINES_4:    setIconViewLabelLines(4); break;
+        case ID_VIEW_LINES_5:    setIconViewLabelLines(5); break;
         case ID_MOUNT_LOCATE_ISO:
 #ifdef USE_LIBCDIO
             onMenuItemLocateISOImageClick();
@@ -504,6 +518,26 @@ static void createMainMenu() {
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_PLAIN, lc_str.folder_pos_plain);
     AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmFolderSort, lc_str.folder_position);
 
+    // 大图标视图设置（仅影响大图标视图）
+    HMENU hmIconSize = CreatePopupMenu();
+    hMenuIconSize = hmIconSize;
+    AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_32, L"32");
+    AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_48, L"48");
+    AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_64, L"64");
+    AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_96, L"96");
+    AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_128, L"128");
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmIconSize, lc_str.icon_size);
+
+    HMENU hmLines = CreatePopupMenu();
+    hMenuLines = hmLines;
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_AUTO, lc_str.label_lines_auto);
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_1, L"1");
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_2, L"2");
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_3, L"3");
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_4, L"4");
+    AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_5, L"5");
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmLines, lc_str.label_lines);
+
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
 #ifdef USE_LIBCDIO
     HMENU hmMount = CreatePopupMenu();
@@ -611,11 +645,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     
+    // 视图设置要在 setViewStyle 之前读好：大图标视图首次布局就要用到
+    loadIconViewSettings();
     setViewStyle(loadViewStyle());
     loadShowHidden();
     loadFolderSortMode();
     updateViewMenuCheckmarks();
     updateFolderSortMenuCheckmarks();
+    updateIconViewMenuCheckmarks();
     if (hMenuView) {
         CheckMenuItem(hMenuView, ID_VIEW_SHOW_HIDDEN,
             MF_BYCOMMAND | (g_showHiddenFiles ? MF_CHECKED : MF_UNCHECKED));

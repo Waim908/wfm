@@ -123,6 +123,11 @@ static inline void loadStrings_ru() {
     lc_str.folder_pos_top = L"Сверху (как в Проводнике)";
     lc_str.folder_pos_bottom = L"Снизу (фиксировано)";
     lc_str.folder_pos_plain = L"Не группировать (по столбцу)";
+
+    // Настройки крупных значков
+    lc_str.icon_size = L"Размер значков";
+    lc_str.label_lines = L"Строк имени файла";
+    lc_str.label_lines_auto = L"Без ограничений (авто)";
 }
 
 #endif

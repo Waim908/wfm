@@ -68,6 +68,19 @@
 #define ID_VIEW_FOLDER_TOP     322
 #define ID_VIEW_FOLDER_BOTTOM  323
 #define ID_VIEW_FOLDER_PLAIN   324
+
+// 大图标视图设置。两组内部各段连续，供 CheckMenuRadioItem 使用
+#define ID_VIEW_ICONSIZE_32    330
+#define ID_VIEW_ICONSIZE_48    331
+#define ID_VIEW_ICONSIZE_64    332
+#define ID_VIEW_ICONSIZE_96    333
+#define ID_VIEW_ICONSIZE_128   334
+#define ID_VIEW_LINES_AUTO     340
+#define ID_VIEW_LINES_1        341
+#define ID_VIEW_LINES_2        342
+#define ID_VIEW_LINES_3        343
+#define ID_VIEW_LINES_4        344
+#define ID_VIEW_LINES_5        345
 #define IDD_OPEN_WITH 260
 #define IDC_EDIT_PROGRAM 261
 #define IDC_BTN_BROWSE 262
@@ -222,6 +235,9 @@ struct LC_STR {
     wchar_t* folder_pos_top;
     wchar_t* folder_pos_bottom;
     wchar_t* folder_pos_plain;
+    wchar_t* icon_size;
+    wchar_t* label_lines;
+    wchar_t* label_lines_auto;
 };
 
 extern struct LC_STR lc_str;
