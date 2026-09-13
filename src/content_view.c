@@ -405,26 +405,31 @@ static void updateIconViewLayout(void) {
                 DrawTextW(hdc, items[i].node->name, -1, &rc, DT_CALCRECT | DT_NOPREFIX);
                 if (rc.right > maxNameWidth) maxNameWidth = rc.right;
             }
+            bool widthClamped = maxNameWidth > maxTextWidth;
             textWidth = maxNameWidth;
-            if (textWidth > maxTextWidth) textWidth = maxTextWidth;
+            if (widthClamped) textWidth = maxTextWidth;
             if (textWidth < iconViewIconSize) textWidth = iconViewIconSize;
-        }
 
-        if (iconViewLabelLines > 0) {
-            textHeight = iconViewLabelLines * lineHeight;
-        }
-        else if (items && numItems > 0) {
-            // 无限行：按文字区宽度逐个测换行后的高度，取最大值。
-            // 测量宽度与绘制宽度严格一致（都是 textWidth），测量标志与绘制
-            // 标志一致，保证画的时候永远不需要省略号。
-            for (int i = 0; i < numItems; i++) {
-                if (!items[i].node || !items[i].node->name) continue;
-                RECT rc = {0, 0, textWidth, 0};
-                int h = DrawTextW(hdc, items[i].node->name, -1, &rc,
-                                  DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
-                if (h > textHeight) textHeight = h;
-                if (textHeight >= maxAutoTextHeight) { textHeight = maxAutoTextHeight; break; }
+            if (iconViewLabelLines > 0) {
+                textHeight = iconViewLabelLines * lineHeight;
             }
+            else if (widthClamped) {
+                // 只有宽度触顶时名字才可能换行，需要逐个测换行高度取最大值。
+                // 未触顶时 textWidth ≥ 任何名字的单行宽度，全部单行，直接跳过。
+                // 测量宽度与绘制宽度严格一致（都是 textWidth），测量标志与绘制
+                // 标志一致，保证画的时候永远不需要省略号。
+                for (int i = 0; i < numItems; i++) {
+                    if (!items[i].node || !items[i].node->name) continue;
+                    RECT rc = {0, 0, textWidth, 0};
+                    int h = DrawTextW(hdc, items[i].node->name, -1, &rc,
+                                      DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+                    if (h > textHeight) textHeight = h;
+                    if (textHeight >= maxAutoTextHeight) { textHeight = maxAutoTextHeight; break; }
+                }
+            }
+        }
+        else if (iconViewLabelLines > 0) {
+            textHeight = iconViewLabelLines * lineHeight;
         }
 
         if (oldFont) SelectObject(hdc, oldFont);
@@ -477,6 +482,16 @@ void setIconViewIconSize(int size) {
         if (viewStyle == STYLE_LARGE_ICON) {
             resetScaledIconList();
             refreshContentView();   // 重新挂图像列表（内部会调用 updateIconViewLayout）
+        }
+        else if (scaledImageList) {
+            // 非大图标视图下重建：缩放列表此刻可能仍挂在控件的 LVSIL_NORMAL 上
+            // （从大图标视图切走时不会重挂），销毁前必须先把系统列表挂回去，
+            // 否则控件持有悬空句柄
+            resetScaledIconList();
+            HIMAGELIST himlBig = NULL, himlSmall = NULL;
+            Shell_GetImageLists(&himlBig, &himlSmall);
+            currentImageList = himlBig;
+            ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
         }
     }
     updateIconViewMenuCheckmarks();
