@@ -24,6 +24,7 @@ static inline void loadStrings_zh() {
     lc_str.copy = L"复制";
     lc_str.paste = L"粘贴";
     lc_str.paste_shortcut = L"粘贴快捷方式";
+    lc_str.clipboard_info = L"剪贴板：%ls %d 项 [%ls] ← %ls";
     lc_str.select_all = L"全选";
     lc_str.view = L"查看";
     lc_str.large_icons = L"大图标";

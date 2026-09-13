@@ -4,6 +4,7 @@
 void createToolbar();
 void createToolButtons(void);
 void toolbarCommand(int command);
+void setPasteButtonEnabled(bool enabled);
 void onUpButtonClick();
 void onCopyButtonClick();
 void onCutButtonClick();

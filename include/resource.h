@@ -143,6 +143,8 @@ struct LC_STR {
     wchar_t* copy;
     wchar_t* paste;
     wchar_t* paste_shortcut;
+    // 剪贴板状态指示：参数依次为「复制/剪切」词、条目数、首个文件名、源目录
+    wchar_t* clipboard_info;
     wchar_t* select_all;
     wchar_t* view;
     wchar_t* large_icons;

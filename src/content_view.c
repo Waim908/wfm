@@ -188,6 +188,7 @@ struct ContextMenuItem {
     wchar_t* text;
     void(*proc)();
     wchar_t* cmdData;
+    bool disabled;
 };
 
 #ifdef USE_LIBCDIO
@@ -199,26 +200,26 @@ static void onMenuItemOpenFileLocationClick();
 static void onMenuItemOpenWithClick();
 static bool isInSearchMode();
 
-static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL};
-static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL};
-static struct ContextMenuItem cmiCut = {NULL, &onMenuItemCutClick, NULL};
-static struct ContextMenuItem cmiCopy = {NULL, &onMenuItemCopyClick, NULL};
-static struct ContextMenuItem cmiCreateShortcut = {NULL, &onMenuItemCreateShortcutClick, NULL};
-static struct ContextMenuItem cmiDelete = {NULL, &onMenuItemDeleteClick, NULL};
-static struct ContextMenuItem cmiRename = {NULL, &onMenuItemRenameClick, NULL};
-static struct ContextMenuItem cmiPaste = {NULL, &onMenuItemPasteClick, NULL};
-static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcutClick, NULL};
-static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL};
-static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL};
+static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL, false};
+static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL, false};
+static struct ContextMenuItem cmiCut = {NULL, &onMenuItemCutClick, NULL, false};
+static struct ContextMenuItem cmiCopy = {NULL, &onMenuItemCopyClick, NULL, false};
+static struct ContextMenuItem cmiCreateShortcut = {NULL, &onMenuItemCreateShortcutClick, NULL, false};
+static struct ContextMenuItem cmiDelete = {NULL, &onMenuItemDeleteClick, NULL, false};
+static struct ContextMenuItem cmiRename = {NULL, &onMenuItemRenameClick, NULL, false};
+static struct ContextMenuItem cmiPaste = {NULL, &onMenuItemPasteClick, NULL, false};
+static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcutClick, NULL, false};
+static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL, false};
+static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL, false};
 #ifdef USE_LIBCDIO
-static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL};
-static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL};
+static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL, false};
+static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL, false};
 #endif
-static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL};
-static struct ContextMenuItem cmiOpenWith = {NULL, &onMenuItemOpenWithClick, NULL};
-static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL};
+static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL, false};
+static struct ContextMenuItem cmiOpenWith = {NULL, &onMenuItemOpenWithClick, NULL, false};
+static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL, false};
 static void onMenuItemImportRegClick();
-static struct ContextMenuItem cmiImportReg = {NULL, &onMenuItemImportRegClick, NULL};
+static struct ContextMenuItem cmiImportReg = {NULL, &onMenuItemImportRegClick, NULL, false};
 
 static WNDPROC OrigWndProc;
 static struct ListItem* items = NULL;
@@ -617,10 +618,110 @@ void setDriveBarMode(int mode) {
     updateDriveBarMenuCheckmarks();
 }
 
+// 长路径截短显示：状态栏/菜单宽度有限，超长路径会被硬截断而看不到
+// 关键部分。保留末尾完整的路径段（最容易辨认的部分），前面加 "..." 表示省略。
+// 例：C:\very\long\prefix\winlator\bin（maxChars=20）→ ...\winlator\bin
+static void compactPathTail(const wchar_t* path, wchar_t* out, int outSize, int maxChars) {
+    out[0] = L'\0';
+    if (!path || maxChars < 8) return;
+
+    size_t len = wcslen(path);
+    if (len <= (size_t)maxChars) {
+        swprintfTrunc(out, outSize, L"%ls", path);
+        return;
+    }
+
+    // "..." 前缀占 3 字符，剩下 maxChars-3 留给路径尾部。
+    // 从右往左找出最靠左的、能放下的组件起点（即前一个字符是 '\'）。
+    const wchar_t* keep = NULL;
+    for (const wchar_t* p = path + len; p > path; p--) {
+        if (p[-1] == L'\\' && (len - (p - path)) + 3 <= (size_t)maxChars) keep = p;
+    }
+
+    if (keep) swprintfTrunc(out, outSize, L"...%ls", keep);
+    else {
+        // 连最后一个组件都放不下：硬截取末尾 maxChars-3 个字符
+        swprintfTrunc(out, outSize, L"...%ls", path + len - (maxChars - 3));
+    }
+}
+
+// 中段截短：长路径只显示尾部会丢掉盘符，这里保留头部路径段（通常是盘符，
+// 如 "C:\"）和末尾路径段，中间用 "...\..." 连接。
+// 例：C:\Storage\0000-1111\Android\data\app\cache（maxChars=40）→ C:\...\data\app\cache
+static void compactPathMid(const wchar_t* path, wchar_t* out, int outSize, int maxChars) {
+    out[0] = L'\0';
+    if (!path || maxChars < 8) return;
+
+    size_t len = wcslen(path);
+    if (len <= (size_t)maxChars) {
+        swprintfTrunc(out, outSize, L"%ls", path);
+        return;
+    }
+
+    const wchar_t* firstSlash = wcschr(path, L'\\');
+    // 没有分隔符（纯文件名）或头部就占满预算：退化为尾部截短
+    if (!firstSlash || (firstSlash - path) + 7 > maxChars) {
+        compactPathTail(path, out, outSize, maxChars);
+        return;
+    }
+
+    // "C:\" 头部 3 字符 + "...\\" 4 字符，其余留给尾部
+    int tailBudget = maxChars - (int)(firstSlash - path) - 1 - 4;
+    wchar_t tail[MAX_PATH] = {0};
+    compactPathTail(firstSlash + 1, tail, MAX_PATH, tailBudget);
+    if (tail[0]) swprintfTrunc(out, outSize, L"%.*ls...\\%ls", (int)(firstSlash - path) + 1, path, tail);
+    else swprintfTrunc(out, outSize, L"%.*ls...", (int)(firstSlash - path) + 1, path);
+}
+
+// 取首个剪贴板条目的显示信息：截短后的源目录 + 首个文件名
+static void buildClipboardSourceDisplay(wchar_t* outDir, int dirSize, int dirMaxChars,
+                                        wchar_t* outName, int nameSize, int nameMaxChars) {
+    outDir[0] = L'\0';
+    if (outName) outName[0] = L'\0';
+
+    wchar_t* firstPath = getClipboardFirstPath();
+    if (!firstPath) return;
+
+    wchar_t srcDir[MAX_PATH] = {0};
+    getParentDirFromPath(firstPath, srcDir);
+    compactPathMid(srcDir, outDir, dirSize, dirMaxChars);
+
+    if (outName) {
+        wchar_t basename[MAX_PATH] = {0};
+        getBasenameFromPath(firstPath, basename, MAX_PATH, false);
+        compactPathTail(basename, outName, nameSize, nameMaxChars);
+    }
+}
+
 static void updateStatusbar() {
     wchar_t statusText[32] = {0};
     swprintf_s(statusText, 32, L"%d %ls", numItems, lc_str.items);
-    setStatusbarText(statusText);   
+
+    // 剪贴板有内容时在条目数后面附上来源指示（操作类型 / 条目数 /
+    // 首个文件名 / 源目录），复制或剪切后即使切到别的目录也能看到待粘贴的是什么
+    if (clipboardHasItems()) {
+        static wchar_t fullText[MAX_PATH + 192] = {0};
+        wchar_t clipText[MAX_PATH + 160] = {0};
+        wchar_t compactDir[MAX_PATH] = {0};
+        wchar_t compactName[MAX_PATH] = {0};
+        // 前半段 "N items | " 约占 20 字符，路径预算放宽到 60，
+        // 窗口不够宽时仍由状态栏自身裁剪兜底
+        buildClipboardSourceDisplay(compactDir, MAX_PATH, 60, compactName, MAX_PATH, 24);
+        swprintfTrunc(clipText, MAX_PATH + 160, lc_str.clipboard_info,
+                      isClipboardCut() ? lc_str.cut : lc_str.copy,
+                      getClipboardCount(), compactName, compactDir);
+        swprintfTrunc(fullText, MAX_PATH + 192, L"%ls | %ls", statusText, clipText);
+        setStatusbarText(fullText);
+    }
+    else setStatusbarText(statusText);
+}
+
+// 剪贴板内容变化后的 UI 同步：状态栏指示、工具栏粘贴按钮、编辑菜单。
+// file_actions 在复制/剪切/移动完成（清空剪贴板）时调用。
+void onClipboardChanged() {
+    updateStatusbar();
+    setPasteButtonEnabled(clipboardHasItems());
+    updatePasteMenuState();
 }
 
 static void freeMenuItems() {
@@ -889,8 +990,9 @@ static void addContextMenuItem(HMENU hMenu, int id, struct ContextMenuItem* cmIt
     if (!cmItem->text) return;
     MENUITEMINFO item = {0};
     item.cbSize = sizeof(MENUITEMINFO);
-    item.fMask = MIIM_TYPE | MIIM_DATA | MIIM_ID;
+    item.fMask = MIIM_TYPE | MIIM_DATA | MIIM_ID | MIIM_STATE;
     item.fType = MFT_STRING;
+    item.fState = cmItem->disabled ? MFS_DISABLED : MFS_ENABLED;
     item.dwTypeData = cmItem->text;
     item.cch = wcslen(cmItem->text);
     item.wID = id;
@@ -1139,6 +1241,23 @@ static void createContextMenu(enum ContextMenuType type) {
         }
     }
     else {
+        // 空白处右键：剪贴板为空时「粘贴」置灰；有内容时在菜单项上
+        // 直接标出操作类型 / 条目数 / 源目录，让用户知道要粘贴的是什么
+        bool hasClip = clipboardHasItems();
+        static wchar_t pasteText[MAX_PATH + 192] = {0};
+        if (hasClip) {
+            wchar_t compactDir[MAX_PATH] = {0};
+            wchar_t compactName[MAX_PATH] = {0};
+            // 菜单项太宽会撑出屏幕，预算比状态栏收得更紧
+            buildClipboardSourceDisplay(compactDir, MAX_PATH, 36, compactName, MAX_PATH, 20);
+            swprintfTrunc(pasteText, MAX_PATH + 192, lc_str.clipboard_info,
+                          isClipboardCut() ? lc_str.cut : lc_str.copy,
+                          getClipboardCount(), compactName, compactDir);
+            cmiPaste.text = pasteText;
+        }
+        else cmiPaste.text = lc_str.paste;
+        cmiPaste.disabled = !hasClip;
+        cmiPasteShortcut.disabled = !hasClip;
         addContextMenuItem(hMenu, id++, &cmiPaste, false);
         addContextMenuItem(hMenu, id++, &cmiPasteShortcut, true);
         #ifdef USE_LIBCDIO

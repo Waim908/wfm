@@ -191,6 +191,16 @@ static void switchLanguage(const wchar_t* lang);
 static void updateLangMenuCheckmarks(void);
 static void toggleShowHidden(void);
 
+static HMENU hMenuEdit = NULL;
+
+// 剪贴板为空时把「编辑」菜单里的两个粘贴项置灰，与右键菜单/工具栏联动
+void updatePasteMenuState() {
+    if (!hMenuEdit) return;
+    UINT flag = clipboardHasItems() ? MF_ENABLED : (MF_GRAYED | MF_DISABLED);
+    EnableMenuItem(hMenuEdit, ID_EDIT_PASTE, MF_BYCOMMAND | flag);
+    EnableMenuItem(hMenuEdit, ID_EDIT_PASTE_SHORTCUT, MF_BYCOMMAND | flag);
+}
+
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
         case ID_EDIT_CUT:
@@ -503,12 +513,14 @@ static void createMainMenu() {
     AppendMenu(hmFile, MF_STRING, ID_FILE_EXIT, lc_str.exit);
     
     HMENU hmEdit = CreatePopupMenu();
+    hMenuEdit = hmEdit;
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_CUT, lc_str.cut);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_COPY, lc_str.copy);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_PASTE, lc_str.paste);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_PASTE_SHORTCUT, lc_str.paste_shortcut);
     AppendMenu(hmEdit, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_SELECT_ALL, lc_str.select_all);
+    updatePasteMenuState();
     
     HMENU hmView = CreatePopupMenu();
     hMenuView = hmView;

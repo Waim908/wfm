@@ -50,12 +50,29 @@ static void animatePreloader() {
     preloaderIconIndex = (preloaderIconIndex + 1) % 8;
 }
 
+bool clipboardHasItems() {
+    return clipboardSize > 0 && clipboard != NULL;
+}
+
+int getClipboardCount() {
+    return clipboardHasItems() ? clipboardSize : 0;
+}
+
+bool isClipboardCut() {
+    return clipboardIsCut;
+}
+
+wchar_t* getClipboardFirstPath() {
+    return clipboardHasItems() ? clipboard[0] : NULL;
+}
+
 void clearClipboard() {
     if (clipboard) {
         for (int i = 0; i < clipboardSize; i++) free(clipboard[i]);
         MEMFREE(clipboard);
     }
     clipboardSize = 0;
+    onClipboardChanged();
 }
 
 static void freeActionData() {
@@ -405,6 +422,7 @@ void copyFiles(struct FileNode** nodes, int count) {
     // 分配失败时不能留下「计数非 0 但指针为 NULL」的状态，否则粘贴会解引用空指针
     clipboardSize = clipboard ? count : 0;
     clipboardIsCut = false;
+    onClipboardChanged();
 }
 
 void cutFiles(struct FileNode** nodes, int count) {
@@ -412,6 +430,7 @@ void cutFiles(struct FileNode** nodes, int count) {
     clipboard = createPathsFromFileNodes(nodes, count);
     clipboardSize = clipboard ? count : 0;
     clipboardIsCut = true;
+    onClipboardChanged();
 }
 
 void pasteFiles(wchar_t* dstDir) {

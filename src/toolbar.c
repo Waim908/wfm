@@ -83,7 +83,20 @@ void createToolButtons() {
         SendMessage(hwndToolbar, TB_INSERTBUTTON, j, (LPARAM)&tbButton);
 
         if (buttons[i].separate) SendMessage(hwndToolbar, TB_INSERTBUTTON, ++j, (LPARAM)&tbbSeparator);
-    }   
+    }
+
+    // 启动时剪贴板为空，粘贴按钮置灰
+    setPasteButtonEnabled(false);
+}
+
+// 粘贴按钮在 buttons[] 中的下标（见 onClipboardChanged 的联动逻辑）
+#define PASTE_BUTTON_INDEX 3
+
+void setPasteButtonEnabled(bool enabled) {
+    if (!hwndToolbar) return;
+    // mingw 的 commctrl.h 没有 TBSTATE_DISABLED：按钮禁用就是去掉 ENABLED 位
+    SendMessage(hwndToolbar, TB_SETSTATE, (WPARAM)(TBBUTTON_COMMAND_OFFSET + PASTE_BUTTON_INDEX),
+                MAKELPARAM(enabled ? TBSTATE_ENABLED : 0, 0));
 }
 
 // 用绝对路径启动系统程序：Winlator 等环境的 PATH 不一定包含

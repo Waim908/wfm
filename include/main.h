@@ -61,6 +61,10 @@ void navigateToPath(wchar_t* path);
 void navigateUp();
 void navigateRefresh();
 void openFileNode(struct FileNode* node);
+// 剪贴板内容变化（复制/剪切/粘贴完成）后由 file_actions 调用，
+// 负责同步状态栏指示、工具栏粘贴按钮和编辑菜单的可用状态
+void onClipboardChanged();
+void updatePasteMenuState();
 void GetWindowRectInParent(HWND hwnd, RECT* rect);
 void resizeControls();
 
