@@ -13,6 +13,8 @@
 
 ![Screenshot](wfm3.png)
 
+![Screenshot](wfm4.png)
+
 # 注册表结构（示例）
 ```
 Windows Registry Editor Version 5.00
