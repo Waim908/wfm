@@ -2963,35 +2963,99 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
     return pixels;
 }
 
-// shell 的快捷方式箭头像素（SIID_LINK → Wine shell32 的 shortcut.ico，与
-// Windows 同款素材；32px 帧的 glyph 恰好占满左下 1/4 象限，整帧叠加位置
-// 即正确）。semi-stub 的 SHGetStockIconInfo 只给 32px 一档，这里缓存一份
-// 像素复用，也避免每次调 API 的 FIXME 噪音。
-static BYTE* getShortcutOverlayPixels(int* outSize) {
-    static BYTE* cached = NULL;
-    static int cachedSize = 0;
-    *outSize = cachedSize;
-    if (cached) return cached;
+// Wine shell32 里 shortcut.ico 的资源 ID（dlls/shell32/shresdef.h 的
+// IDI_SHELL_SHORTCUT）。
+#define SHELL32_IDI_SHELL_SHORTCUT 30
 
-    SHSTOCKICONINFO sii = {0};
-    sii.cbSize = sizeof(sii);
-    if (SUCCEEDED(SHGetStockIconInfo(SIID_LINK, SHGSI_ICON, &sii)) && sii.hIcon) {
-        // LoadIconW 返回共享 HICON，不能 DestroyIcon
+// 整数倍盒式均值降采样（预乘后平均，避免透明像素拉暗边缘）。仅用于
+// stock icon 兜底路径的尺寸适配，正常路径直接取素材原生帧，不缩放。
+static BYTE* downsampleIconPixels(const BYTE* src, int srcSize, int dstSize) {
+    if (srcSize <= 0 || dstSize <= 0 || srcSize % dstSize != 0) return NULL;
+    int s = srcSize / dstSize;
+    BYTE* out = (BYTE*)malloc((size_t)dstSize * dstSize * 4);
+    if (!out) return NULL;
+    for (int y = 0; y < dstSize; y++) {
+        for (int x = 0; x < dstSize; x++) {
+            unsigned sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+            for (int dy = 0; dy < s; dy++) {
+                for (int dx = 0; dx < s; dx++) {
+                    const BYTE* p = src + ((size_t)(y * s + dy) * srcSize + x * s + dx) * 4;
+                    unsigned a = p[3];
+                    sumR += (unsigned)p[0] * a;
+                    sumG += (unsigned)p[1] * a;
+                    sumB += (unsigned)p[2] * a;
+                    sumA += a;
+                }
+            }
+            BYTE* q = out + ((size_t)y * dstSize + x) * 4;
+            if (sumA) {
+                q[0] = (BYTE)(sumR / sumA);
+                q[1] = (BYTE)(sumG / sumA);
+                q[2] = (BYTE)(sumB / sumA);
+            }
+            else q[0] = q[1] = q[2] = 0;
+            q[3] = (BYTE)(sumA / (s * s));
+        }
+    }
+    return out;
+}
+
+// shell 的快捷方式箭头像素（SIID_LINK → shortcut.ico，与 Windows 同款素材；
+// 32px 帧的 glyph 恰好占满左下 1/4 象限，整帧叠加位置即正确）。16/32 各取
+// 素材原生帧并按尺寸缓存：箭头分辨率固定，不跟随目标图标的实际分辨率做
+// 重采样，画面风格与 shell 保持一致。
+static const BYTE* getShortcutOverlayPixels(int size, int* outSize) {
+    static BYTE* cached[2];      // [0] = 16px，[1] = 32px
+    static int cachedSize[2];
+    int slot = (size >= 32) ? 1 : 0;
+    int want = slot ? 32 : 16;
+    *outSize = cachedSize[slot];
+    if (cached[slot]) return cached[slot];
+
+    HICON hOverlay = LoadImageW(GetModuleHandleW(L"shell32.dll"),
+                                MAKEINTRESOURCEW(SHELL32_IDI_SHELL_SHORTCUT),
+                                IMAGE_ICON, want, want, LR_DEFAULTCOLOR);
+    if (hOverlay) {
         int w = 0, h = 0;
-        BYTE* pixels = getIconPixels(sii.hIcon, &w, &h);
+        BYTE* pixels = getIconPixels(hOverlay, &w, &h);
+        DestroyIcon(hOverlay);   // LoadImageW 的 HICON 非 shared，需要销毁
         if (pixels && w == h) {
-            cached = pixels;
-            cachedSize = w;
+            cached[slot] = pixels;
+            cachedSize[slot] = w;
         }
         else free(pixels);
     }
-    *outSize = cachedSize;
-    return cached;
+    else {
+        // 非 Wine 环境（真 Windows 的 shell32 资源 ID 30 不是 shortcut.ico）：
+        // 退回 stock icon API。Wine 的 semi-stub 只回 32px，小尺寸做一次
+        // 降采样兜底。
+        SHSTOCKICONINFO sii = {0};
+        sii.cbSize = sizeof(sii);
+        if (SUCCEEDED(SHGetStockIconInfo(SIID_LINK, SHGSI_ICON, &sii)) && sii.hIcon) {
+            // LoadIconW 返回共享 HICON，不能 DestroyIcon
+            int w = 0, h = 0;
+            BYTE* pixels = getIconPixels(sii.hIcon, &w, &h);
+            if (pixels && w == h) {
+                if (w == want) {
+                    cached[slot] = pixels;
+                    cachedSize[slot] = w;
+                }
+                else {
+                    cached[slot] = downsampleIconPixels(pixels, w, want);
+                    if (cached[slot]) cachedSize[slot] = want;
+                    free(pixels);
+                }
+            }
+            else free(pixels);
+        }
+    }
+    *outSize = cachedSize[slot];
+    return cached[slot];
 }
 
 // 用 shell 的快捷方式箭头在目标图标左下角合成角标。箭头是独立渲染的固定
-// 像素图层：与目标图标像素网格互不干扰——32px 目标整帧叠加，16px 目标对
-// 32px 帧做 2×2 盒式均值降采样（预乘后平均，保证像素干净），再按标准
+// 分辨率图层，与目标图标的像素网格/分辨率完全解耦：不做任何缩放，按素材
+// 原生帧整帧叠加，目标尺寸不一致时只取两者左下角的重叠区，再按标准
 // src-over alpha 合成。失败返回 NULL，调用方回退到不带角标的目标图标。
 static HICON composeShortcutIcon(HICON hTarget) {
     if (!hTarget) return NULL;
@@ -3004,78 +3068,33 @@ static HICON composeShortcutIcon(HICON hTarget) {
     }
 
     int overlaySize = 0;
-    BYTE* overlay = getShortcutOverlayPixels(&overlaySize);
+    const BYTE* overlay = getShortcutOverlayPixels(width, &overlaySize);
     if (!overlay) {
         free(dst);
         return NULL;
     }
 
-    // 覆盖层缩放到目标尺寸（32→32 不变、32→16 整数倍均值，其余最近邻）
-    BYTE* scaled = overlay;
-    BYTE* scaledBuf = NULL;
-    if (width != overlaySize) {
-        scaledBuf = (BYTE*)malloc((size_t)width * height * 4);
-        if (!scaledBuf) {
-            free(dst);
-            return NULL;
-        }
-        scaled = scaledBuf;
-        if (width < overlaySize && overlaySize % width == 0) {
-            int s = overlaySize / width;
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    unsigned sumR = 0, sumG = 0, sumB = 0, sumA = 0;
-                    for (int dy = 0; dy < s; dy++) {
-                        for (int dx = 0; dx < s; dx++) {
-                            const BYTE* p = overlay + ((size_t)(y * s + dy) * overlaySize + x * s + dx) * 4;
-                            unsigned a = p[3];
-                            sumR += (unsigned)p[0] * a;
-                            sumG += (unsigned)p[1] * a;
-                            sumB += (unsigned)p[2] * a;
-                            sumA += a;
-                        }
-                    }
-                    BYTE* q = scaledBuf + ((size_t)y * width + x) * 4;
-                    if (sumA) {
-                        q[0] = (BYTE)(sumR / sumA);
-                        q[1] = (BYTE)(sumG / sumA);
-                        q[2] = (BYTE)(sumB / sumA);
-                    }
-                    else q[0] = q[1] = q[2] = 0;
-                    q[3] = (BYTE)(sumA / (s * s));
-                }
+    // 固定分辨率整帧叠加：glyph 固定在素材左下角，尺寸不一致时裁掉越界部分
+    int stamp = (width < overlaySize) ? width : overlaySize;
+    int srcSkip = overlaySize - stamp;   // 覆盖层顶部跳过的行
+    int dstSkip = width - stamp;
+    for (int y = 0; y < stamp; y++) {
+        for (int x = 0; x < stamp; x++) {
+            const BYTE* s = overlay + ((size_t)(y + srcSkip) * overlaySize + x) * 4;
+            BYTE* d = dst + ((size_t)(y + dstSkip) * width + x) * 4;
+            unsigned aO = s[3];
+            if (!aO) continue;
+            unsigned aD = d[3];
+            unsigned outA = aO + aD * (255 - aO) / 255;
+            if (!outA) {
+                d[0] = d[1] = d[2] = d[3] = 0;
+                continue;
             }
-        }
-        else {
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    const BYTE* p = overlay + ((size_t)y * overlaySize / height) * overlaySize * 4 +
-                                    (size_t)x * overlaySize / width * 4;
-                    BYTE* q = scaledBuf + ((size_t)y * width + x) * 4;
-                    q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[3] = p[3];
-                }
-            }
+            for (int c = 0; c < 3; c++)
+                d[c] = (BYTE)(((unsigned)s[c] * aO + (unsigned)d[c] * aD * (255 - aO) / 255) / outA);
+            d[3] = (BYTE)outA;
         }
     }
-
-    // 标准 src-over alpha 合成，覆盖整帧（glyph 自带左下角定位）
-    for (int i = 0; i < width * height; i++) {
-        unsigned aO = scaled[i * 4 + 3];
-        if (!aO) continue;
-        unsigned aD = dst[i * 4 + 3];
-        unsigned outA = aO + aD * (255 - aO) / 255;
-        if (!outA) {
-            dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = dst[i * 4 + 3] = 0;
-            continue;
-        }
-        for (int c = 0; c < 3; c++) {
-            unsigned oC = scaled[i * 4 + c];
-            unsigned dC = dst[i * 4 + c];
-            dst[i * 4 + c] = (BYTE)((oC * aO + dC * aD * (255 - aO) / 255) / outA);
-        }
-        dst[i * 4 + 3] = (BYTE)outA;
-    }
-    free(scaledBuf);
 
     // 合成结果转 HICON（CreateIconIndirect 复制位图，随后即可释放）
     HICON result = NULL;
