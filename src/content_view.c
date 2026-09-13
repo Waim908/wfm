@@ -251,6 +251,25 @@ static int iconViewIconSize = 32;
 // 高度 = 图标高 + 间距 + N×行高。
 static int iconViewLabelLines = 0;
 
+// 详细信息视图中驱动器"大小"列的磁盘占用显示模式（见 enum DriveBarMode）
+static int driveBarMode = DRIVE_BAR_GRAPH;
+
+// 驱动器"大小"列的文字：按显示模式生成
+static void formatDriveSizeText(struct ListItem* item) {
+    switch (driveBarMode) {
+        case DRIVE_BAR_TOTAL:
+            formatFileSize(item->driveTotalBytes, item->formattedSize);
+            break;
+        case DRIVE_BAR_NONE:
+            item->formattedSize[0] = L'\0';
+            break;
+        case DRIVE_BAR_GRAPH:
+        default:
+            formatDriveSpace(item->driveTotalBytes, item->driveFreeBytes, item->formattedSize, 64);
+            break;
+    }
+}
+
 // 缩放图像列表（iconViewIconSize > 32 时启用）+ 系统 big 列表索引 → 缩放列表索引的懒映射
 static HIMAGELIST scaledImageList = NULL;
 static int* scaledIconMap = NULL;     // -1 表示尚未转换
@@ -293,6 +312,7 @@ extern HMENU hMenuView;
 extern HMENU hMenuFolderSort;
 extern HMENU hMenuIconSize;
 extern HMENU hMenuLines;
+extern HMENU hMenuDriveBar;
 
 HWND hwndContentView = NULL;
 
@@ -531,6 +551,61 @@ void updateIconViewMenuCheckmarks(void) {
         }
         CheckMenuRadioItem(hMenuLines, ID_VIEW_LINES_AUTO, ID_VIEW_LINES_5, check, MF_BYCOMMAND);
     }
+}
+
+void updateDriveBarMenuCheckmarks(void) {
+    if (!hMenuDriveBar) return;
+    UINT check;
+    switch (driveBarMode) {
+        case DRIVE_BAR_TOTAL: check = ID_VIEW_DRIVE_BAR_TOTAL; break;
+        case DRIVE_BAR_NONE:  check = ID_VIEW_DRIVE_BAR_NONE;  break;
+        default:              check = ID_VIEW_DRIVE_BAR;       break;
+    }
+    CheckMenuRadioItem(hMenuDriveBar, ID_VIEW_DRIVE_BAR, ID_VIEW_DRIVE_BAR_NONE, check, MF_BYCOMMAND);
+}
+
+static void saveDriveBarMode(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, NULL,
+                       REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS) {
+        DWORD val = (DWORD)driveBarMode;
+        RegSetValueEx(hkey, L"ShowDriveBarMode", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+        RegCloseKey(hkey);
+    }
+}
+
+void loadDriveBarMode(void) {
+    HKEY hkey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Winlator\\WFM", 0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+        DWORD val = 0;
+        DWORD size = sizeof(val);
+        if (RegQueryValueEx(hkey, L"ShowDriveBarMode", NULL, NULL, (BYTE*)&val, &size) == ERROR_SUCCESS
+            && val <= (DWORD)DRIVE_BAR_NONE) {
+            driveBarMode = (int)val;
+        }
+        else {
+            // 迁移旧版布尔值 ShowDriveBar：0（隐藏）→ 不显示，1 → 图形条
+            size = sizeof(val);
+            if (RegQueryValueEx(hkey, L"ShowDriveBar", NULL, NULL, (BYTE*)&val, &size) == ERROR_SUCCESS)
+                driveBarMode = val ? DRIVE_BAR_GRAPH : DRIVE_BAR_NONE;
+        }
+        RegCloseKey(hkey);
+    }
+}
+
+void setDriveBarMode(int mode) {
+    if (mode < DRIVE_BAR_GRAPH || mode > DRIVE_BAR_NONE) mode = DRIVE_BAR_GRAPH;
+    if (mode != driveBarMode) {
+        driveBarMode = mode;
+        saveDriveBarMode();
+        // 已加载的驱动器条目缓存了大小文字，按新模式重算
+        for (int i = 0; i < numItems; i++) {
+            if (items[i].node && items[i].node->type == TYPE_DRIVE && items[i].driveTotalBytes > 0)
+                formatDriveSizeText(&items[i]);
+        }
+        InvalidateRect(hwndContentView, NULL, TRUE);
+    }
+    updateDriveBarMenuCheckmarks();
 }
 
 static void updateStatusbar() {
@@ -1200,7 +1275,7 @@ static void loadItemData(struct ListItem* item) {
             if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
                 item->driveTotalBytes = totalBytes.QuadPart;
                 item->driveFreeBytes = freeBytesAvail.QuadPart;
-                formatDriveSpace(totalBytes.QuadPart, freeBytesAvail.QuadPart, item->formattedSize, 64);
+                formatDriveSizeText(item);
             }
         }
     }
@@ -1283,8 +1358,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         }
                         return CDRF_DODEFAULT;
                     }
-                    if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
-                        && items[idx].driveTotalBytes > 0) {
+                    if (driveBarMode == DRIVE_BAR_GRAPH && idx >= 0 && idx < numItems
+                        && items[idx].node->type == TYPE_DRIVE && items[idx].driveTotalBytes > 0) {
                         return CDRF_NOTIFYSUBITEMDRAW;
                     }
                     // 隐藏文件用灰色文字

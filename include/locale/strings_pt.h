@@ -127,6 +127,10 @@ static inline void loadStrings_pt() {
     lc_str.icon_size = L"Tamanho dos Ícones";
     lc_str.label_lines = L"Linhas do Nome";
     lc_str.label_lines_auto = L"Ilimitado (auto ajuste)";
+    lc_str.drive_usage_bar_graph = L"Barra Gráfica de Uso";
+    lc_str.drive_usage_bar_total = L"Apenas Tamanho Total";
+    lc_str.drive_usage_bar_none = L"Oculto";
+    lc_str.drive_usage_bar = L"Exibição de Uso do Disco";
 }
 
 #endif

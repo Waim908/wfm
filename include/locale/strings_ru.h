@@ -128,6 +128,10 @@ static inline void loadStrings_ru() {
     lc_str.icon_size = L"Размер значков";
     lc_str.label_lines = L"Строк имени файла";
     lc_str.label_lines_auto = L"Без ограничений (авто)";
+    lc_str.drive_usage_bar_graph = L"Графический индикатор";
+    lc_str.drive_usage_bar_total = L"Только общий размер";
+    lc_str.drive_usage_bar_none = L"Скрыть";
+    lc_str.drive_usage_bar = L"Отображение занятости диска";
 }
 
 #endif

@@ -81,6 +81,9 @@
 #define ID_VIEW_LINES_3        343
 #define ID_VIEW_LINES_4        344
 #define ID_VIEW_LINES_5        345
+#define ID_VIEW_DRIVE_BAR      350
+#define ID_VIEW_DRIVE_BAR_TOTAL 351
+#define ID_VIEW_DRIVE_BAR_NONE  352
 #define IDD_OPEN_WITH 260
 #define IDC_EDIT_PROGRAM 261
 #define IDC_BTN_BROWSE 262
@@ -238,6 +241,10 @@ struct LC_STR {
     wchar_t* icon_size;
     wchar_t* label_lines;
     wchar_t* label_lines_auto;
+    wchar_t* drive_usage_bar;
+    wchar_t* drive_usage_bar_graph;
+    wchar_t* drive_usage_bar_total;
+    wchar_t* drive_usage_bar_none;
 };
 
 extern struct LC_STR lc_str;

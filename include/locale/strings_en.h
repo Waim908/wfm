@@ -128,6 +128,10 @@ static inline void loadStrings_en() {
     lc_str.icon_size = L"Icon Size";
     lc_str.label_lines = L"File Name Lines";
     lc_str.label_lines_auto = L"Unlimited (auto fit)";
+    lc_str.drive_usage_bar_graph = L"Graphical Usage Bar";
+    lc_str.drive_usage_bar_total = L"Total Size Only";
+    lc_str.drive_usage_bar_none = L"Hidden";
+    lc_str.drive_usage_bar = L"Drive Usage Display";
 }
 
 #endif

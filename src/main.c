@@ -21,6 +21,7 @@ HMENU hMenuFolderSort = NULL;
 // 「查看 → 图标大小」「查看 → 文件名行数」子菜单（大图标视图设置）
 HMENU hMenuIconSize = NULL;
 HMENU hMenuLines = NULL;
+HMENU hMenuDriveBar = NULL;
 static wchar_t currentLocale[16] = {0};
 
 bool g_showHiddenFiles = false;
@@ -231,6 +232,15 @@ void mainMenuCommand(WPARAM wParam) {
             break;
         case ID_VIEW_SHOW_HIDDEN:
             toggleShowHidden();
+            break;
+        case ID_VIEW_DRIVE_BAR:
+            setDriveBarMode(DRIVE_BAR_GRAPH);
+            break;
+        case ID_VIEW_DRIVE_BAR_TOTAL:
+            setDriveBarMode(DRIVE_BAR_TOTAL);
+            break;
+        case ID_VIEW_DRIVE_BAR_NONE:
+            setDriveBarMode(DRIVE_BAR_NONE);
             break;
         case ID_VIEW_FOLDER_CLASSIC:
             setFolderSortMode(FOLDER_SORT_CLASSIC);
@@ -510,6 +520,14 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_SHOW_HIDDEN, lc_str.show_hidden_files);
 
+    // 驱动器"大小"列的磁盘占用显示模式（图形条 / 仅总容量 / 不显示）
+    HMENU hmDriveBar = CreatePopupMenu();
+    hMenuDriveBar = hmDriveBar;
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR, lc_str.drive_usage_bar_graph);
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_TOTAL, lc_str.drive_usage_bar_total);
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_NONE, lc_str.drive_usage_bar_none);
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmDriveBar, lc_str.drive_usage_bar);
+
     HMENU hmFolderSort = CreatePopupMenu();
     hMenuFolderSort = hmFolderSort;
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_CLASSIC, lc_str.folder_pos_classic);
@@ -647,6 +665,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     
     // 视图设置要在 setViewStyle 之前读好：大图标视图首次布局就要用到
     loadIconViewSettings();
+    loadDriveBarMode();
     setViewStyle(loadViewStyle());
     loadShowHidden();
     loadFolderSortMode();
@@ -657,6 +676,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         CheckMenuItem(hMenuView, ID_VIEW_SHOW_HIDDEN,
             MF_BYCOMMAND | (g_showHiddenFiles ? MF_CHECKED : MF_UNCHECKED));
     }
+    updateDriveBarMenuCheckmarks();
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
     

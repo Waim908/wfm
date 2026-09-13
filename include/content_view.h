@@ -62,4 +62,15 @@ void setIconViewLabelLines(int lines);
 void loadIconViewSettings(void);
 void updateIconViewMenuCheckmarks(void);
 
+// 详细信息视图：驱动器"大小"列的磁盘占用显示模式
+enum DriveBarMode {
+    DRIVE_BAR_GRAPH = 0, // 图形化占用条 + "空闲 / 总量"文字（默认）
+    DRIVE_BAR_TOTAL = 1, // 仅显示总容量（与普通文件一致）
+    DRIVE_BAR_NONE  = 2  // "大小"列留空
+};
+
+void setDriveBarMode(int mode);
+void loadDriveBarMode(void);
+void updateDriveBarMenuCheckmarks(void);
+
 #endif
