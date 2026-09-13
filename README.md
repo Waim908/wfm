@@ -15,12 +15,17 @@
 
 # 注册表结构（示例）
 ```
-WWindows Registry Editor Version 5.00
+Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM]
 "FolderSortMode"=dword:00000000
+"IconViewIconSize"=dword:00000080
+"IconViewLabelLines"=dword:00000004
+"IconViewNameLines"=dword:00000005
+"ShowDriveBar"=dword:00000000
+"ShowDriveBarMode"=dword:00000002
 "ShowHidden"=dword:00000001
-"ViewStyle"=dword:00000003
+"ViewStyle"=dword:00000000
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM\Bookmarks]
 "Bookmark0"="Z:\\bin"
