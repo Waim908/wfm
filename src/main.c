@@ -604,6 +604,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     (void)lpCmdLine;       // 改用 GetCommandLineW()/CommandLineToArgvW 解析
     (void)nCmdShow;
     SetProcessDPIAware();
+    // COM 初始化：lnk 图标解析（IShellLink，content_view.c）与创建快捷方式
+    // （IShellLink，file_actions.c）都依赖它。真 Windows 上未初始化 apartment
+    // 的 CoCreateInstance 会直接失败（Wine 容忍裸用），这里统一补上。
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
 

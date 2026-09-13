@@ -728,7 +728,7 @@ void pasteShortcuts(wchar_t* dstDir) {
 
     for (int i = 0; i < count; i++) {
         wchar_t* srcPath = paths[i];
-        if (wcscmp(srcPath, L".lnk") != 0) {
+        if (!hasFileExtension(srcPath, L"lnk")) {
             getBasenameFromPath(srcPath, basename, 80, true);
             swprintf_s(dstPath, MAX_PATH, L"%ls\\%ls.lnk", dstDir, basename);
             createShortcut(srcPath, dstPath);
@@ -750,7 +750,7 @@ void createDesktopShortcuts(struct FileNode** nodes, int count) {
     
     for (int i = 0; i < count; i++) {
         wchar_t* srcPath = srcPaths[i];
-        if (wcscmp(srcPath, L".lnk") != 0) {
+        if (!hasFileExtension(srcPath, L"lnk")) {
             getBasenameFromPath(srcPath, basename, 80, true);
             swprintf_s(dstPath, MAX_PATH, L"%ls\\%ls.lnk", desktopPath, basename);
             createShortcut(srcPath, dstPath);           

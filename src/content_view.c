@@ -23,6 +23,9 @@ static struct {
 static int exeIconCacheCount = 0;
 static HIMAGELIST currentImageList = NULL;
 
+// lnk 快捷方式图标解析入口（实现位于文件末尾的 PE/lnk 图标提取区）
+static int getLnkIconIndex(const wchar_t* path, bool large);
+
 // 状态栏节流：搜索期间每批（100 项）都刷新一次状态栏没有意义，限制到约 5 次/秒。
 // 最终值由 MSG_SEARCH_DONE 里的 updateStatusbar() 保证正确。
 static DWORD lastStatusbarTick = 0;
@@ -58,7 +61,7 @@ static void addExtIconCache(const wchar_t* ext, int icon, const wchar_t* typeNam
     extCacheCount++;
 }
 
-static int findExeIconCache(wchar_t* path, bool large) {
+static int findExeIconCache(const wchar_t* path, bool large) {
     if (!path || !currentImageList) return -1;
     for (int i = 0; i < exeIconCacheCount; i++) {
         if (exeIconCache[i].large == large && wcsicmp(exeIconCache[i].path, path) == 0) {
@@ -68,7 +71,7 @@ static int findExeIconCache(wchar_t* path, bool large) {
     return -1;
 }
 
-static int addExeIconCache(wchar_t* path, int iconIndex, bool large) {
+static int addExeIconCache(const wchar_t* path, int iconIndex, bool large) {
     if (!path || exeIconCacheCount >= EXE_ICON_CACHE_SIZE) return iconIndex;
     wcsncpy_s(exeIconCache[exeIconCacheCount].path, MAX_PATH, path, MAX_PATH - 1);
     exeIconCache[exeIconCacheCount].iconIndex = iconIndex;
@@ -1351,6 +1354,9 @@ static void loadItemData(struct ListItem* item) {
             const wchar_t* typeName = wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
             if (cachedIcon >= 0) {
                 item->icon = cachedIcon;
+            } else if (wcsicmp(ext + 1, L"lnk") == 0) {
+                // lnk：解析目标图标 + 合成快捷方式箭头（内部含缓存与兜底）
+                item->icon = getLnkIconIndex(path, large);
             } else {
                 struct FileInfo fi = {0};
                 getFileInfo(path, TYPE_FILE, large, &fi);
@@ -2707,81 +2713,75 @@ static int extractAllIconGroupsFromPE(const wchar_t* filePath) {
     return totalGroups;
 }
 
-// ========== 单图标提取（工具栏 CMD/Explorer 按钮用） ==========
+// ========== 单图标提取（工具栏 CMD/Explorer 按钮、lnk 目标图标用） ==========
 
-struct FirstGroupIconData {
-    HRSRC hRes;
-};
-
-static BOOL CALLBACK firstGroupIconProc(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam) {
-    (void)lpType;   // 只枚举 RT_GROUP_ICON，类型参数不使用
-    struct FirstGroupIconData* data = (struct FirstGroupIconData*)lParam;
-    if (!data->hRes) data->hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
-    return !data->hRes; // 拿到第一个组（程序主图标）就停
+// ICO 条目的「最接近目标尺寸」选择：先取不小于目标的尺寸中最小的（精确命中
+// 自然胜出），都不够大则取最大的；尺寸并列取位深更高的。bWidth==0 表示 256。
+static bool isBetterIconEntry(int side, int depth, int bestSide, int bestDepth, int cxDesired) {
+    int over = side - cxDesired;
+    int bestOver = bestSide - cxDesired;
+    if ((over >= 0) != (bestOver >= 0)) return over >= 0;
+    if (over != bestOver) return (over >= 0) ? (over < bestOver) : (over > bestOver);
+    return depth > bestDepth;
 }
 
-// 从 PE 文件提取第一个图标组中最接近目标尺寸的图标，与上面的批量提取
-// 一样绕开 Wine 有颜色反转 bug 的 ExtractIconEx 系图标 API。只在启动时
-// 对系统 exe 各调用一次，之后由调用方缓存，运行期无重复解析。
+// 从 PE 文件提取第 groupIndex 个图标组（EnumResourceNamesW 的枚举顺序，与
+// extractAllIconGroupsFromPE 一致）中最接近目标尺寸的图标，与批量提取一样
+// 绕开 Wine 有颜色反转 bug 的 ExtractIconEx 系图标 API。工具栏启动时用
+// index 0（主图标），lnk 解析用 GetIconLocation 给出的索引。
 // 返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL。
-HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired) {
-    if (!exePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired) {
+    if (!pePath || groupIndex < 0 || cxDesired <= 0 || cyDesired <= 0) return NULL;
 
     HICON result = NULL;
-    HMODULE hModule = LoadLibraryExW(exePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    HMODULE hModule = LoadLibraryExW(pePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
     if (!hModule) return NULL;
 
-    struct FirstGroupIconData enumData = {0};
-    EnumResourceNamesW(hModule, RT_GROUP_ICON, firstGroupIconProc, (LONG_PTR)&enumData);
+    struct GroupIconEnumData enumData = {0};
+    EnumResourceNamesW(hModule, RT_GROUP_ICON, enumGroupIconProc, (LONG_PTR)&enumData);
 
-    HGLOBAL hGroupGlob = enumData.hRes ? LoadResource(hModule, enumData.hRes) : NULL;
-    const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
+    if (groupIndex < enumData.count) {
+        HRSRC hGroupRes = enumData.hRes[groupIndex];
+        HGLOBAL hGroupGlob = hGroupRes ? LoadResource(hModule, hGroupRes) : NULL;
+        const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
 
-    if (grpDir && grpDir->idType == 1 && grpDir->idCount > 0) {
-        // 防畸形 PE：目录声明的条目数必须落在资源实际大小内，否则越界读
-        DWORD groupSize = SizeofResource(hModule, enumData.hRes);
-        if (groupSize >= 6 &&
-            (DWORD)grpDir->idCount <= (groupSize - 6) / sizeof(GRPICONDIRENTRY)) {
+        if (grpDir && grpDir->idType == 1 && grpDir->idCount > 0) {
+            // 防畸形 PE：目录声明的条目数必须落在资源实际大小内，否则越界读
+            DWORD groupSize = SizeofResource(hModule, hGroupRes);
+            if (groupSize >= 6 &&
+                (DWORD)grpDir->idCount <= (groupSize - 6) / sizeof(GRPICONDIRENTRY)) {
 
-            // 最优条目：先取不小于目标的尺寸中最小的（精确命中自然胜出），
-            // 都不够大则取最大的；尺寸并列取位深更高的。bWidth==0 表示 256。
-            int bestIndex = -1;
-            int bestOver = 0;
-            int bestDepth = 0;
-            for (WORD i = 0; i < grpDir->idCount; i++) {
-                const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
-                int w = entry->bWidth ? entry->bWidth : 256;
-                int h = entry->bHeight ? entry->bHeight : 256;
-                int side = (w > h) ? w : h;
-                int over = side - cxDesired;
-                int depth = entry->wBitCount;
-
-                BOOL take;
-                if (bestIndex < 0) take = TRUE;
-                else if ((over >= 0) != (bestOver >= 0)) take = (over >= 0);
-                else if (over != bestOver) take = (over >= 0) ? (over < bestOver) : (over > bestOver);
-                else take = (depth > bestDepth);
-                if (take) {
-                    bestIndex = i;
-                    bestOver = over;
-                    bestDepth = depth;
+                int bestIndex = -1;
+                int bestSide = 0;
+                int bestDepth = 0;
+                for (WORD i = 0; i < grpDir->idCount; i++) {
+                    const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
+                    int w = entry->bWidth ? entry->bWidth : 256;
+                    int h = entry->bHeight ? entry->bHeight : 256;
+                    int side = (w > h) ? w : h;
+                    if (bestIndex < 0 ||
+                        isBetterIconEntry(side, entry->wBitCount, bestSide, bestDepth, cxDesired)) {
+                        bestIndex = i;
+                        bestSide = side;
+                        bestDepth = entry->wBitCount;
+                    }
                 }
-            }
 
-            if (bestIndex >= 0) {
-                const GRPICONDIRENTRY* entry = &grpDir->idEntries[bestIndex];
-                HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
-                HGLOBAL hIconGlob = hIconRes ? LoadResource(hModule, hIconRes) : NULL;
-                const BYTE* iconData = hIconGlob ? (const BYTE*)LockResource(hIconGlob) : NULL;
-                DWORD iconResSize = hIconRes ? SizeofResource(hModule, hIconRes) : 0;
+                if (bestIndex >= 0) {
+                    const GRPICONDIRENTRY* entry = &grpDir->idEntries[bestIndex];
+                    HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
+                    HGLOBAL hIconGlob = hIconRes ? LoadResource(hModule, hIconRes) : NULL;
+                    const BYTE* iconData = hIconGlob ? (const BYTE*)LockResource(hIconGlob) : NULL;
+                    DWORD iconResSize = hIconRes ? SizeofResource(hModule, hIconRes) : 0;
 
-                if (iconData && iconResSize > 0) {
-                    // 与 extractAllIconGroupsFromPE 相同的三级 fallback
-                    result = createIconFromRawData(iconData, iconResSize);
-                    if (!result) result = createIconFromPngData(iconData, iconResSize);
-                    if (!result) {
-                        result = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
-                            TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
+                    if (iconData && iconResSize > 0) {
+                        // 与 extractAllIconGroupsFromPE 相同的三级 fallback
+                        result = createIconFromRawData(iconData, iconResSize);
+                        if (!result) result = createIconFromPngData(iconData, iconResSize);
+                        if (!result) {
+                            result = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
+                                TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
+                        }
                     }
                 }
             }
@@ -2789,6 +2789,415 @@ HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired) {
     }
 
     FreeLibrary(hModule);
+    return result;
+}
+
+// 兼容入口：主图标 = 枚举到的第一个图标组（工具栏 CMD/Explorer 按钮用）
+HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired) {
+    return extractIconFromPeIndexed(exePath, 0, cxDesired, cyDesired);
+}
+
+#pragma pack(push, 1)
+typedef struct {
+    BYTE bWidth;
+    BYTE bHeight;
+    BYTE bColorCount;
+    BYTE bReserved;
+    WORD wPlanes;
+    WORD wBitCount;
+    DWORD dwBytesInRes;
+    DWORD dwImageOffset;
+} ICOFILEDIRENTRY;
+
+typedef struct {
+    WORD idReserved;
+    WORD idType;
+    WORD idCount;
+} ICOFILEDIR;
+#pragma pack(pop)
+
+// 从独立 .ico 文件提取最接近目标尺寸的图标（lnk 的 ICON_LOCATION 直接指向
+// 图标文件时用）。条目数据与 PE 里的 RT_ICON 相同，PNG 压缩条目（Vista+
+// 常见）以 PNG 签名开头，分别复用 createIconFromRawData / createIconFromPngData。
+// 失败返回 NULL。
+static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int cyDesired) {
+    if (!icoPath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+
+    HICON result = NULL;
+    HANDLE hFile = CreateFileW(icoPath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return NULL;
+
+    BYTE* buf = NULL;
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize != INVALID_FILE_SIZE && fileSize >= sizeof(ICOFILEDIR) && fileSize <= 8u * 1024 * 1024)
+        buf = (BYTE*)malloc(fileSize);
+
+    DWORD bytesRead = 0;
+    if (buf && ReadFile(hFile, buf, fileSize, &bytesRead, NULL) && bytesRead == fileSize) {
+        const ICOFILEDIR* dir = (const ICOFILEDIR*)buf;
+        size_t tableSize = sizeof(ICOFILEDIR) + (size_t)dir->idCount * sizeof(ICOFILEDIRENTRY);
+        if (dir->idReserved == 0 && dir->idType == 1 && dir->idCount > 0 &&
+            (size_t)fileSize >= tableSize) {
+            const ICOFILEDIRENTRY* entries = (const ICOFILEDIRENTRY*)(buf + sizeof(ICOFILEDIR));
+
+            int bestIndex = -1;
+            int bestSide = 0;
+            int bestDepth = 0;
+            for (WORD i = 0; i < dir->idCount; i++) {
+                int w = entries[i].bWidth ? entries[i].bWidth : 256;
+                int h = entries[i].bHeight ? entries[i].bHeight : 256;
+                int side = (w > h) ? w : h;
+                if (bestIndex < 0 ||
+                    isBetterIconEntry(side, entries[i].wBitCount, bestSide, bestDepth, cxDesired)) {
+                    bestIndex = i;
+                    bestSide = side;
+                    bestDepth = entries[i].wBitCount;
+                }
+            }
+
+            if (bestIndex >= 0) {
+                DWORD off = entries[bestIndex].dwImageOffset;
+                DWORD len = entries[bestIndex].dwBytesInRes;
+                // 防畸形文件：条目声明的数据块必须整体落在文件内，否则越界读
+                if (len > 0 && off <= fileSize && len <= fileSize - off) {
+                    const BYTE* data = buf + off;
+                    if (len >= 8 && data[0] == 0x89 && memcmp(data + 1, "PNG", 3) == 0) {
+                        result = createIconFromPngData(data, len);
+                    } else {
+                        result = createIconFromRawData(data, len);
+                        if (!result) result = createIconFromPngData(data, len);
+                        if (!result) {
+                            result = CreateIconFromResourceEx((PBYTE)data, len,
+                                TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    free(buf);
+    CloseHandle(hFile);
+    return result;
+}
+
+// 取 HICON 的 32bpp 像素副本（straight alpha）。来源缺 alpha（24 位/调色板
+// 帧）时按 AND 掩码补透明度；ICONINFO.hbmMask 高度为图标两倍，上半是 AND
+// 掩码。返回 malloc 缓冲（调用方 free），失败返回 NULL。
+static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
+    *outW = *outH = 0;
+    if (!hIcon) return NULL;
+
+    ICONINFO ii = {0};
+    if (!GetIconInfo(hIcon, &ii)) return NULL;
+
+    BYTE* pixels = NULL;
+    int width = 0, height = 0;
+    if (ii.hbmColor) {
+        BITMAP bm = {0};
+        if (GetObjectW(ii.hbmColor, sizeof(BITMAP), &bm)) {
+            width = bm.bmWidth;
+            height = bm.bmHeight;
+        }
+    }
+
+    HDC hdcScreen = (width > 0 && height > 0) ? GetDC(NULL) : NULL;
+    if (hdcScreen) {
+        pixels = (BYTE*)malloc((size_t)width * height * 4);
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;   // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        if (pixels && !GetDIBits(hdcScreen, ii.hbmColor, 0, height, pixels, &bmi, DIB_RGB_COLORS)) {
+            free(pixels);
+            pixels = NULL;
+        }
+
+        if (pixels) {
+            // 无 alpha 通道的源：按 AND 掩码补透明度
+            bool hasAlpha = false;
+            for (int i = 0; i < width * height && !hasAlpha; i++)
+                if (pixels[i * 4 + 3]) hasAlpha = true;
+
+            if (!hasAlpha && ii.hbmMask) {
+                BITMAPINFO maskBmi = {0};
+                maskBmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                maskBmi.bmiHeader.biWidth = width;
+                maskBmi.bmiHeader.biHeight = -2 * height;
+                maskBmi.bmiHeader.biPlanes = 1;
+                maskBmi.bmiHeader.biBitCount = 1;
+                int andRow = (width + 31) / 32 * 4;
+                BYTE* maskBits = (BYTE*)malloc((size_t)andRow * 2 * height);
+                if (maskBits && GetDIBits(hdcScreen, ii.hbmMask, 0, 2 * height, maskBits, &maskBmi, DIB_RGB_COLORS)) {
+                    for (int y = 0; y < height; y++) {
+                        const BYTE* andRowBits = maskBits + (size_t)y * andRow;
+                        for (int x = 0; x < width; x++) {
+                            int px = (y * width + x) * 4;
+                            if ((andRowBits[x / 8] >> (7 - (x % 8))) & 1) {
+                                pixels[px + 0] = 0;
+                                pixels[px + 1] = 0;
+                                pixels[px + 2] = 0;
+                                pixels[px + 3] = 0;
+                            }
+                            else pixels[px + 3] = 255;
+                        }
+                    }
+                }
+                free(maskBits);
+            }
+        }
+        ReleaseDC(NULL, hdcScreen);
+    }
+
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+
+    if (!pixels) return NULL;
+    *outW = width;
+    *outH = height;
+    return pixels;
+}
+
+// shell 的快捷方式箭头像素（SIID_LINK → Wine shell32 的 shortcut.ico，与
+// Windows 同款素材；32px 帧的 glyph 恰好占满左下 1/4 象限，整帧叠加位置
+// 即正确）。semi-stub 的 SHGetStockIconInfo 只给 32px 一档，这里缓存一份
+// 像素复用，也避免每次调 API 的 FIXME 噪音。
+static BYTE* getShortcutOverlayPixels(int* outSize) {
+    static BYTE* cached = NULL;
+    static int cachedSize = 0;
+    *outSize = cachedSize;
+    if (cached) return cached;
+
+    SHSTOCKICONINFO sii = {0};
+    sii.cbSize = sizeof(sii);
+    if (SUCCEEDED(SHGetStockIconInfo(SIID_LINK, SHGSI_ICON, &sii)) && sii.hIcon) {
+        // LoadIconW 返回共享 HICON，不能 DestroyIcon
+        int w = 0, h = 0;
+        BYTE* pixels = getIconPixels(sii.hIcon, &w, &h);
+        if (pixels && w == h) {
+            cached = pixels;
+            cachedSize = w;
+        }
+        else free(pixels);
+    }
+    *outSize = cachedSize;
+    return cached;
+}
+
+// 用 shell 的快捷方式箭头在目标图标左下角合成角标。箭头是独立渲染的固定
+// 像素图层：与目标图标像素网格互不干扰——32px 目标整帧叠加，16px 目标对
+// 32px 帧做 2×2 盒式均值降采样（预乘后平均，保证像素干净），再按标准
+// src-over alpha 合成。失败返回 NULL，调用方回退到不带角标的目标图标。
+static HICON composeShortcutIcon(HICON hTarget) {
+    if (!hTarget) return NULL;
+
+    int width = 0, height = 0;
+    BYTE* dst = getIconPixels(hTarget, &width, &height);
+    if (!dst || width != height) {
+        free(dst);
+        return NULL;
+    }
+
+    int overlaySize = 0;
+    BYTE* overlay = getShortcutOverlayPixels(&overlaySize);
+    if (!overlay) {
+        free(dst);
+        return NULL;
+    }
+
+    // 覆盖层缩放到目标尺寸（32→32 不变、32→16 整数倍均值，其余最近邻）
+    BYTE* scaled = overlay;
+    BYTE* scaledBuf = NULL;
+    if (width != overlaySize) {
+        scaledBuf = (BYTE*)malloc((size_t)width * height * 4);
+        if (!scaledBuf) {
+            free(dst);
+            return NULL;
+        }
+        scaled = scaledBuf;
+        if (width < overlaySize && overlaySize % width == 0) {
+            int s = overlaySize / width;
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    unsigned sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+                    for (int dy = 0; dy < s; dy++) {
+                        for (int dx = 0; dx < s; dx++) {
+                            const BYTE* p = overlay + ((size_t)(y * s + dy) * overlaySize + x * s + dx) * 4;
+                            unsigned a = p[3];
+                            sumR += (unsigned)p[0] * a;
+                            sumG += (unsigned)p[1] * a;
+                            sumB += (unsigned)p[2] * a;
+                            sumA += a;
+                        }
+                    }
+                    BYTE* q = scaledBuf + ((size_t)y * width + x) * 4;
+                    if (sumA) {
+                        q[0] = (BYTE)(sumR / sumA);
+                        q[1] = (BYTE)(sumG / sumA);
+                        q[2] = (BYTE)(sumB / sumA);
+                    }
+                    else q[0] = q[1] = q[2] = 0;
+                    q[3] = (BYTE)(sumA / (s * s));
+                }
+            }
+        }
+        else {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    const BYTE* p = overlay + ((size_t)y * overlaySize / height) * overlaySize * 4 +
+                                    (size_t)x * overlaySize / width * 4;
+                    BYTE* q = scaledBuf + ((size_t)y * width + x) * 4;
+                    q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[3] = p[3];
+                }
+            }
+        }
+    }
+
+    // 标准 src-over alpha 合成，覆盖整帧（glyph 自带左下角定位）
+    for (int i = 0; i < width * height; i++) {
+        unsigned aO = scaled[i * 4 + 3];
+        if (!aO) continue;
+        unsigned aD = dst[i * 4 + 3];
+        unsigned outA = aO + aD * (255 - aO) / 255;
+        if (!outA) {
+            dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = dst[i * 4 + 3] = 0;
+            continue;
+        }
+        for (int c = 0; c < 3; c++) {
+            unsigned oC = scaled[i * 4 + c];
+            unsigned dC = dst[i * 4 + c];
+            dst[i * 4 + c] = (BYTE)((oC * aO + dC * aD * (255 - aO) / 255) / outA);
+        }
+        dst[i * 4 + 3] = (BYTE)outA;
+    }
+    free(scaledBuf);
+
+    // 合成结果转 HICON（CreateIconIndirect 复制位图，随后即可释放）
+    HICON result = NULL;
+    HDC hdcScreen = GetDC(NULL);
+    if (hdcScreen) {
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* dibBits = NULL;
+        HBITMAP hDib = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+        if (hDib && dibBits) {
+            memcpy(dibBits, dst, (size_t)width * height * 4);
+            HBITMAP hMaskBmp = CreateBitmap(width, height, 1, 1, NULL);
+            if (hMaskBmp) {
+                ICONINFO ci = {0};
+                ci.fIcon = TRUE;
+                ci.hbmColor = hDib;
+                ci.hbmMask = hMaskBmp;
+                result = CreateIconIndirect(&ci);
+                DeleteObject(hMaskBmp);
+            }
+            DeleteObject(hDib);
+        }
+        ReleaseDC(NULL, hdcScreen);
+    }
+
+    free(dst);
+    return result;
+}
+
+// 解析 lnk 的图标来源。优先 ICON_LOCATION 字符串（含图标组索引）；没有则
+// 回退到目标文件本身的主图标（GetPath）。iconPath 已做 %var% 环境变量展开。
+// 成功返回 true。
+static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, int iconPathCch, int* iconIndex) {
+    iconPath[0] = L'\0';
+    *iconIndex = 0;
+    if (!lnkPath || !lnkPath[0]) return false;
+
+    bool ok = false;
+    IShellLinkW* isl = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IShellLinkW, (void**)&isl))) {
+        IPersistFile* ipf = NULL;
+        if (SUCCEEDED(IShellLinkW_QueryInterface(isl, &IID_IPersistFile, (void**)&ipf))) {
+            if (SUCCEEDED(IPersistFile_Load(ipf, lnkPath, STGM_READ | STGM_SHARE_DENY_WRITE))) {
+                wchar_t raw[MAX_PATH] = {0};
+                int idx = 0;
+                if (SUCCEEDED(IShellLinkW_GetIconLocation(isl, raw, MAX_PATH, &idx)) && raw[0]) {
+                    ok = true;
+                }
+                else if (SUCCEEDED(IShellLinkW_GetPath(isl, raw, MAX_PATH, NULL, SLGP_RAWPATH)) && raw[0]) {
+                    idx = 0;   // 目标文件自己的主图标
+                    ok = true;
+                }
+                if (ok) {
+                    // lnk 里常见 %windir%\system32\... 形式，先展开；放不下保留原样
+                    wchar_t expanded[MAX_PATH] = {0};
+                    DWORD n = ExpandEnvironmentStringsW(raw, expanded, MAX_PATH);
+                    const wchar_t* finalPath = (n > 0 && n <= MAX_PATH && expanded[0]) ? expanded : raw;
+                    wcsncpy_s(iconPath, (size_t)iconPathCch, finalPath, _TRUNCATE);
+                    *iconIndex = idx;
+                }
+            }
+            IPersistFile_Release(ipf);
+        }
+        IShellLinkW_Release(isl);
+    }
+    return ok;
+}
+
+// lnk 图标解析入口：读出图标位置 → 提取目标图标 → 合成快捷方式箭头 → 加入
+// 系统镜像列表（Shell_GetImageLists 的进程级共享列表；大/小列表索引空间不同，
+// 按 large 分别添加并走 exeIconCache 缓存）。任何一步失败回退 getFileInfo 的
+// 默认图标。返回值是对应镜像列表内的索引，可直接用于 ListView。
+static int getLnkIconIndex(const wchar_t* path, bool large) {
+    if (!path || !path[0]) return -1;
+
+    int cached = findExeIconCache(path, large);
+    if (cached >= 0) return cached;
+
+    int result = -1;
+    wchar_t iconPath[MAX_PATH] = {0};
+    int iconIndex = 0;
+    if (resolveLnkIconLocation(path, iconPath, MAX_PATH, &iconIndex)) {
+        int cx = large ? 32 : 16;
+        const wchar_t* ext = wcsrchr(iconPath, L'.');
+        bool isIco = ext && wcsicmp(ext, L".ico") == 0;
+
+        HICON hIcon = isIco ? extractIconFromIcoFile(iconPath, cx, cx)
+                            : extractIconFromPeIndexed(iconPath, iconIndex, cx, cx);
+        // 图标组索引越界（安装程序生成的 lnk 常见）：退回主图标再试一次
+        if (!hIcon && !isIco && iconIndex != 0)
+            hIcon = extractIconFromPeIndexed(iconPath, 0, cx, cx);
+
+        if (hIcon) {
+            HICON hComposed = composeShortcutIcon(hIcon);
+            if (hComposed) {
+                DestroyIcon(hIcon);
+                hIcon = hComposed;
+            }
+            HIMAGELIST himlBig = NULL, himlSmall = NULL;
+            Shell_GetImageLists(&himlBig, &himlSmall);
+            HIMAGELIST himl = large ? himlBig : himlSmall;
+            if (himl) result = ImageList_AddIcon(himl, hIcon);
+            DestroyIcon(hIcon);
+        }
+    }
+
+    if (result < 0) {
+        // 兜底：shell 给的 lnk 默认图标（目标不可解析时的正确行为）
+        wchar_t pathBuf[MAX_PATH] = {0};
+        wcsncpy_s(pathBuf, MAX_PATH, path, _TRUNCATE);
+        struct FileInfo fi = {0};
+        getFileInfo(pathBuf, TYPE_FILE, large, &fi);
+        result = fi.icon;
+    }
+    addExeIconCache(path, result, large);
     return result;
 }
 
