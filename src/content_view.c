@@ -547,18 +547,27 @@ void setIconViewIconSize(int size) {
         iconViewIconSize = size;
         saveIconViewSettings();
         if (viewStyle == STYLE_LARGE_ICON) {
-            resetScaledIconList();
-            refreshContentView();   // 重新挂图像列表（内部会调用 updateIconViewLayout）
+            // 旧缩放列表此刻仍挂在控件的 LVSIL_NORMAL 上：先把引用从全局变量上摘掉、
+            // 让 refreshContentView 新建并挂上按新尺寸生成的列表，**挂好之后**才销毁
+            // 旧列表（顺序反过来就是控件短暂持有已销毁的句柄，见 clearIconCaches 里
+            // 「不要销毁仍挂在控件上的列表」那条约定）。
+            // 映射必须立刻作废：iconViewIconSize 已变，旧索引与新列表不再对应。
+            HIMAGELIST oldList = scaledImageList;
+            scaledImageList = NULL;
+            free(scaledIconMap);
+            scaledIconMap = NULL;
+            scaledIconMapCap = 0;
+            refreshContentView();   // 内部会建新列表并调用 updateIconViewLayout
+            if (oldList) ImageList_Destroy(oldList);
         }
         else if (scaledImageList) {
             // 非大图标视图下重建：缩放列表此刻可能仍挂在控件的 LVSIL_NORMAL 上
-            // （从大图标视图切走时不会重挂），销毁前必须先把系统列表挂回去，
-            // 否则控件持有悬空句柄
-            resetScaledIconList();
+            // （从大图标视图切走时不会重挂），必须先把系统列表挂回去、再销毁它
             HIMAGELIST himlBig = NULL, himlSmall = NULL;
             Shell_GetImageLists(&himlBig, &himlSmall);
             currentImageList = himlBig;
             ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
+            resetScaledIconList();
         }
     }
     updateIconViewMenuCheckmarks();
@@ -3388,6 +3397,12 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     int stamp = width * SHORTCUT_ARROW_PERCENT / 100;
     if (stamp > width) stamp = width;
     if (stamp > SHORTCUT_ARROW_MAX_STAMP) stamp = SHORTCUT_ARROW_MAX_STAMP;
+    // 畸形图标（边长 1px）会让 stamp 算成 0，下一步 overlaySize % stamp 就是整数
+    // 除零。角标画不出来不影响主图标，这里直接放弃、由调用方回退到无角标图标。
+    if (stamp < 1) {
+        free(dst);
+        return NULL;
+    }
 
     // 覆盖层缩放到叠加尺寸：整数倍用盒式均值（预乘后平均，像素干净），
     // 否则双线性。缩放只发生在素材帧这一步，与目标图标的分辨率无关
