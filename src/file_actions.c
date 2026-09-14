@@ -932,6 +932,11 @@ static wchar_t** createPathsFromFileNodes(struct FileNode** nodes, int count) {
 }
 
 void deleteFiles(struct FileNode** nodes, int count) {
+    // 已有文件操作在跑时不再受理：actionData/hwndDlg 都是单例，被覆盖会让
+    // 进行中的那批丢掉状态。进度窗是 modeless、冲突窗的归属窗也不是主窗口，
+    // 用户在等待期间完全点得到菜单。
+    if (actionData) return;
+
     wchar_t msg[128] = {0};
     if (count == 1) {
         swprintf_s(msg, 128, lc_str.msg_confirm_delete_item, nodes[0]->name);
@@ -980,6 +985,8 @@ void cutFiles(struct FileNode** nodes, int count) {
 }
 
 void pasteFiles(wchar_t* dstDir) {
+    if (actionData) return;   // 同上：已有操作在跑，别覆盖它的状态
+
     int count = 0;
     bool isCut = false;
     wchar_t** paths = readClipboardFiles(&count, &isCut);
@@ -1094,6 +1101,8 @@ void extractFilesFromISOImage(wchar_t* isoPath, wchar_t* dstPath) {
     MessageBoxW(NULL, lc_str.msg_no_libcdio, L"WFM", MB_OK | MB_ICONINFORMATION);
     return;
 #endif
+
+    if (actionData) return;   // 同上：已有操作在跑，别覆盖它的状态
 
     actionData = calloc(1, sizeof(struct ActionData));
     if (!actionData) return;
