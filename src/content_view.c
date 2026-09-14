@@ -117,6 +117,11 @@ struct ListItem {
     uint64_t driveFreeBytes;
 };
 
+// 大图标视图按显示尺寸重新生成图标（实现位于文件末尾的图标提取区）。
+// 声明必须放在 struct ListItem 之后：若写在结构体定义之前，参数表里的
+// struct 标签会落进 prototype scope，与文件作用域的 ListItem 不是同一个类型。
+static HICON createDisplayIcon(struct ListItem* item, int size);
+
 // 搜索线程持有的只读节点池。
 // 搜索线程绝不调用 buildChildNodes（那会 free 掉 UI 线程正在使用的节点），
 // 而是用 FindFirstFile 在本地建立一棵只属于自己的树，退出时统一释放。
@@ -367,10 +372,19 @@ static HIMAGELIST getScaledImageList(void) {
     return scaledImageList;
 }
 
-// 把系统 big 列表里的图标按需缩放进自建列表，返回自建列表内的索引。
-// 映射按系统索引缓存 —— 系统列表的索引在整个会话中稳定，清扩展名缓存
-// 不影响它，只有重建缩放列表时才需要重置映射。
-static int getScaledIconIndex(int sysIcon) {
+// 把条目的图标按显示尺寸准备好后放进自建列表，返回自建列表内的索引。
+//
+// 映射按系统索引缓存，这个键成立的前提是「一个系统索引只对应一种图标」：
+// Wine 的 SIC 以「来源文件 + 资源序号」为键（iconcache.c 的 SIC_CompareEntries），
+// exe/lnk 因此天然各占一个索引；而按类型给图标的（文件夹、注册过的扩展名、
+// 以及未注册的扩展名共用 shell32 的默认图标）生成结果只取决于 sysIcon 本身。
+// 所以 createDisplayIcon 里「按路径提取」那条分支只能对 exe/lnk 开 —— 若扩展到
+// 走类型索引的类型上，同一个索引下会塞进某一个文件的图案，其余文件全部串位。
+// 映射只在重建缩放列表或显式清图标缓存时才重置。
+static int getScaledIconIndex(struct ListItem* item) {
+    if (!item) return -1;
+    int sysIcon = item->icon;
+
     HIMAGELIST himlBig = NULL, himlSmall = NULL;
     Shell_GetImageLists(&himlBig, &himlSmall);
     if (!himlBig || sysIcon < 0) return sysIcon;
@@ -390,15 +404,22 @@ static int getScaledIconIndex(int sysIcon) {
     HIMAGELIST himl = getScaledImageList();
     if (!himl) return sysIcon;
 
-    HICON hicon = ImageList_GetIcon(himlBig, sysIcon, ILD_TRANSPARENT);
-    if (!hicon) return sysIcon;
-    // CopyImage：目标尺寸与原图不同时按位块拉伸缩放
-    HICON scaled = (HICON)CopyImage(hicon, IMAGE_ICON, iconViewIconSize, iconViewIconSize, 0);
-    DestroyIcon(hicon);
-    if (!scaled) return sysIcon;
+    // 首选：按显示尺寸重新提取 / 从大列表平滑缩放
+    HICON hicon = createDisplayIcon(item, iconViewIconSize);
 
-    int idx = ImageList_AddIcon(himl, scaled);
-    DestroyIcon(scaled);
+    // 兜底：任一环节失败（拿不到像素、非方形图标、shell 列表都不可用）时退回
+    // 旧行为——32px 最近邻放大。块状总比没图标强，且这条路上的失败是异常情况。
+    if (!hicon) {
+        HICON src = ImageList_GetIcon(himlBig, sysIcon, ILD_TRANSPARENT);
+        if (!src) return sysIcon;
+        // CopyImage：目标尺寸与原图不同时按位块拉伸（Wine 侧是最近邻）
+        hicon = (HICON)CopyImage(src, IMAGE_ICON, iconViewIconSize, iconViewIconSize, 0);
+        DestroyIcon(src);
+        if (!hicon) return sysIcon;
+    }
+
+    int idx = ImageList_AddIcon(himl, hicon);
+    DestroyIcon(hicon);
     if (idx < 0) return sysIcon;
 
     scaledIconMap[sysIcon] = idx;
@@ -1476,7 +1497,7 @@ static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     int iconX = rc.left + ((rc.right - rc.left) - iconSize) / 2;
     int iconY = rc.top + ICONVIEW_TOP_PAD;
     if (currentImageList && item->loaded) {
-        int imageIdx = isScaledLargeIconView() ? getScaledIconIndex(item->icon) : item->icon;
+        int imageIdx = isScaledLargeIconView() ? getScaledIconIndex(item) : item->icon;
         ImageList_DrawEx(currentImageList, imageIdx, hdc, iconX, iconY, 0, 0,
                          CLR_NONE, CLR_NONE, ILD_TRANSPARENT);
     }
@@ -1613,8 +1634,8 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
 
             if (mask & LVIF_IMAGE) {
                 // 大图标视图 + 自定义尺寸时，item->icon 是系统 big 列表的索引，
-                // 必须经映射转换成缩放列表里的索引
-                nmlvdi->item.iImage = isScaledLargeIconView() ? getScaledIconIndex(item->icon) : item->icon;
+                // 必须经映射转换成缩放列表里的索引（映射内部按显示尺寸生成图标）
+                nmlvdi->item.iImage = isScaledLargeIconView() ? getScaledIconIndex(item) : item->icon;
             }
             
             if (mask & LVIF_TEXT) {
@@ -3084,6 +3105,14 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
 // 实际约占图标边长的 31%（整帧叠加则是 50%，观感偏大）。
 #define SHORTCUT_ARROW_PERCENT 75
 
+// 角标的像素上限 = 素材的原生边长，即「角标永不被放大」。
+// 按 75% 百分比算，96/128 槽位要叠到 72/96px，素材会被放大 1.5×/2× 而发糊。
+// 夹在原生长边上正好：stamp == overlaySize 时合成代码连缩放都跳过（逐像素原样
+// 叠加），是最清晰的一档；32/48/64 槽位按百分比算本就 ≤48，完全不受影响。
+// 观感上可见角标（素材帧里含浅灰底板的部分约占 42%）在 64px 时 ≈32% 边长，
+// 96px ≈21%，128px ≈16%，与 Windows 随尺寸递减的趋势一致。
+#define SHORTCUT_ARROW_MAX_STAMP 48
+
 // 整数倍盒式均值降采样（预乘后平均，避免透明像素拉暗边缘）。48px 素材缩到
 // 12px（÷4）或 24px（÷2）都走这里；只有非整数倍（stock icon 兜底那一路）
 // 才退到下面的双线性。
@@ -3226,10 +3255,93 @@ static BYTE* scaleIconPixelsBilinear(const BYTE* src, int srcSize, int dstSize) 
     return out;
 }
 
-// 用自带的快捷方式箭头在目标图标左下角合成角标。合成始终发生在列表
-// 槽位尺寸（outSize，16/32）上：目标图标若是低分辨率源，先双线性平滑
-// 缩放到槽位尺寸，箭头再以素材帧的固定像素叠加——箭头的清晰度与目标
-// 图标的实际分辨率完全无关。失败返回 NULL，调用方回退到不带角标的目标图标。
+// 32bpp straight-alpha 像素 → HICON。掩码留空（全 0，什么都不遮），透明度
+// 完全交给 alpha 通道；CreateIconIndirect 会复制位图，调用方随后即可释放像素。
+// 失败返回 NULL。
+static HICON createIconFromPixels(const BYTE* pixels, int width, int height) {
+    if (!pixels || width <= 0 || height <= 0) return NULL;
+
+    HICON result = NULL;
+    HDC hdcScreen = GetDC(NULL);
+    if (hdcScreen) {
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;   // top-down，与像素缓冲同序
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* dibBits = NULL;
+        HBITMAP hDib = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+        if (hDib && dibBits) {
+            memcpy(dibBits, pixels, (size_t)width * height * 4);
+            HBITMAP hMaskBmp = CreateBitmap(width, height, 1, 1, NULL);
+            if (hMaskBmp) {
+                ICONINFO ci = {0};
+                ci.fIcon = TRUE;
+                ci.hbmColor = hDib;
+                ci.hbmMask = hMaskBmp;
+                result = CreateIconIndirect(&ci);
+                DeleteObject(hMaskBmp);
+            }
+            DeleteObject(hDib);
+        }
+        ReleaseDC(NULL, hdcScreen);
+    }
+    return result;
+}
+
+// 把任意尺寸的方形 HICON 平滑缩放到 size×size。整数倍缩小走盒式均值（预乘后
+// 平均，像素干净），其余（含放大）走双线性——两条路都不会出现最近邻放大那种
+// 块状。已经是目标尺寸时只做一次像素往返。失败返回 NULL。
+static HICON scaleIconToSize(HICON hIcon, int size) {
+    if (!hIcon || size <= 0) return NULL;
+
+    int width = 0, height = 0;
+    BYTE* pixels = getIconPixels(hIcon, &width, &height);
+    if (!pixels) return NULL;
+    if (width != height) {
+        free(pixels);
+        return NULL;
+    }
+
+    if (width == size) {
+        HICON result = createIconFromPixels(pixels, size, size);
+        free(pixels);
+        return result;
+    }
+
+    // 大倍数缩小先反复折半（每步都是整数倍盒式均值），最后一步再收尾：
+    // 256→48 若直接用点采样式双线性，会漏掉大部分源像素、细节发花。
+    BYTE* cur = pixels;
+    int curSize = width;
+    while (curSize >= size * 2 && curSize % 2 == 0) {
+        BYTE* half = downsampleIconPixels(cur, curSize, curSize / 2);
+        if (!half) break;
+        free(cur);
+        cur = half;
+        curSize /= 2;
+    }
+
+    BYTE* scaled = cur;
+    if (curSize != size) {
+        scaled = (curSize > size && curSize % size == 0)
+            ? downsampleIconPixels(cur, curSize, size)
+            : scaleIconPixelsBilinear(cur, curSize, size);
+        free(cur);
+    }
+    if (!scaled) return NULL;
+
+    HICON result = createIconFromPixels(scaled, size, size);
+    free(scaled);
+    return result;
+}
+
+// 用自带的快捷方式箭头在目标图标左下角合成角标。合成在目标尺寸 outSize 上做：
+// 目标图标先平滑缩放到 outSize，箭头再以素材帧像素叠加——箭头的清晰度与目标
+// 图标的实际分辨率无关。outSize 是 16/32（列表槽位）或大图标视图的显示尺寸。
+// 失败返回 NULL，调用方回退到不带角标的目标图标。
 static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     if (!hTarget || outSize <= 0) return NULL;
 
@@ -3257,9 +3369,11 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
         return NULL;
     }
 
-    // 箭头尺寸：素材帧整体缩到图标边长的 75% 后叠在左下角
+    // 箭头尺寸：素材帧整体缩到图标边长的 75% 后叠在左下角，并按素材原生
+    // 边长封顶（大图标视图下不让 48px 素材再被放大，见 SHORTCUT_ARROW_MAX_STAMP）
     int stamp = width * SHORTCUT_ARROW_PERCENT / 100;
     if (stamp > width) stamp = width;
+    if (stamp > SHORTCUT_ARROW_MAX_STAMP) stamp = SHORTCUT_ARROW_MAX_STAMP;
 
     // 覆盖层缩放到叠加尺寸：整数倍用盒式均值（预乘后平均，像素干净），
     // 否则双线性。缩放只发生在素材帧这一步，与目标图标的分辨率无关
@@ -3297,34 +3411,7 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     free(scaledBuf);
 
     // 合成结果转 HICON（CreateIconIndirect 复制位图，随后即可释放）
-    HICON result = NULL;
-    HDC hdcScreen = GetDC(NULL);
-    if (hdcScreen) {
-        BITMAPINFO bmi = {0};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -height;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* dibBits = NULL;
-        HBITMAP hDib = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
-        if (hDib && dibBits) {
-            memcpy(dibBits, dst, (size_t)width * height * 4);
-            HBITMAP hMaskBmp = CreateBitmap(width, height, 1, 1, NULL);
-            if (hMaskBmp) {
-                ICONINFO ci = {0};
-                ci.fIcon = TRUE;
-                ci.hbmColor = hDib;
-                ci.hbmMask = hMaskBmp;
-                result = CreateIconIndirect(&ci);
-                DeleteObject(hMaskBmp);
-            }
-            DeleteObject(hDib);
-        }
-        ReleaseDC(NULL, hdcScreen);
-    }
+    HICON result = createIconFromPixels(dst, width, height);
 
     free(dst);
     return result;
@@ -3403,6 +3490,142 @@ static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, in
         IShellLinkW_Release(isl);
     }
     return ok;
+}
+
+// ========== 大图标视图：按显示尺寸重新生成图标 ==========
+//
+// 旧的缩放路径是「拿系统 32px 列表里的图 → CopyImage 放大」，而 Wine 的
+// CopyImage / CreateIconFromResourceEx / DrawIconEx 三条缩放路径全是最近邻
+// （user32/cursoricon.c 的 stretch_bitmap 与 create_icon_frame 都不设拉伸模式，
+// NtUserDrawIconEx 更是硬编码 STRETCH_DELETESCANS），32→128 就是 4 倍块复制。
+// 这里改成两条更靠谱的来源：
+//   ① exe / lnk —— 用 WFM 自带的解码器（手写 BMP + GDI+ 解 PNG）从文件里
+//      按目标尺寸重新取，既拿得到原生 256 帧，也绕开 Wine 的 PNG R/B 反色 bug；
+//   ② 其余（文件夹 / 驱动器 / .ico 等按类型给图标的）—— 从 shell 镜像列表里
+//      挑一份源自己平滑缩放。Wine 的 shell 图标自带原生 256 帧
+//      （resources/*.ico 里的 256 是原生的，不是放大出来的），所以缩下来比
+//      放大上去清楚得多。
+// 两条路的结果都是「目标尺寸的原生 HICON」，交给缩放图像列表按 1:1 贴图。
+
+// 从 shell 镜像列表里取 sysIcon 对应的图标再平滑缩放到 size。Wine 的 SIC 对
+// 五个列表是逐个追加的（iconcache.c 的 SIC_IconAppend），索引在五个列表里严格
+// 同步，所以同一个 sysIcon 可以直接拿去查任意一个列表 —— 于是可以按尺寸挑源：
+// 取「不小于目标的列表里最小的那个」，48 能直接命中原生的 48 帧，64/96/128 则
+// 从 256 帧缩下来（缩小永远比放大清楚）。都够不着时退到最大的那个。
+// 失败返回 NULL。
+static HICON createScaledShellIcon(int sysIcon, int size) {
+    if (sysIcon < 0 || size <= 0) return NULL;
+
+    static const int lists[] = { SHIL_JUMBO, SHIL_EXTRALARGE, SHIL_LARGE };
+    const int numLists = (int)(sizeof(lists) / sizeof(lists[0]));
+
+    int bestList = -1, bestSize = 0;          // 不小于 size 里最小的
+    int biggestList = -1, biggestSize = 0;    // 兜底：最大的
+    for (int i = 0; i < numLists; i++) {
+        IImageList* piml = NULL;
+        if (FAILED(SHGetImageList(lists[i], &wfm_IID_IImageList, (void**)&piml)) || !piml) continue;
+
+        int cx = 0, cy = 0;
+        HRESULT hr = IImageList_GetIconSize(piml, &cx, &cy);
+        IImageList_Release(piml);
+        if (FAILED(hr) || cx <= 0 || cx != cy) continue;
+
+        if (cx > biggestSize) { biggestSize = cx; biggestList = lists[i]; }
+        if (cx >= size && (bestList < 0 || cx < bestSize)) { bestSize = cx; bestList = lists[i]; }
+    }
+    if (bestList < 0) bestList = biggestList;
+    if (bestList < 0) return NULL;
+
+    IImageList* piml = NULL;
+    if (FAILED(SHGetImageList(bestList, &wfm_IID_IImageList, (void**)&piml)) || !piml) return NULL;
+
+    HICON src = NULL;
+    HRESULT hr = IImageList_GetIcon(piml, sysIcon, ILD_TRANSPARENT, &src);
+    IImageList_Release(piml);
+    if (FAILED(hr) || !src) return NULL;
+
+    // 挑中的源尺寸已经等于槽位尺寸：原样用，省掉一次像素往返
+    if (bestSize == size) return src;
+
+    HICON scaled = scaleIconToSize(src, size);
+    DestroyIcon(src);
+    return scaled;
+}
+
+// 按目标尺寸从文件里重新提取 exe / lnk 的图标。lnk 额外合成快捷方式角标
+// （合成发生在目标尺寸上，角标按素材原生边长封顶，不会被放大成马赛克）。
+// 返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL（调用方走 shell 兜底）。
+//
+// 只处理 exe / lnk，**不处理 .ico**：item->icon 是缩放映射的缓存键，而这里的
+// 结果是按路径生成的，两者必须一一对应。exe/lnk 在 Wine 里都拿得到按路径区分的
+// 索引（SIC 的键是「来源文件 + 资源序号」；lnk 更是每次追加一个新图标），
+// 而 .ico 走的是 WFM 的扩展名缓存（addExtIconCache），一个索引代表整整一类文件
+// ——同一个索引下塞进「某一个 .ico 的真实图案」就会串位，让其余 .ico 都显示它。
+static HICON extractItemIconAtSize(const wchar_t* path, int size) {
+    if (!path || !path[0] || size <= 0) return NULL;
+
+    const wchar_t* ext = wcsrchr(path, L'.');
+    if (!ext) return NULL;
+    bool isLnk = (wcsicmp(ext, L".lnk") == 0);
+    if (!isLnk && wcsicmp(ext, L".exe") != 0) return NULL;
+
+    HICON src = NULL;
+    if (isLnk) {
+        wchar_t iconPath[MAX_PATH] = {0};
+        int iconIndex = 0;
+        if (resolveLnkIconLocation(path, iconPath, MAX_PATH, &iconIndex)) {
+            const wchar_t* iconExt = wcsrchr(iconPath, L'.');
+            bool iconIsIco = iconExt && wcsicmp(iconExt, L".ico") == 0;
+
+            src = iconIsIco ? extractIconFromIcoFile(iconPath, size, size)
+                            : extractIconFromPeIndexed(iconPath, iconIndex, size, size);
+            // 图标组索引越界（安装程序生成的 lnk 常见）：退回主图标再试一次
+            if (!src && !iconIsIco && iconIndex != 0)
+                src = extractIconFromPeIndexed(iconPath, 0, size, size);
+        }
+    }
+    else {
+        src = extractIconFromPeIndexed(path, 0, size, size);
+    }
+    if (!src) return NULL;
+
+    // 提取出来的往往是原生帧（256/48/32），先平滑缩到目标尺寸；缩不了就用原生图，
+    // 由图像列表自行处理（比返回失败强）。
+    HICON scaled = scaleIconToSize(src, size);
+    if (scaled) {
+        DestroyIcon(src);
+        src = scaled;
+    }
+
+    if (isLnk) {
+        HICON composed = composeShortcutIcon(src, size);
+        if (composed) {
+            DestroyIcon(src);
+            return composed;
+        }
+    }
+    return src;
+}
+
+// 大图标视图下单个条目在 size×size 上的图标：能自己按尺寸提取的（exe/lnk）
+// 走自建解码器，其余走 shell 大列表 + 平滑缩放。失败返回 NULL，调用方回退到
+// 旧的「32px 最近邻放大」路径，保证任何情况下都有图可画。
+static HICON createDisplayIcon(struct ListItem* item, int size) {
+    if (!item || size <= 0) return NULL;
+
+    // 只有 exe/lnk 值得拼路径去提取：其余类型的 item->icon 是「按扩展名共享」的
+    // 索引（一个索引代表一类文件），放不进按路径生成的结果。先看扩展名，顺带
+    // 省掉绝大多数条目的路径拼接。
+    const wchar_t* ext = (item->node && item->node->name) ? wcsrchr(item->node->name, L'.') : NULL;
+    if (item->node && item->node->type == TYPE_FILE && ext &&
+        (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0)) {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(item->node, path);
+        HICON hIcon = extractItemIconAtSize(path, size);
+        if (hIcon) return hIcon;
+    }
+
+    return createScaledShellIcon(item->icon, size);
 }
 
 // lnk 图标解析入口：读出图标位置 → 提取目标图标 → 合成快捷方式箭头 → 加入
@@ -4208,6 +4431,10 @@ void clearIconCaches() {
     extCacheCount = 0;
     exeIconCacheCount = 0;
     folderIconCachedForStyle = -1;
+    // 缩放列表里的图标同样是「解析结果」，一并失效：这里只重置映射
+    // （-1 = 待转换），不销毁列表本身 —— 大图标视图下它此刻仍挂在控件的
+    // LVSIL_NORMAL 上，销毁会留下悬空句柄。下次绘制会按新图标重新追加。
+    for (int i = 0; i < scaledIconMapCap; i++) scaledIconMap[i] = -1;
 }
 
 // 更新表头排序指示箭头。
