@@ -1,4 +1,5 @@
 #include "main.h"
+#include <commoncontrols.h>   // IImageList：往 SIC 的全部共享镜像列表补图标用
 
 #define COLUMN_NAME_IDX 0
 #define COLUMN_TYPE_IDX 1
@@ -25,6 +26,11 @@ static HIMAGELIST currentImageList = NULL;
 
 // lnk 快捷方式图标解析入口（实现位于文件末尾的 PE/lnk 图标提取区）
 static int getLnkIconIndex(const wchar_t* path, bool large);
+
+// IID_IImageList 不在 mingw 的 libuuid 里，按 wine include/commoncontrols.idl
+// 的 uuid 本地定义
+static const IID wfm_IID_IImageList =
+    { 0x46eb5926, 0x582e, 0x4017, { 0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50 } };
 
 // 状态栏节流：搜索期间每批（100 项）都刷新一次状态栏没有意义，限制到约 5 次/秒。
 // 最终值由 MSG_SEARCH_DONE 里的 updateStatusbar() 保证正确。
@@ -3283,6 +3289,21 @@ static int getLnkIconIndex(const wchar_t* path, bool large) {
             Shell_GetImageLists(&himlBig, &himlSmall);
             HIMAGELIST himl = large ? himlBig : himlSmall;
             if (himl) result = ImageList_AddIcon(himl, hIcon);
+
+            // Wine 的 SIC（shell 图标缓存）把 5 个共享镜像列表当索引严格同步的
+            // 整体，追加时取最后一个列表（JUMBO）返回的索引当作通用索引。只往
+            // big/small 追加会让五个列表计数错开，之后任何经 SHGetFileInfo 走
+            // SIC 的文件拿到的索引会落在我们 lnk 图标的槽位上，图标互相串位。
+            // 这里把其余三个列表也补上保持计数一致（EXTRALARGE/JUMBO wfm 不
+            // 使用，ReplaceIcon 会按列表尺寸自行缩放）。
+            for (int shil = SHIL_EXTRALARGE; shil <= SHIL_JUMBO; shil++) {
+                IImageList* extra = NULL;
+                if (SUCCEEDED(SHGetImageList(shil, &wfm_IID_IImageList, (void**)&extra))) {
+                    int added = -1;
+                    IImageList_ReplaceIcon(extra, -1, hIcon, &added);
+                    IImageList_Release(extra);
+                }
+            }
             DestroyIcon(hIcon);
         }
     }
