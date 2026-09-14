@@ -415,6 +415,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             break;
         }
+        case WM_ACTIVATE: {
+            // 剪贴板是全局资源，别的程序（Wine 下还包括宿主系统本身）随时可以改，
+            // 而 WFM 只在「自己」做复制/剪切/清空时同步一次粘贴组与「清空剪贴板」
+            // 的可用性 —— 别处改了剪贴板，菜单就会停在旧状态上（例如启动那一刻
+            // 读到的剪贴板状态与菜单实际绘制时的状态不一致）。
+            // 重新获得焦点时再对齐一次，保证菜单/工具栏/状态栏显示的永远是实时状态。
+            if (LOWORD(wParam) != WA_INACTIVE && hwndToolbar && hwndStatusbar) {
+                onClipboardChanged();
+            }
+            break;
+        }
         case WM_SYSCOMMAND: {
             switch (LOWORD(wParam)) {
                 case ID_HELP_ABOUT: {
@@ -784,6 +795,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
 
     ShowWindow(hwndMain, SW_SHOW);
     UpdateWindow(hwndMain);
+
+    // 启动时对齐一次剪贴板相关 UI：菜单里的「粘贴 / 粘贴快捷方式 / 清空剪贴板」、
+    // 工具栏粘贴按钮、状态栏来源指示，全部由 CF_HDROP 是否可用来决定。
+    // createMainMenu 里已经设过菜单那一份，这里再统一对齐一次，确保窗口首次绘制
+    // 时三处状态一致（不依赖 WM_ACTIVATE 是否已经到达）。
+    onClipboardChanged();
 
     MSG msg;
     while(GetMessage(&msg, NULL, 0, 0) > 0) {
