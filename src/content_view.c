@@ -3078,17 +3078,15 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
     return pixels;
 }
 
-// Wine shell32 里 shortcut.ico 的资源 ID（dlls/shell32/shresdef.h 的
-// IDI_SHELL_SHORTCUT）。
-#define SHELL32_IDI_SHELL_SHORTCUT 30
-
-// 箭头角标尺寸：素材帧整体缩放到图标边长的这个百分比后叠在左下角。
-// 素材 glyph 占帧的一半边长略少（48px 帧为 20/48≈42%），75% 帧叠加后
-// 箭头实际约占图标边长的 31%（整帧叠加则是 50%，观感偏大）。
+// 快捷方式角标尺寸：素材帧整体缩放到图标边长的这个百分比后叠在左下角。
+// 素材是一只完整的小角标（浅灰渐变圆角方块 + 深色箭头，含投影），占帧边长的
+// 20/48≈42%（res/shortcut_overlay.ico 刻意按此比例生成）。75% 帧叠加后角标
+// 实际约占图标边长的 31%（整帧叠加则是 50%，观感偏大）。
 #define SHORTCUT_ARROW_PERCENT 75
 
-// 整数倍盒式均值降采样（预乘后平均，避免透明像素拉暗边缘）。仅用于
-// stock icon 兜底路径的尺寸适配，正常路径直接取素材原生帧，不缩放。
+// 整数倍盒式均值降采样（预乘后平均，避免透明像素拉暗边缘）。48px 素材缩到
+// 12px（÷4）或 24px（÷2）都走这里；只有非整数倍（stock icon 兜底那一路）
+// 才退到下面的双线性。
 static BYTE* downsampleIconPixels(const BYTE* src, int srcSize, int dstSize) {
     if (srcSize <= 0 || dstSize <= 0 || srcSize % dstSize != 0) return NULL;
     int s = srcSize / dstSize;
@@ -3120,18 +3118,24 @@ static BYTE* downsampleIconPixels(const BYTE* src, int srcSize, int dstSize) {
     return out;
 }
 
-// shell 的快捷方式箭头像素（SIID_LINK → shortcut.ico，与 Windows 同款素材）。
-// 取 48px 原生帧：素材各帧的 glyph 都固定在帧左下角，48px 帧占比最小
-// （20/48≈42%，16/32px 帧是 50%），且 48 能被常用叠加尺寸整除，缩小走
-// 盒式均值即可保持像素干净。加载失败退回 stock icon API。
+// 快捷方式角标像素（素材为 WFM 自带的 res/shortcut_overlay.ico，资源 ID
+// IDI_SHORTCUT_OVERLAY；由 tools/gen_shortcut_overlay.sh 从 Tango 图标主题的
+// emblem-symbolic-link 生成——该素材作者声明无条件供任何人使用，见脚本注释）。
+// 取 48px 帧：48 能被 12、24 整除，缩小走整数倍盒式均值即可保持像素干净；
+// 素材是完整的角标图案、固定在帧左下角、占 20/48，与「整帧缩到槽位 75% 后贴
+// 左下角」的合成几何约定配套（见 SHORTCUT_ARROW_PERCENT）。
+// 素材保留源图标的全部图层（渐变底板、内白描边、右下投影），只把箭头改成深色
+// 实心：糊的根源是箭头本身半透明、与浅灰底板几乎同色，装饰层缩下来反而贡献了
+// 立体感——别再删它们，也别再把箭头单独抠出来（试过，小尺寸下是个黑钩子）。
 static const BYTE* getShortcutOverlayPixels(int* outSize) {
     static BYTE* cached = NULL;
     static int cachedSize = 0;
     *outSize = cachedSize;
     if (cached) return cached;
 
-    HICON hOverlay = LoadImageW(GetModuleHandleW(L"shell32.dll"),
-                                MAKEINTRESOURCEW(SHELL32_IDI_SHELL_SHORTCUT),
+    // 从自身模块取资源：GetModuleHandleW(NULL) 即 wfm.exe，不依赖任何系统 DLL
+    HICON hOverlay = LoadImageW(GetModuleHandleW(NULL),
+                                MAKEINTRESOURCEW(IDI_SHORTCUT_OVERLAY),
                                 IMAGE_ICON, 48, 48, LR_DEFAULTCOLOR);
     if (hOverlay) {
         int w = 0, h = 0;
@@ -3144,8 +3148,8 @@ static const BYTE* getShortcutOverlayPixels(int* outSize) {
         else free(pixels);
     }
 
-    // 兜底：非 Wine 环境（真 Windows 的 shell32 资源 ID 30 不是 shortcut.ico），
-    // 或素材取像素失败（尺寸不符 / 无 alpha 且掩码补齐失败）时走 stock icon。
+    // 兜底：资源缺失（正常构建不会发生）或素材取像素失败（尺寸不符 / 无 alpha
+    // 且掩码补齐失败）时退回系统 stock icon。
     // 只有两条路都试过仍为空才算失败——否则缓存会永久停在 NULL，角标再也出不来。
     if (!cached) {
         // SHGetStockIconInfo 内部是 LoadIconW，返回共享 HICON，不能 DestroyIcon
@@ -3222,11 +3226,10 @@ static BYTE* scaleIconPixelsBilinear(const BYTE* src, int srcSize, int dstSize) 
     return out;
 }
 
-// 用 shell 的快捷方式箭头在目标图标左下角合成角标。合成始终发生在列表
+// 用自带的快捷方式箭头在目标图标左下角合成角标。合成始终发生在列表
 // 槽位尺寸（outSize，16/32）上：目标图标若是低分辨率源，先双线性平滑
-// 缩放到槽位尺寸，箭头再以 shortcut.ico 原生帧的固定像素叠加——箭头的
-// 清晰度与目标图标的实际分辨率完全无关。失败返回 NULL，调用方回退到
-// 不带角标的目标图标。
+// 缩放到槽位尺寸，箭头再以素材帧的固定像素叠加——箭头的清晰度与目标
+// 图标的实际分辨率完全无关。失败返回 NULL，调用方回退到不带角标的目标图标。
 static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     if (!hTarget || outSize <= 0) return NULL;
 
