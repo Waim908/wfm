@@ -2930,16 +2930,26 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
             for (int i = 0; i < width * height && !hasAlpha; i++)
                 if (pixels[i * 4 + 3]) hasAlpha = true;
 
+            bool alphaReady = hasAlpha;
             if (!hasAlpha && ii.hbmMask) {
-                BITMAPINFO maskBmi = {0};
-                maskBmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-                maskBmi.bmiHeader.biWidth = width;
-                maskBmi.bmiHeader.biHeight = -2 * height;
-                maskBmi.bmiHeader.biPlanes = 1;
-                maskBmi.bmiHeader.biBitCount = 1;
+                // GetDIBits 会把调色板回写到 bmiColors（1bpp 是 2 项 RGBQUAD），
+                // 而 BITMAPINFO 只带 1 项，直接传就是 4 字节栈溢出；这里留满 256 项
+                struct {
+                    BITMAPINFOHEADER header;
+                    RGBQUAD colors[256];
+                } maskBmi = {0};
+                maskBmi.header.biSize = sizeof(BITMAPINFOHEADER);
+                maskBmi.header.biWidth = width;
+                maskBmi.header.biHeight = -2 * height;
+                maskBmi.header.biPlanes = 1;
+                maskBmi.header.biBitCount = 1;
                 int andRow = (width + 31) / 32 * 4;
                 BYTE* maskBits = (BYTE*)malloc((size_t)andRow * 2 * height);
-                if (maskBits && GetDIBits(hdcScreen, ii.hbmMask, 0, 2 * height, maskBits, &maskBmi, DIB_RGB_COLORS)) {
+                if (maskBits && GetDIBits(hdcScreen, ii.hbmMask, 0, 2 * height, maskBits,
+                                          (BITMAPINFO*)&maskBmi, DIB_RGB_COLORS)) {
+                    // 掩码全 1（整幅被掩掉）时补完仍是一片透明，所以这里统计是否
+                    // 真补出过不透明像素：GetDIBits 成功 ≠ 结果可见
+                    bool anyOpaque = false;
                     for (int y = 0; y < height; y++) {
                         const BYTE* andRowBits = maskBits + (size_t)y * andRow;
                         for (int x = 0; x < width; x++) {
@@ -2950,11 +2960,22 @@ static BYTE* getIconPixels(HICON hIcon, int* outW, int* outH) {
                                 pixels[px + 2] = 0;
                                 pixels[px + 3] = 0;
                             }
-                            else pixels[px + 3] = 255;
+                            else {
+                                pixels[px + 3] = 255;
+                                anyOpaque = true;
+                            }
                         }
                     }
+                    alphaReady = anyOpaque;
                 }
                 free(maskBits);
+            }
+
+            // 掩码补齐也失败时像素仍是全透明，合出来就是不可见图标——
+            // 宁可返回失败让调用方走兜底
+            if (!alphaReady) {
+                free(pixels);
+                pixels = NULL;
             }
         }
         ReleaseDC(NULL, hdcScreen);
@@ -3034,9 +3055,12 @@ static const BYTE* getShortcutOverlayPixels(int* outSize) {
         }
         else free(pixels);
     }
-    else {
-        // 非 Wine 环境（真 Windows 的 shell32 资源 ID 30 不是 shortcut.ico）：
-        // 退回 stock icon API（LoadIconW 返回共享 HICON，不能 DestroyIcon）
+
+    // 兜底：非 Wine 环境（真 Windows 的 shell32 资源 ID 30 不是 shortcut.ico），
+    // 或素材取像素失败（尺寸不符 / 无 alpha 且掩码补齐失败）时走 stock icon。
+    // 只有两条路都试过仍为空才算失败——否则缓存会永久停在 NULL，角标再也出不来。
+    if (!cached) {
+        // SHGetStockIconInfo 内部是 LoadIconW，返回共享 HICON，不能 DestroyIcon
         SHSTOCKICONINFO sii = {0};
         sii.cbSize = sizeof(sii);
         if (SUCCEEDED(SHGetStockIconInfo(SIID_LINK, SHGSI_ICON, &sii)) && sii.hIcon) {
