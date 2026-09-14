@@ -81,12 +81,14 @@ static inline void loadStrings_en() {
     lc_str.mount = L"Mount";
     lc_str.locate_iso = L"Locate Image File";
     lc_str.open_file_location = L"Open File Location";
+    lc_str.open_link_target = L"Locate Target File";
     lc_str.unmount_iso = L"Unmount";
     lc_str.msg_no_mounted_image = L"No mounted image file";
     lc_str.msg_x_drive_not_found = L"X: drive not found. Please add drive X: in winecfg and set it as CD-ROM type";
     lc_str.msg_image_dir_not_found = L"Image file directory not found";
     lc_str.msg_no_libcdio = L"This version does not support libcdio";
     lc_str.msg_confirm_unmount_iso = L"Unmounting will delete ALL contents of X:.\n\nThe X: drive is usually linked to a real folder, so this cannot be undone. Continue?";
+    lc_str.msg_link_target_not_found = L"Cannot locate the shortcut target: %ls";
     lc_str.save_icon = L"Save Icon";
     lc_str.fmt_drive_space = L"%ls / %ls";
 

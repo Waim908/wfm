@@ -81,12 +81,14 @@ static inline void loadStrings_ru() {
     lc_str.mount = L"Монтировать";
     lc_str.locate_iso = L"Найти файл образа";
     lc_str.open_file_location = L"Открыть расположение файла";
+    lc_str.open_link_target = L"Найти целевой файл";
     lc_str.unmount_iso = L"Размонтировать";
     lc_str.msg_no_mounted_image = L"Нет смонтированного образа";
     lc_str.msg_x_drive_not_found = L"\u0414\u0438\u0441\u043a X: \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d. \u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u0434\u0438\u0441\u043a X: \u0432 winecfg \u0438 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u0442\u0438\u043f CD-ROM";
     lc_str.msg_image_dir_not_found = L"Папка файла образа не найдена";
     lc_str.msg_no_libcdio = L"Эта версия не поддерживает libcdio";
     lc_str.msg_confirm_unmount_iso = L"Отмонтирование удалит ВСЁ содержимое диска X:.\n\nОбычно X: указывает на реальную папку, поэтому отменить это нельзя. Продолжить?";
+    lc_str.msg_link_target_not_found = L"Не удалось найти цель ярлыка: %ls";
     lc_str.save_icon = L"Сохранить значок";
     lc_str.fmt_drive_space = L"%ls / %ls";
 

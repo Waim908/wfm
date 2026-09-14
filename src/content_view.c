@@ -206,8 +206,11 @@ void onMenuItemUnloadISOImageClick();
 #endif
 static void onMenuItemShowIconClick();
 static void onMenuItemOpenFileLocationClick();
+static void onMenuItemOpenLinkTargetClick();
 static void onMenuItemOpenWithClick();
 static bool isInSearchMode();
+// 解析 lnk 的目标路径（实现与 lnk 图标提取放在一起，见文件末尾）
+static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch);
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL, false};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL, false};
@@ -227,6 +230,7 @@ static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOIma
 static struct ContextMenuItem cmiShowIcon = {NULL, &onMenuItemShowIconClick, NULL, false};
 static struct ContextMenuItem cmiOpenWith = {NULL, &onMenuItemOpenWithClick, NULL, false};
 static struct ContextMenuItem cmiOpenFileLocation = {NULL, &onMenuItemOpenFileLocationClick, NULL, false};
+static struct ContextMenuItem cmiOpenLinkTarget = {NULL, &onMenuItemOpenLinkTargetClick, NULL, false};
 static void onMenuItemImportRegClick();
 static struct ContextMenuItem cmiImportReg = {NULL, &onMenuItemImportRegClick, NULL, false};
 
@@ -1239,11 +1243,15 @@ static void createContextMenu(enum ContextMenuType type) {
             if (inSearch) {
                 addContextMenuItem(hMenu, id++, &cmiOpenFileLocation, false);
             }
-            // .reg 文件显示导入到注册表菜单项
+            // .lnk 显示"定位到目标文件路径"：解析快捷方式的目标，跳到目标所在目录；
+            // .reg 文件显示导入到注册表菜单项。扩展名互斥，用 else if 避免多算一次 id
             if (selectedItems[0]->type == TYPE_FILE) {
                 wchar_t filePath[MAX_PATH] = {0};
                 getFileNodePath(selectedItems[0], filePath);
-                if (hasFileExtension(filePath, L"reg")) {
+                if (hasFileExtension(filePath, L"lnk")) {
+                    addContextMenuItem(hMenu, id++, &cmiOpenLinkTarget, false);
+                }
+                else if (hasFileExtension(filePath, L"reg")) {
                     addContextMenuItem(hMenu, id++, &cmiImportReg, false);
                 }
             }
@@ -2121,6 +2129,7 @@ void createContentView() {
     cmiShowIcon.text = lc_str.show_icon;
     cmiOpenWith.text = lc_str.open_with_menu;
     cmiOpenFileLocation.text = lc_str.open_file_location;
+    cmiOpenLinkTarget.text = lc_str.open_link_target;
     cmiImportReg.text = lc_str.import_reg;
     
     OrigWndProc = (WNDPROC)SetWindowLongPtr(hwndContentView, GWLP_WNDPROC, (LONG_PTR)ContentViewWndProc);
@@ -2299,6 +2308,50 @@ static void onMenuItemOpenFileLocationClick() {
 
     // 延迟导航：菜单回调深调用链会导致栈溢出，用PostMessage在回调返回后执行
     wcscpy_s(pendingNavigatePath, MAX_PATH, parentPath);
+    PostMessage(hwndContentView, MSG_NAVIGATE_TO_PATH, 0, 0);
+}
+
+// 定位 lnk 的目标：解析快捷方式真正指向的路径，跳到目标所在目录并选中目标本身。
+// 目标是文件还是目录都定位到其父目录，与「打开文件所在位置」的语义保持一致。
+static void onMenuItemOpenLinkTargetClick() {
+    if (numSelectedItems != 1 || !selectedItems[0]) return;
+
+    wchar_t lnkPath[MAX_PATH] = {0};
+    getFileNodePath(selectedItems[0], lnkPath);
+    if (lnkPath[0] == L'\0') return;
+
+    wchar_t targetPath[MAX_PATH] = {0};
+    if (!resolveLnkTargetPath(lnkPath, targetPath, MAX_PATH)) {
+        wchar_t msg[MAX_PATH + 64] = {0};
+        swprintfTrunc(msg, MAX_PATH + 64, lc_str.msg_link_target_not_found, selectedItems[0]->name);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    // 后面要导航（旧文件树会被释放），所以路径与文件名都先算好、只留字符串
+    wchar_t parentDir[MAX_PATH] = {0};
+    getParentDirFromPath(targetPath, parentDir);
+    // 目标是盘根下的文件时 getParentDirFromPath 只给出 "C:"，补上反斜杠：getFileNodePath
+    // 给驱动器节点的形式是 "C:\"，setCurrPathFromString 也按这个形式解析
+    if (parentDir[0] && parentDir[1] == L':' && parentDir[2] == L'\0') {
+        parentDir[2] = L'\\';
+        parentDir[3] = L'\0';
+    }
+
+    if (parentDir[0] == L'\0' || !isPathExists(parentDir)) {
+        wchar_t msg[MAX_PATH + 64] = {0};
+        swprintfTrunc(msg, MAX_PATH + 64, lc_str.msg_link_target_not_found, targetPath);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    getBasenameFromPath(targetPath, pendingSelectName, MAX_PATH, false);
+
+    // 搜索还在跑时先取消，否则 refreshContentView 会提前返回导致悬空指针
+    cancelSearch();
+
+    // 延迟导航：菜单回调深调用链直接导航会栈溢出，用 PostMessage 在回调返回后执行
+    wcscpy_s(pendingNavigatePath, MAX_PATH, parentDir);
     PostMessage(hwndContentView, MSG_NAVIGATE_TO_PATH, 0, 0);
 }
 
@@ -3237,6 +3290,41 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
 
     free(dst);
     return result;
+}
+
+// 解析 lnk 指向的目标路径（不取图标，只取路径）。用 SLGP_RAWPATH 拿 lnk 里存的
+// 原始路径再自己展开 %var%：Wine 的 IShellLinkW_fnGetPath 完全忽略 fFlags、直接
+// 返回 Load 时存下的 sPath，而真 Windows 下 SLGP_RAWPATH 正好也是不展开的形式，
+// 两边都靠这一步统一。取不到路径（目标是 URL、MSI 广告式快捷方式、路径为空）
+// 返回 false——注意 Wine 用 S_FALSE 表示「没有路径」，SUCCEEDED(S_FALSE) 为真，
+// 所以必须靠内容判空，不能只看 HRESULT。
+static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch) {
+    if (!targetPath || targetCch <= 0) return false;
+    targetPath[0] = L'\0';
+    if (!lnkPath || !lnkPath[0]) return false;
+
+    bool ok = false;
+    IShellLinkW* isl = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IShellLinkW, (void**)&isl))) {
+        IPersistFile* ipf = NULL;
+        if (SUCCEEDED(IShellLinkW_QueryInterface(isl, &IID_IPersistFile, (void**)&ipf))) {
+            if (SUCCEEDED(IPersistFile_Load(ipf, lnkPath, STGM_READ | STGM_SHARE_DENY_WRITE))) {
+                wchar_t raw[MAX_PATH] = {0};
+                if (SUCCEEDED(IShellLinkW_GetPath(isl, raw, MAX_PATH, NULL, SLGP_RAWPATH)) && raw[0]) {
+                    // lnk 里常见 %windir%\system32\... 形式，先展开；放不下保留原样
+                    wchar_t expanded[MAX_PATH] = {0};
+                    DWORD n = ExpandEnvironmentStringsW(raw, expanded, MAX_PATH);
+                    const wchar_t* finalPath = (n > 0 && n <= MAX_PATH && expanded[0]) ? expanded : raw;
+                    wcsncpy_s(targetPath, (size_t)targetCch, finalPath, _TRUNCATE);
+                    ok = true;
+                }
+            }
+            IPersistFile_Release(ipf);
+        }
+        IShellLinkW_Release(isl);
+    }
+    return ok;
 }
 
 // 解析 lnk 的图标来源。优先 ICON_LOCATION 字符串（含图标组索引）；没有则

@@ -213,12 +213,14 @@ struct LC_STR {
     wchar_t* mount;
     wchar_t* locate_iso;
     wchar_t* open_file_location;
+    wchar_t* open_link_target;
     wchar_t* unmount_iso;
     wchar_t* msg_no_mounted_image;
     wchar_t* msg_image_dir_not_found;
     wchar_t* msg_x_drive_not_found;
     wchar_t* msg_no_libcdio;
     wchar_t* msg_confirm_unmount_iso;
+    wchar_t* msg_link_target_not_found;
     wchar_t* save_icon;
     wchar_t* fmt_drive_space;
 
