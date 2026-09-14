@@ -46,36 +46,6 @@ static int getBookmarkRootIconIndex() {
     return s_cachedFavIcon;
 }
 
-//=============================================================================
-// 图标缓存持久化（注册表）
-//
-// 扩展名 → 系统图标索引 的映射被保存到注册表中，以便跨会话复用。
-// 缓存位置：HKEY_CURRENT_USER\SOFTWARE\Winlator\WFM\IconCache
-//
-// 这样用户可以通过 regedit 查看和管理图标缓存。
-//=============================================================================
-
-void saveExtIconCacheToRegistry(const wchar_t* ext, int iconIndex) {
-    HKEY hkey;
-    if (RegCreateKeyEx(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS) {
-        return;
-    }
-    RegSetValueEx(hkey, ext, 0, REG_DWORD, (const BYTE*)&iconIndex, sizeof(iconIndex));
-    RegCloseKey(hkey);
-}
-
-int loadExtIconCacheFromRegistry(const wchar_t* ext, int* outIconIndex) {
-    HKEY hkey;
-    if (RegOpenKeyEx(HKEY_CURRENT_USER, ICONCACHE_REGISTRY_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
-        return 0;
-    }
-    DWORD type = 0;
-    DWORD dataSize = sizeof(int);
-    LONG result = RegQueryValueEx(hkey, ext, NULL, &type, (LPBYTE)outIconIndex, &dataSize);
-    RegCloseKey(hkey);
-    return (result == ERROR_SUCCESS && type == REG_DWORD) ? 1 : 0;
-}
-
 void loadBookmarks() {
     g_bookmarkCount = 0;
     
