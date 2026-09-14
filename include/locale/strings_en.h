@@ -101,6 +101,16 @@ static inline void loadStrings_en() {
     lc_str.msg_moving_files = L"Moving files, please wait...";
     lc_str.msg_extracting_files = L"Extracting files, please wait...";
     lc_str.msg_cancel_file_operation = L"Do you want to cancel the operation?";
+    lc_str.conflict_title = L"Replace or Skip Items";
+    lc_str.conflict_existing_file = L"A file with the same name already exists in the destination:\n%ls";
+    lc_str.conflict_existing_folder = L"A folder with the same name already exists in the destination:\n%ls";
+    lc_str.conflict_replace = L"Replace";
+    lc_str.conflict_skip = L"Skip";
+    lc_str.conflict_keep_both = L"Keep both";
+    // 同目录粘贴留副本时后缀在文件名后：名字 - 副本.ext（资源管理器的写法）
+    lc_str.copy_suffix = L"Copy";
+    lc_str.conflict_apply_all = L"Do this for all conflicting items";
+    lc_str.msg_file_op_summary = L"Operation finished: %d succeeded, %d skipped, %d failed.";
     lc_str.msg_confirm_delete_item = L"Are you sure you want to delete \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Are you sure you want to delete %d items?";
     lc_str.msg_confirm_exit_app = L"Are you sure you want to exit?";

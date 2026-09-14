@@ -15,7 +15,11 @@
 
 enum Msg {
     MSG_CLOSE = WM_APP,
-    MSG_NAVIGATE_REFRESH
+    MSG_NAVIGATE_REFRESH,
+    // 粘贴遇到同名项：worker 线程用 SendMessage 请求 UI 线程弹模态框并等结果。
+    // 模态框必须在 UI 线程建（worker 线程建窗体会和主消息循环抢消息），而
+    // SendMessage 是同步的，参数直接指向 worker 栈上的结构体即可。
+    MSG_CONFLICT_PROMPT
 };
 
 enum FileAction {
@@ -26,12 +30,38 @@ enum FileAction {
     ACTION_ISO_EXTRACT
 };
 
+// 同名冲突的处理策略。ASK 表示还没问过；用户勾选「对全部冲突项使用相同操作」
+// 后，本批次后续冲突直接套用已选策略，不再询问。
+enum ConflictChoice {
+    CONFLICT_ASK = 0,
+    CONFLICT_REPLACE,
+    CONFLICT_SKIP,
+    CONFLICT_KEEP_BOTH,
+    CONFLICT_CANCEL
+};
+
+// 传给冲突对话框的上下文。text 由 worker 线程填好，choice/applyToAll 由
+// 对话框写回（SendMessage 返回时即已生效）。
+struct ConflictPrompt {
+    wchar_t text[512];
+    bool allowApplyAll;
+    // 源与目标其实是同一个文件时置起：「替换」在这里等于拿自己覆盖自己，
+    // 不会产生任何变化，把按钮置灰免得给出一个什么都不做的选项。
+    bool hideReplace;
+    enum ConflictChoice choice;
+    bool applyToAll;
+};
+
 struct ActionData {
     enum FileAction action;
     wchar_t** srcPaths;
     int numSrcPaths;
     wchar_t* dstPath;
     bool cancel;
+    // 收尾汇总用（仅复制/移动会累加）
+    int succeededCount;
+    int skippedCount;
+    int failedCount;
 };
 
 static HWND hwndDlg;
@@ -324,6 +354,288 @@ static void freeActionData() {
     actionData = NULL;
 }
 
+// ===== 同名冲突处理（资源管理器语义） =====
+// 逐条检查目标是否已有同名项，有冲突就弹 IDD_CONFLICT 让用户选
+// 替换 / 跳过 / 保留两者，并可勾选「对全部冲突项使用相同操作」。
+//
+// 不用 SHFileOperation 自带的确认是有原因的（wine/dlls/shell32/shlfileop.c）：
+// 它只是「是/否/全是」消息框，且「全是」仅在单批源文件多于一个时才出现
+// （:1190 的 SHELL_ConfirmDialogW(..., op->bManyItems)），更关键的是选「否」
+// 会 return DE_OPCANCELLED，被 copy_move_files() 的循环 break 掉（:1223）——
+// 那会中止整批剩余文件，而不是跳过当前这一个。FOF_RENAMEONCOLLISION 在
+// Wine 里更是 FIXME 后直接忽略（check_flags，:1382），「保留两者」指望不上系统。
+
+// 冲突对话框与调用方之间的唯一通道。worker 线程 SendMessage 时把结构体
+// 挂在上面，UI 线程在对话框的 WM_COMMAND 里写回选择。同一时刻只可能有一个
+// 文件操作在跑（actionData 本身就是单例），所以单槽位足够。
+static struct ConflictPrompt* activeConflictPrompt = NULL;
+
+static INT_PTR CALLBACK ConflictDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    UNREFERENCED_PARAMETER(lParam);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            RECT rect, rect1;
+            GetWindowRect(hwndMain, &rect);
+            GetClientRect(hwndDlg, &rect1);
+            SetWindowPos(hwndDlg, NULL,
+                (rect.right + rect.left) / 2 - (rect1.right - rect1.left) / 2,
+                (rect.bottom + rect.top) / 2 - (rect1.bottom - rect1.top) / 2,
+                0, 0, SWP_NOZORDER | SWP_NOSIZE);
+
+            // 先按「取消」记账：用右上角 X 关窗不会走 WM_COMMAND，
+            // 靠这个初值兜底，语义与点「取消」一致
+            if (activeConflictPrompt) activeConflictPrompt->choice = CONFLICT_CANCEL;
+
+            SetWindowText(hwndDlg, lc_str.conflict_title);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_CONFLICT_TEXT),
+                          activeConflictPrompt ? activeConflictPrompt->text : L"");
+            SetWindowText(GetDlgItem(hwndDlg, IDC_BTN_REPLACE), lc_str.conflict_replace);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_BTN_SKIP), lc_str.conflict_skip);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_BTN_KEEP_BOTH), lc_str.conflict_keep_both);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_CHECK_APPLY_ALL), lc_str.conflict_apply_all);
+            SetWindowText(GetDlgItem(hwndDlg, IDCANCEL), lc_str.cancel);
+
+            // 只剩最后一个条目时「对全部」没有意义，隐藏（资源管理器同样不显示）
+            if (activeConflictPrompt && !activeConflictPrompt->allowApplyAll) {
+                ShowWindow(GetDlgItem(hwndDlg, IDC_CHECK_APPLY_ALL), SW_HIDE);
+            }
+            // 源就是目标：「替换」无从下手（覆盖自己＝不变），置灰并把焦点移到
+            // 「保留两者」——这里真正有意义的选择是它。默认按钮本来就是替换，
+            // 停在灰按钮上会让回车变成空操作。
+            HWND hwndReplace = GetDlgItem(hwndDlg, IDC_BTN_REPLACE);
+            HWND hwndFocus = hwndReplace;
+            if (activeConflictPrompt && activeConflictPrompt->hideReplace) {
+                EnableWindow(hwndReplace, FALSE);
+                hwndFocus = GetDlgItem(hwndDlg, IDC_BTN_KEEP_BOTH);
+                // 默认按钮也要跟着挪，否则回车落在置灰的「替换」上等于没反应。
+                // DefDlgProc 会顺带把 BS_DEFPUSHBUTTON 样式换过去（wine/dlls/
+                // user32/defdlg.c:117 的 DEFDLG_SetDefId），外观一并正确。
+                SendMessage(hwndDlg, DM_SETDEFID, IDC_BTN_KEEP_BOTH, 0);
+            }
+            SetFocus(hwndFocus);
+            return (INT_PTR)FALSE;   // 焦点已自行设置，不必让系统再选默认按钮
+        }
+        case WM_COMMAND: {
+            if (!activeConflictPrompt) break;
+
+            enum ConflictChoice choice = CONFLICT_ASK;
+            switch (LOWORD(wParam)) {
+                case IDC_BTN_REPLACE:   choice = CONFLICT_REPLACE;   break;
+                case IDC_BTN_SKIP:      choice = CONFLICT_SKIP;      break;
+                case IDC_BTN_KEEP_BOTH: choice = CONFLICT_KEEP_BOTH; break;
+                case IDCANCEL:          choice = CONFLICT_CANCEL;    break;
+                default: break;
+            }
+            if (choice == CONFLICT_ASK) break;
+
+            activeConflictPrompt->choice = choice;
+            activeConflictPrompt->applyToAll =
+                IsDlgButtonChecked(hwndDlg, IDC_CHECK_APPLY_ALL) == BST_CHECKED;
+            EndDialog(hwndDlg, LOWORD(wParam));
+            break;
+        }
+        case WM_CLOSE:
+            EndDialog(hwndDlg, IDCANCEL);
+            break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+// 让 UI 线程弹冲突对话框并取回结果。对话框建不出来时退化为「跳过这一项」，
+// 而不是把整批操作取消掉。
+static void promptConflict(HWND hwndDlg, const wchar_t* name, bool isFolder,
+                           bool allowApplyAll, bool hideReplace, struct ConflictPrompt* out) {
+    memset(out, 0, sizeof(*out));
+    swprintfTrunc(out->text, 512,
+                  isFolder ? lc_str.conflict_existing_folder : lc_str.conflict_existing_file,
+                  name);
+    out->allowApplyAll = allowApplyAll;
+    out->hideReplace = hideReplace;
+    out->choice = CONFLICT_SKIP;
+
+    activeConflictPrompt = out;
+    SendMessage(hwndDlg, MSG_CONFLICT_PROMPT, 0, 0);
+    activeConflictPrompt = NULL;
+}
+
+static bool isDirectoryPath(const wchar_t* path) {
+    DWORD attrs = GetFileAttributes(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// 把文件名拆成主干和扩展名（扩展名含点号）。以点号开头的隐藏文件（.gitignore）
+// 整个当主干；没有扩展名时 ext 是空串。
+static void splitNameExt(const wchar_t* name, wchar_t* stem, int stemCch,
+                         wchar_t* ext, int extCch) {
+    if (!name || !stem || !ext || stemCch <= 0 || extCch <= 0) return;
+
+    wcsncpy_s(stem, (size_t)stemCch, name, _TRUNCATE);
+    ext[0] = L'\0';
+
+    wchar_t* lastDot = wcsrchr(stem, L'.');
+    if (lastDot && lastDot != stem) {
+        wcsncpy_s(ext, (size_t)extCch, lastDot, _TRUNCATE);
+        *lastDot = L'\0';
+    }
+}
+
+// 候选名可用则写进 out 并返回 true。两个条件：拼出来放得下双 \0（pTo 是按
+// 双 \0 结尾的多字符串解析的），且当前不存在。名字长到被截断时，拼出的路径
+// 一定顶满 outCch，会被长度检查挡下——绝不退化成「写进截断路径」。
+static bool tryAcceptCandidate(wchar_t* dstDir, wchar_t* candidate,
+                               wchar_t* out, int outCch) {
+    joinPaths(dstDir, candidate, out, outCch);
+    size_t len = wcslen(out);
+    if (len == 0 || len + 1 >= (size_t)outCch) return false;
+    if (isPathExists(out)) return false;
+    out[len + 1] = L'\0';
+    return true;
+}
+
+// 生成「保留两者」的目标路径：name.ext -> "name (1).ext"、"name (2).ext" …
+// 编号从 1 起，与资源管理器一致（它把首份副本叫 image (1).png）。
+static bool makeUniquePath(wchar_t* dstDir, const wchar_t* name, wchar_t* out, int outCch) {
+    if (!dstDir || !name || !out || outCch <= 0) return false;
+
+    wchar_t stem[MAX_PATH] = {0};
+    wchar_t ext[MAX_PATH] = {0};
+    splitNameExt(name, stem, MAX_PATH, ext, MAX_PATH);
+
+    for (int n = 1; n < 10000; n++) {
+        wchar_t candidate[MAX_PATH] = {0};
+        swprintfTrunc(candidate, MAX_PATH, L"%ls (%d)%ls", stem, n, ext);
+        if (tryAcceptCandidate(dstDir, candidate, out, outCch)) return true;
+    }
+    return false;
+}
+
+// 同目录留副本的目标路径："name - 副本.ext"，再冲突则 "name - 副本 (2).ext" …
+// 这是资源管理器往自己所在目录粘贴时的命名（英文 … - Copy.ext），和对话框里
+// 「保留两者」用的 "name (1).ext" 不是同一套，故单独一个函数。
+static bool makeCopyPath(wchar_t* dstDir, const wchar_t* name, wchar_t* out, int outCch) {
+    if (!dstDir || !name || !out || outCch <= 0) return false;
+    if (!lc_str.copy_suffix || lc_str.copy_suffix[0] == L'\0') {
+        return makeUniquePath(dstDir, name, out, outCch);
+    }
+
+    wchar_t stem[MAX_PATH] = {0};
+    wchar_t ext[MAX_PATH] = {0};
+    splitNameExt(name, stem, MAX_PATH, ext, MAX_PATH);
+
+    for (int n = 1; n < 10000; n++) {
+        wchar_t candidate[MAX_PATH] = {0};
+        if (n == 1) {
+            swprintfTrunc(candidate, MAX_PATH, L"%ls - %ls%ls", stem, lc_str.copy_suffix, ext);
+        }
+        else {
+            swprintfTrunc(candidate, MAX_PATH, L"%ls - %ls (%d)%ls", stem, lc_str.copy_suffix, n, ext);
+        }
+        if (tryAcceptCandidate(dstDir, candidate, out, outCch)) return true;
+    }
+    return false;
+}
+
+// 复制/移动单个条目，含同名冲突处理。返回 false 表示这一条没做成
+// （跳过或失败，已分别记入计数器）；用户中止整批时置 actionData->cancel。
+static bool copyMoveOneItem(struct ActionData* ad, int index, HWND hwndDlg,
+                            enum ConflictChoice* applyAll) {
+    const wchar_t* srcPath = ad->srcPaths[index];
+
+    // 默认目标就是目标目录本身；「保留两者」时换成显式的新文件名（见下）。
+    // target 全零初始化，再显式补上第二个 \0 —— SHFileOperation 的 pTo
+    // 要求双 \0 结尾的多字符串，缺了它真 Windows 会读越界。
+    wchar_t target[MAX_PATH] = {0};
+    int dstLen = (int)wcslen(ad->dstPath);
+    if (dstLen <= 0 || dstLen + 1 >= MAX_PATH) {
+        ad->failedCount++;
+        return false;
+    }
+    wcsncpy_s(target, MAX_PATH, ad->dstPath, _TRUNCATE);
+    target[dstLen + 1] = L'\0';
+
+    DWORD extraFlags = 0;
+
+    // 取不出名字的情况（剪贴板里是盘根 "C:\" 这类）不做冲突检测：
+    // 整条交给 SHFileOperation 按原样处理，别让冲突层把原本能做的事挡掉
+    wchar_t name[MAX_PATH] = {0};
+    getBasenameFromPath(srcPath, name, MAX_PATH, false);
+
+    wchar_t existing[MAX_PATH] = {0};
+    if (name[0] != L'\0') joinPaths(ad->dstPath, name, existing, MAX_PATH);
+
+    if (name[0] != L'\0' && isPathExists(existing)) {
+        // 源与目标其实是同一个文件（往自己所在目录里粘贴）。这种情况下 SHFileOperation
+        // 自己也会以 DE_SAMEFILE 直接失败（wine/dlls/shell32/shlfileop.c:1186 用
+        // wcscmp 比对后返回），所以得在这里判掉：
+        //   移动 → 本来就没有任何可做的事，也不会丢数据，按资源管理器静默跳过；
+        //   复制 → 和普通同名冲突一样问一次，只是「保留两者」改用资源管理器的
+        //          「名字 - 副本.ext」命名（见 makeCopyPath）。
+        bool sameItem = (wcsicmp(existing, srcPath) == 0);
+
+        if (sameItem && ad->action == ACTION_MOVE) {
+            ad->skippedCount++;
+            return false;
+        }
+
+        enum ConflictChoice choice = *applyAll;
+        if (choice == CONFLICT_ASK) {
+            struct ConflictPrompt prompt;
+            promptConflict(hwndDlg, name, isDirectoryPath(existing),
+                           index + 1 < ad->numSrcPaths, sameItem, &prompt);
+            choice = prompt.choice;
+            if (prompt.applyToAll) *applyAll = choice;
+        }
+
+        if (choice == CONFLICT_CANCEL) {
+            ad->cancel = true;
+            return false;
+        }
+        if (choice == CONFLICT_SKIP) {
+            ad->skippedCount++;
+            return false;
+        }
+        if (choice == CONFLICT_KEEP_BOTH) {
+            bool ok = sameItem ? makeCopyPath(ad->dstPath, name, target, MAX_PATH)
+                               : makeUniquePath(ad->dstPath, name, target, MAX_PATH);
+            if (!ok) {
+                ad->failedCount++;
+                return false;
+            }
+            // 走 FOF_MULTIDESTFILES：此时 pTo 是「目标文件名」而不是目标目录，
+            // 这正是该标志的文档语义（pTo 与 pFrom 一一对应），真 Windows 同样成立
+            extraFlags = FOF_MULTIDESTFILES;
+        }
+        else {
+            // CONFLICT_REPLACE：target 保持目标目录，覆盖交给 SHFileOperation
+            // （文件走 CopyFileW/MoveFileEx+REPLACE_EXISTING，文件夹则是合并内容，
+            //   与资源管理器的「替换」一致）
+            if (sameItem) {
+                // 源就是目标，覆盖自己等于什么都不做（SHFileOperation 也会以
+                // DE_SAMEFILE 失败）。对话框里这个按钮已经置灰，这里是兜底：
+                // 记成「跳过」而不是「失败」，别把一个空操作报成错误。
+                ad->skippedCount++;
+                return false;
+            }
+        }
+    }
+
+    SHFILEOPSTRUCT sfo = {0};
+    sfo.hwnd = hwndDlg;
+    sfo.wFunc = ad->action == ACTION_COPY ? FO_COPY : FO_MOVE;
+    sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | extraFlags;
+    sfo.pTo = target;
+    sfo.pFrom = ad->srcPaths[index];
+
+    if (SHFileOperation(&sfo) != 0) {
+        // 单条失败不再中止整批（资源管理器也是做完剩下的再报告）
+        ad->failedCount++;
+        return false;
+    }
+    ad->succeededCount++;
+    return true;
+}
+
 INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
     UNREFERENCED_PARAMETER(lParam);
 
@@ -385,6 +697,12 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
             break;
         }
         case MSG_CLOSE: {
+            // 汇总数值要在 freeActionData 之前取出来
+            int succeeded = actionData ? actionData->succeededCount : 0;
+            int skipped = actionData ? actionData->skippedCount : 0;
+            int failed = actionData ? actionData->failedCount : 0;
+            bool cancelled = actionData ? actionData->cancel : false;
+
             freeActionData();
             DestroyWindow(hwndDlg);
             hwndDlg = NULL;
@@ -392,6 +710,23 @@ INT_PTR CALLBACK FileActionDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPA
             // 强制同步整窗重绘：确认框/进度窗关闭留下的残影不能指望
             // 系统后续的激活重绘来清除（Winlator 上表现为短暂花屏）
             RedrawWindow(hwndMain, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
+            // 有跳过/失败才提示（顺利完成不打扰，与资源管理器一致）。
+            // 放在进度窗销毁之后弹，避免两层窗挤在同一时刻创建销毁（Winlator 花屏）
+            if (!cancelled && (skipped > 0 || failed > 0)) {
+                wchar_t msg[256] = {0};
+                swprintfTrunc(msg, 256, lc_str.msg_file_op_summary, succeeded, skipped, failed);
+                MessageBox(hwndMain, msg, lc_str.conflict_title, MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        }
+        case MSG_CONFLICT_PROMPT: {
+            // 由 worker 线程请求：冲突可能发生在进度窗延迟显示之前，
+            // 先让它现身，冲突框才有稳定的归属窗口
+            KillTimer(hwndDlg, ID_EVENT_SHOW);
+            ShowWindow(hwndDlg, SW_SHOW);
+            DialogBoxParam(globalHInstance, MAKEINTRESOURCE(IDD_CONFLICT), hwndDlg,
+                           &ConflictDialogProc, 0);
             break;
         }
         case MSG_NAVIGATE_REFRESH: {
@@ -532,7 +867,9 @@ static DWORD WINAPI fileActionTask(void* param) {
     }
     else {
         DWORD lastTime = GetTickCount();
-            
+        // 「对全部冲突项使用相同操作」在本批次内的记忆；CONFLICT_ASK 表示逐条询问
+        enum ConflictChoice applyAll = CONFLICT_ASK;
+
         for (int i = 0; i < actionData->numSrcPaths && !actionData->cancel; i++) {
             if (!actionData->srcPaths || !actionData->srcPaths[i]) continue;
             
@@ -551,16 +888,7 @@ static DWORD WINAPI fileActionTask(void* param) {
             }
             else if (actionData->action == ACTION_COPY || actionData->action == ACTION_MOVE) {
                 if (!actionData->dstPath) break;
-                
-                SHFILEOPSTRUCT sfo = {0};
-                sfo.hwnd = hwndDlg;
-                sfo.wFunc = actionData->action == ACTION_COPY ? FO_COPY : FO_MOVE;
-                sfo.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
-                sfo.pTo = actionData->dstPath;
-                sfo.pFrom = actionData->srcPaths[i];
-
-                int res = SHFileOperation(&sfo);
-                if (res != 0) break;            
+                copyMoveOneItem(actionData, i, hwndDlg, &applyAll);
             }
 
             DWORD currTime = GetTickCount();

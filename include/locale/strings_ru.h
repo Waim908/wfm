@@ -101,6 +101,16 @@ static inline void loadStrings_ru() {
     lc_str.msg_moving_files = L"Перемещение файлов, пожалуйста, подождите...";
     lc_str.msg_extracting_files = L"Извлечение файлов, пожалуйста, подождите...";
     lc_str.msg_cancel_file_operation = L"Вы хотите отменить операцию?";
+    lc_str.conflict_title = L"Заменить или пропустить элементы";
+    lc_str.conflict_existing_file = L"В папке назначения уже есть файл с таким именем:\n%ls";
+    lc_str.conflict_existing_folder = L"В папке назначения уже есть папка с таким именем:\n%ls";
+    lc_str.conflict_replace = L"Заменить";
+    lc_str.conflict_skip = L"Пропустить";
+    lc_str.conflict_keep_both = L"Оба";
+    // 同目录粘贴留副本时后缀在文件名后：名字 - 副本.ext（资源管理器的写法）
+    lc_str.copy_suffix = L"Копия";
+    lc_str.conflict_apply_all = L"Применить ко всем конфликтующим элементам";
+    lc_str.msg_file_op_summary = L"Операция завершена: успешно %d, пропущено %d, ошибок %d.";
     lc_str.msg_confirm_delete_item = L"Вы уверены, что хотите удалить \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Вы уверены, что хотите удалить %d элементов?";
     lc_str.msg_confirm_exit_app = L"Вы уверены, что хотите выйти?";

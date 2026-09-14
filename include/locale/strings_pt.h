@@ -100,6 +100,16 @@ static inline void loadStrings_pt() {
     lc_str.msg_moving_files = L"Movendo arquivos, aguarde...";
     lc_str.msg_extracting_files = L"Extraindo arquivos, aguarde...";
     lc_str.msg_cancel_file_operation = L"Você quer cancelar a operação?";
+    lc_str.conflict_title = L"Substituir ou Ignorar Itens";
+    lc_str.conflict_existing_file = L"Já existe um arquivo com o mesmo nome no destino:\n%ls";
+    lc_str.conflict_existing_folder = L"Já existe uma pasta com o mesmo nome no destino:\n%ls";
+    lc_str.conflict_replace = L"Substituir";
+    lc_str.conflict_skip = L"Ignorar";
+    lc_str.conflict_keep_both = L"Manter ambos";
+    // 同目录粘贴留副本时后缀在文件名后：名字 - 副本.ext（资源管理器的写法）
+    lc_str.copy_suffix = L"Cópia";
+    lc_str.conflict_apply_all = L"Fazer isso para todos os itens em conflito";
+    lc_str.msg_file_op_summary = L"Operação concluída: %d concluídos, %d ignorados, %d com falha.";
     lc_str.msg_confirm_delete_item = L"Tem certeza de que deseja excluir \"%ls\"?";
     lc_str.msg_confirm_delete_multiple_items = L"Tem certeza de que deseja excluir %d itens?";
     lc_str.msg_confirm_exit_app = L"Tem certeza de que deseja sair?";

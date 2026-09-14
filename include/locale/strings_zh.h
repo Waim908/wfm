@@ -100,6 +100,16 @@ static inline void loadStrings_zh() {
     lc_str.msg_copying_files = L"正在复制文件，请稍候...";
     lc_str.msg_moving_files = L"正在移动文件，请稍候...";
     lc_str.msg_cancel_file_operation = L"是否要取消此操作？";
+    lc_str.conflict_title = L"替换或跳过项目";
+    lc_str.conflict_existing_file = L"目标位置已存在同名文件：\n%ls";
+    lc_str.conflict_existing_folder = L"目标位置已存在同名文件夹：\n%ls";
+    lc_str.conflict_replace = L"替换";
+    lc_str.conflict_skip = L"跳过";
+    lc_str.conflict_keep_both = L"保留两者";
+    // 同目录粘贴留副本时后缀在文件名后：名字 - 副本.ext（资源管理器的写法）
+    lc_str.copy_suffix = L"副本";
+    lc_str.conflict_apply_all = L"对全部冲突项使用相同操作";
+    lc_str.msg_file_op_summary = L"操作完成：成功 %d 个，跳过 %d 个，失败 %d 个。";
     lc_str.msg_confirm_delete_item = L"确定要删除“%ls”吗？";
     lc_str.msg_confirm_delete_multiple_items = L"确定要删除 %d 个项目吗？";
     lc_str.msg_confirm_exit_app = L"确定要退出吗？";

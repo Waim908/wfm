@@ -91,6 +91,14 @@
 #define IDC_CHECK_ALWAYS 263
 #define IDC_BTN_REMOVE_ASSOC 264
 
+// 粘贴同名冲突对话框（替换 / 跳过 / 保留两者）
+#define IDD_CONFLICT 270
+#define IDC_CONFLICT_TEXT 271
+#define IDC_BTN_REPLACE 272
+#define IDC_BTN_SKIP 273
+#define IDC_BTN_KEEP_BOTH 274
+#define IDC_CHECK_APPLY_ALL 275
+
 #define ICON_UP          0
 #define ICON_COPY        1
 #define ICON_CUT         2
@@ -206,6 +214,17 @@ struct LC_STR {
     wchar_t* msg_moving_files;
     wchar_t* msg_extracting_files;
     wchar_t* msg_cancel_file_operation;
+    // 同名冲突：对话框标题、正文（%ls 为条目名，文件/文件夹两版）、三个按钮、
+    // 「对全部冲突项使用相同操作」复选框，以及收尾汇总（%d 成功/跳过/失败）
+    wchar_t* conflict_title;
+    wchar_t* conflict_existing_file;
+    wchar_t* conflict_existing_folder;
+    wchar_t* conflict_replace;
+    wchar_t* conflict_skip;
+    wchar_t* conflict_keep_both;
+    wchar_t* copy_suffix;
+    wchar_t* conflict_apply_all;
+    wchar_t* msg_file_op_summary;
     wchar_t* msg_confirm_delete_item;
     wchar_t* msg_confirm_delete_multiple_items;
     wchar_t* msg_confirm_exit_app;
