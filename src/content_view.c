@@ -334,6 +334,7 @@ extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 extern HMENU hMenuView;
 extern HMENU hMenuFolderSort;
+extern HMENU hMenuIconView;
 extern HMENU hMenuIconSize;
 extern HMENU hMenuLines;
 extern HMENU hMenuDriveBar;
@@ -574,6 +575,17 @@ void setIconViewLabelLines(int lines) {
 }
 
 void updateIconViewMenuCheckmarks(void) {
+    // 图标尺寸 / 文件名行数只作用于大图标视图，非大图标视图下把父项「大图标视图」
+    // 整体置灰，免得用户以为它们对当前视图也生效。
+    // 灰 popup 项用的是「popup 项的 wID 就是子菜单句柄」这条约定：Wine 侧
+    // win32u/menu.c 的 MENU_InsertItem 把 info->wID 原样存下，user32 的
+    // AppendMenuW(MF_POPUP) 传的就是子菜单句柄；而 MENU_ShowSubPopup 对
+    // fState 带 MF_GRAYED/MF_DISABLED 的 popup 直接 return（menu.c:3383），
+    // 所以灰掉父项就足以让它弹不开，不必再逐个子项置灰。
+    if (hMenuView && hMenuIconView) {
+        EnableMenuItem(hMenuView, (UINT)(UINT_PTR)hMenuIconView,
+                       MF_BYCOMMAND | (viewStyle == STYLE_LARGE_ICON ? MF_ENABLED : MF_GRAYED));
+    }
     if (hMenuIconSize) {
         UINT check;
         switch (iconViewIconSize) {
@@ -2036,8 +2048,10 @@ void setViewStyle(enum ViewStyle newViewStyle) {
 
     // 持久化视图样式到注册表
     saveViewStyle();
-    // 更新菜单栏选中标记
+    // 更新菜单栏选中标记。updateIconViewMenuCheckmarks 顺带按新视图切换
+    // 「大图标视图」父项的可用/置灰状态，切换视图必须补这一次刷新。
     updateViewMenuCheckmarks();
+    updateIconViewMenuCheckmarks();
 }
 
 static void saveViewStyle(void) {

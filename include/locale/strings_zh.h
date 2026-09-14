@@ -139,7 +139,8 @@ static inline void loadStrings_zh() {
     lc_str.folder_pos_bottom = L"沉底（固定）";
     lc_str.folder_pos_plain = L"不区分（纯按本列）";
 
-    // 大图标视图选项
+    // 大图标视图选项（这两项只对大图标视图生效，父项名字必须点明这一点）
+    lc_str.icon_view = L"大图标视图";
     lc_str.icon_size = L"图标大小";
     lc_str.label_lines = L"文件名行数";
     lc_str.label_lines_auto = L"无限（自动适配）";

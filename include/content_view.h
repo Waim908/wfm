@@ -56,7 +56,9 @@ void setFolderSortMode(enum FolderSortMode newMode);
 void loadFolderSortMode(void);
 void updateFolderSortMenuCheckmarks(void);
 
-// 大图标视图：图标尺寸（32/48/64/96/128）与文件名行数（0=无限自动适配, 1..5）
+// 大图标视图：图标尺寸（32/48/64/96/128）与文件名行数（0=无限自动适配, 1..5）。
+// 两项都挂在「查看 → 大图标视图」子菜单下，且只对大图标视图生效 ——
+// 非大图标视图时 updateIconViewMenuCheckmarks 会把父项整体置灰。
 void setIconViewIconSize(int size);
 void setIconViewLabelLines(int lines);
 void loadIconViewSettings(void);

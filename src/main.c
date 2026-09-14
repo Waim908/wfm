@@ -18,7 +18,10 @@ HMENU hMenuLang = NULL;
 // 「查看 → 文件夹位置」子菜单。由 content_view.c 负责打单选勾，
 // 这里只创建并暴露句柄（与 hMenuView 同一种做法）。
 HMENU hMenuFolderSort = NULL;
-// 「查看 → 图标大小」「查看 → 文件名行数」子菜单（大图标视图设置）
+// 「查看 → 大图标视图」子菜单，内含「图标大小」「文件名行数」两个子菜单。
+// 这两项只对大图标视图生效，所以统一挂在明确点明范围的父项下；非大图标视图下
+// 整个父项置灰（content_view.c 的 updateIconViewMenuCheckmarks 负责）。
+HMENU hMenuIconView = NULL;
 HMENU hMenuIconSize = NULL;
 HMENU hMenuLines = NULL;
 HMENU hMenuDriveBar = NULL;
@@ -635,7 +638,11 @@ static void createMainMenu() {
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_PLAIN, lc_str.folder_pos_plain);
     AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmFolderSort, lc_str.folder_position);
 
-    // 大图标视图设置（仅影响大图标视图）
+    // 大图标视图设置：图标尺寸与文件名行数都只作用于大图标视图，因此归到
+    // 「大图标视图」父项下 —— 直接叫「图标大小」会被理解成对所有视图生效。
+    HMENU hmIconView = CreatePopupMenu();
+    hMenuIconView = hmIconView;
+
     HMENU hmIconSize = CreatePopupMenu();
     hMenuIconSize = hmIconSize;
     AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_32, L"32");
@@ -643,7 +650,7 @@ static void createMainMenu() {
     AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_64, L"64");
     AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_96, L"96");
     AppendMenu(hmIconSize, MF_STRING, ID_VIEW_ICONSIZE_128, L"128");
-    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmIconSize, lc_str.icon_size);
+    AppendMenu(hmIconView, MF_POPUP, (UINT_PTR)hmIconSize, lc_str.icon_size);
 
     HMENU hmLines = CreatePopupMenu();
     hMenuLines = hmLines;
@@ -653,7 +660,9 @@ static void createMainMenu() {
     AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_3, L"3");
     AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_4, L"4");
     AppendMenu(hmLines, MF_STRING, ID_VIEW_LINES_5, L"5");
-    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmLines, lc_str.label_lines);
+    AppendMenu(hmIconView, MF_POPUP, (UINT_PTR)hmLines, lc_str.label_lines);
+
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmIconView, lc_str.icon_view);
 
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
 #ifdef USE_LIBCDIO

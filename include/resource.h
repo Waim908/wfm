@@ -269,6 +269,7 @@ struct LC_STR {
     wchar_t* folder_pos_top;
     wchar_t* folder_pos_bottom;
     wchar_t* folder_pos_plain;
+    wchar_t* icon_view;
     wchar_t* icon_size;
     wchar_t* label_lines;
     wchar_t* label_lines_auto;

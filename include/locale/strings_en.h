@@ -140,7 +140,9 @@ static inline void loadStrings_en() {
     lc_str.folder_pos_bottom = L"Bottom (fixed)";
     lc_str.folder_pos_plain = L"Don't group (sort by column)";
 
-    // Large icon view options
+    // Large icon view options (these two only apply to the large icon view,
+    // hence the parent item naming them explicitly)
+    lc_str.icon_view = L"Large Icon View";
     lc_str.icon_size = L"Icon Size";
     lc_str.label_lines = L"File Name Lines";
     lc_str.label_lines_auto = L"Unlimited (auto fit)";

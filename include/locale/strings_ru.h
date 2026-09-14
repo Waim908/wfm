@@ -140,7 +140,8 @@ static inline void loadStrings_ru() {
     lc_str.folder_pos_bottom = L"Снизу (фиксировано)";
     lc_str.folder_pos_plain = L"Не группировать (по столбцу)";
 
-    // Настройки крупных значков
+    // Настройки крупных значков (действуют только в этом режиме)
+    lc_str.icon_view = L"Вид крупных значков";
     lc_str.icon_size = L"Размер значков";
     lc_str.label_lines = L"Строк имени файла";
     lc_str.label_lines_auto = L"Без ограничений (авто)";
