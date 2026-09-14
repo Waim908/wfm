@@ -18,6 +18,7 @@ static inline void loadStrings_pt() {
     lc_str.desktop = L"Desktop";
     lc_str.documents = L"Documentos";
     lc_str.exit = L"Sair";
+    lc_str.new_window = L"Nova janela";
     lc_str.edit = L"Editar";
     lc_str.cut = L"Recortar";
     lc_str.copy = L"Copiar";
@@ -70,6 +71,7 @@ static inline void loadStrings_pt() {
     lc_str.bookmark_exists = L"Este caminho já está nos favoritos";
     lc_str.bookmark_path_not_found = L"Caminho favorito não existe: %ls";
     lc_str.msg_cannot_launch_system_app = L"Falha ao iniciar o aplicativo do sistema: %ls";
+    lc_str.msg_cannot_open_new_window = L"Falha ao abrir uma nova janela: %ls";
     lc_str.auto_open_on_start = L"Abrir na Inicialização";
     lc_str.cancel_auto_open = L"Cancelar Inicialização";
     lc_str.auto_open_path_not_found = L"Não foi possível abrir o caminho na inicialização (não encontrado): %ls";

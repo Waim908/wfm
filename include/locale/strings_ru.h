@@ -19,6 +19,7 @@ static inline void loadStrings_ru() {
     lc_str.desktop = L"Рабочий стол";
     lc_str.documents = L"Документы";
     lc_str.exit = L"Выход";
+    lc_str.new_window = L"Новое окно";
     lc_str.edit = L"Редактировать";
     lc_str.cut = L"Вырезать";
     lc_str.copy = L"Копировать";
@@ -71,6 +72,7 @@ static inline void loadStrings_ru() {
     lc_str.bookmark_exists = L"Этот путь уже в закладках";
     lc_str.bookmark_path_not_found = L"Путь закладки не существует: %ls";
     lc_str.msg_cannot_launch_system_app = L"Не удалось запустить системное приложение: %ls";
+    lc_str.msg_cannot_open_new_window = L"Не удалось открыть новое окно: %ls";
     lc_str.auto_open_on_start = L"Открыть при запуске";
     lc_str.cancel_auto_open = L"Отменить запуск";
     lc_str.auto_open_path_not_found = L"Не удалось открыть путь при запуске (не найден): %ls";

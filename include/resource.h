@@ -53,6 +53,7 @@
 #define ID_VIEW_DETAILS 307
 #define ID_HELP_ABOUT 308
 #define ID_FILE_EXIT 309
+#define ID_FILE_NEW_WINDOW 325
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
 #define ID_SHOW_ICON 312
@@ -138,6 +139,7 @@ struct LC_STR {
     wchar_t* desktop;
     wchar_t* documents;
     wchar_t* exit;
+    wchar_t* new_window;
     wchar_t* edit;
     wchar_t* cut;
     wchar_t* copy;
@@ -191,6 +193,7 @@ struct LC_STR {
     wchar_t* bookmark_exists;
     wchar_t* bookmark_path_not_found;
     wchar_t* msg_cannot_launch_system_app;
+    wchar_t* msg_cannot_open_new_window;
     wchar_t* auto_open_on_start;
     wchar_t* cancel_auto_open;
     wchar_t* auto_open_path_not_found;

@@ -201,6 +201,67 @@ void updatePasteMenuState() {
     EnableMenuItem(hMenuEdit, ID_EDIT_PASTE_SHORTCUT, MF_BYCOMMAND | flag);
 }
 
+// 按 CommandLineToArgvW 的规则把参数写成带引号形式（追加到 buf，pos 随之推进）。
+// 结尾的连续反斜杠必须翻倍：2n 个反斜杠 + 引号会被解析成 n 个反斜杠 + 定界引号，
+// 否则盘根 "C:\" 会与闭合引号组成 \"、被当成字面引号，整个参数字符串错位。
+// 规则见 wine/dlls/shcore/main.c 的 CommandLineToArgvW 注释。
+static bool appendQuotedArg(wchar_t* buf, size_t bufCch, size_t* pos, const wchar_t* arg) {
+    if (!arg || !arg[0]) return false;
+
+    size_t len = wcslen(arg);
+    size_t trailing = 0;
+    while (trailing < len && arg[len - 1 - trailing] == L'\\') trailing++;
+    // 开引号 + 正文 + 翻倍的反斜杠 + 闭引号 + 结束符
+    if (*pos + len + trailing + 3 > bufCch) return false;
+
+    buf[(*pos)++] = L'"';
+    memcpy(&buf[*pos], arg, len * sizeof(wchar_t));
+    *pos += len;
+    for (size_t i = 0; i < trailing; i++) buf[(*pos)++] = L'\\';
+    buf[(*pos)++] = L'"';
+    buf[*pos] = L'\0';
+    return true;
+}
+
+// 打开新窗口：另起一个自身进程，并把当前目录作为启动路径交给它（WinMain 把第一
+// 个参数当导航路径）。wfm 没有单实例互斥，第二个进程会正常建自己的窗口。
+// exe 路径单独走 lpApplicationName（不靠命令行解析），命令行首段只是子进程的
+// argv[0]，所以路径含空格也不会被拆错。
+static void openNewWindow() {
+    wchar_t exePath[MAX_PATH] = {0};
+    wchar_t currPath[MAX_PATH] = {0};
+    wchar_t cmdLine[MAX_PATH * 2 + 8] = {0};
+    const size_t cmdCch = sizeof(cmdLine) / sizeof(cmdLine[0]);
+    size_t pos = 0;
+
+    // 返回长度等于缓冲区大小说明已被截断，截断的路径不能拿去当 exe 路径
+    DWORD exeLen = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    bool ok = (exeLen > 0 && exeLen < MAX_PATH);
+    if (ok) {
+        // 「此电脑」这类虚拟节点没有文件系统路径，得到空串 → 子进程走默认位置
+        if (currPathFileNode) getFileNodePath(currPathFileNode, currPath);
+        ok = appendQuotedArg(cmdLine, cmdCch, &pos, exePath) &&
+             (!currPath[0] || appendQuotedArg(cmdLine, cmdCch, &pos, currPath));
+    }
+
+    if (ok) {
+        STARTUPINFOW si = {0};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi = {0};
+        ok = CreateProcessW(exePath, cmdLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) != 0;
+        if (ok) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+    }
+
+    if (!ok) {
+        wchar_t msg[512] = {0};
+        swprintfTrunc(msg, sizeof(msg) / sizeof(msg[0]), lc_str.msg_cannot_open_new_window, exePath);
+        MessageBox(hwndMain, msg, lc_str.alert, MB_OK | MB_ICONWARNING);
+    }
+}
+
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
         case ID_EDIT_CUT:
@@ -226,6 +287,9 @@ void mainMenuCommand(WPARAM wParam) {
             break;
         case ID_FILE_EXIT:
             DestroyWindow(hwndMain);
+            break;
+        case ID_FILE_NEW_WINDOW:
+            openNewWindow();
             break;
         case ID_VIEW_SMALLICONS:
             setViewStyle(STYLE_SMALL_ICON);
@@ -510,6 +574,8 @@ static void updateLangMenuCheckmarks(void) {
 
 static void createMainMenu() {
     HMENU hmFile = CreatePopupMenu();
+    AppendMenu(hmFile, MF_STRING, ID_FILE_NEW_WINDOW, lc_str.new_window);
+    AppendMenu(hmFile, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmFile, MF_STRING, ID_FILE_EXIT, lc_str.exit);
     
     HMENU hmEdit = CreatePopupMenu();
@@ -699,10 +765,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     if (navigatePath) {
         navigateToPath(navigatePath);
     }
-    else navigateRefresh();
-    
-    // Open auto-open bookmark after UI is ready
-    openAutoOpenBookmark();
+    else {
+        navigateRefresh();
+        // 「启动时打开」的收藏只在没有显式启动路径时生效：命令行/「打开新窗口」
+        // 传进来的路径是用户的明确意图，不该被收藏覆盖掉
+        openAutoOpenBookmark();
+    }
 
     ShowWindow(hwndMain, SW_SHOW);
     UpdateWindow(hwndMain);
