@@ -21,3 +21,6 @@ CODE_REVIEW_PERF_SECURITY.md
 
 # 回归审计报告，仅本地留存
 REGRESSION_AUDIT_2026-09-12.md
+
+# 主机侧对照预览脚本：只在本地出 PNG 到 .workbuddy/，不参与构建，不入版本库
+tools/preview_*.py
