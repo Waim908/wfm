@@ -15,25 +15,102 @@
 
 ![Screenshot](wfm4.png)
 
-# 注册表结构（示例）
+# 注册表结构
+
+所有配置都在 `HKEY_CURRENT_USER\Software\Winlator\WFM` 下，不写 HKLM，不需要管理员权限。
+用 regedit 手改也可以，改完**重启 WFM 生效**。
+删除整个 `HKEY_CURRENT_USER\Software\Winlator\WFM` 即可恢复全部默认设置（也可以直接跑 `del-reg.bat`）。
+
+## 键总览
+
+| 键 | 作用 |
+| --- | --- |
+| `WFM` | 视图、排序等全局开关，全是 DWORD 值（见下表） |
+| `WFM\Bookmarks` | 收藏路径列表 |
+| `WFM\AutoOpenBookmark` | 启动时自动打开的收藏 |
+| `WFM\Language` | 界面语言 |
+| `WFM\FileAssociations\<扩展名>` | 某种扩展名用哪个程序打开 |
+| `WFM\ContextMenu\<组名>\<条目名>` | 自定义右键菜单命令 |
+| `WFM\CurrentISOPath` | 当前已挂载的镜像路径 |
+
+## `WFM` 主键下的 DWORD 值
+
+| 值名 | 取值 | 作用 | 默认 |
+| --- | --- | --- | --- |
+| `ViewStyle` | `0` 大图标 / `1` 小图标 / `2` 列表 / `3` 详细信息 | 内容区使用哪种视图样式 | `3` |
+| `ShowHidden` | `0` / `1` | 是否显示隐藏文件 | `0` |
+| `FolderSortMode` | `0` 经典（分组随升降序一起翻转）/ `1` 文件夹恒置顶 / `2` 文件夹恒沉底 / `3` 不区分（文件夹与文件混排） | 文件夹在列表里的位置策略 | `0` |
+| `ShowDriveBarMode` | `0` 图形占用条 +「空闲/总量」文字 / `1` 只显示总容量 / `2`「大小」列留空 | 详细信息视图里驱动器在「大小」列的显示方式 | `0` |
+| `IconViewIconSize` | `32` / `48` / `64` / `96` / `128` | 大图标视图的图标边长（像素） | `32` |
+| `IconViewLabelLines` | `0` 按图标宽度自动换行 / `1`–`5` 固定行数 | 大图标视图里文件名最多显示几行 | `0` |
+| `ShowDriveBar` | `0` / `1` | **遗留值**：只在 `ShowDriveBarMode` 不存在时读一次，用于从旧版升级迁移（`1` → 图形条，`0` → 留空）。当前版本不再写入 | — |
+
+取值越界或类型不对时会被直接忽略、回落到默认值，不会导致异常。
+
+## 各子键说明
+
+### `WFM\Bookmarks` — 收藏列表
+
+- 值名固定为 `Bookmark0`、`Bookmark1`……（REG_SZ），值是该收藏的完整路径，最多 50 条。
+- 保存时整个子键先清空重建，所以序号始终从 0 开始连续排列。
+
+### `WFM\AutoOpenBookmark` — 启动时自动打开
+
+- 唯一的 `Path`（REG_SZ）＝ 要自动打开的收藏路径。
+- 路径已不存在时直接跳过，正常显示默认目录。
+
+### `WFM\Language` — 界面语言
+
+- 唯一的 `lang`（REG_SZ）：`zh` / `en` / `pt` / `ru`。
+- 在菜单栏 `language` 里切换后写到这里，**重启 WFM 才生效**，且不受系统 locale 与编码影响。
+
+### `WFM\FileAssociations\<扩展名>` — 文件关联
+
+- 值 `Program`（REG_SZ）＝ 打开该扩展名的程序完整路径，例如 `C:\windows\notepad.exe`。
+- 扩展名子键带点前缀，如 `.md`、`.aaa`。
+- **只影响 WFM 自身**，不会修改系统的全局文件类型关联。
+
+### `WFM\ContextMenu\<组名>\<条目名>` — 自定义右键菜单
+
+- 一级子键名 = 右键菜单里的**组名**（显示为带子菜单的一项），其下的值名 = 该组里的**条目名**。
+- 值的类型是 REG_SZ，内容 = 点击该条目时要执行的命令行。
+- 命令行里可用三个占位符：
+  - `%FILE%` — 完整文件路径
+  - `%BASENAME%` — 不含扩展名的文件名
+  - `%DIR%` — 文件所在目录
+- 替换时若值里含空格等特殊字符会自动加引号；如果模板里已经写成 `"%FILE%"`，就按原样替换、不再套一层引号。
+- 限制：最多 10 个组、每组最多 10 个条目；只在**单选一个文件**时出现（文件夹不显示）。
+- 文件名里含 `"` 或 `%` 时无法安全替换，该条目会保留但点击时提示原因，**不会执行被篡改的命令**。
+
+### `WFM\CurrentISOPath` — 当前挂载的镜像
+
+- 用该键的**默认值**（无名值，REG_SZ）保存镜像文件路径。
+- 挂载镜像时写入，取消挂载时整个子键删除。
+
+## 完整示例
+
+下面是各项取默认值时的完整结构，可直接另存为 `.reg` 导入（其中的路径请按自己的实际情况修改）：
+
 ```
 Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM]
+"ViewStyle"=dword:00000003
+"ShowHidden"=dword:00000000
 "FolderSortMode"=dword:00000000
-"IconViewIconSize"=dword:00000080
-"IconViewLabelLines"=dword:00000004
-"IconViewNameLines"=dword:00000005
-"ShowDriveBar"=dword:00000000
-"ShowDriveBarMode"=dword:00000002
-"ShowHidden"=dword:00000001
-"ViewStyle"=dword:00000000
+"ShowDriveBarMode"=dword:00000000
+"IconViewIconSize"=dword:00000020
+"IconViewLabelLines"=dword:00000000
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM\Bookmarks]
 "Bookmark0"="Z:\\bin"
 "Bookmark1"="Z:\\home\\waim\\Game"
 
-[HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations]
+[HKEY_CURRENT_USER\Software\Winlator\WFM\AutoOpenBookmark]
+"Path"="Z:\\bin"
+
+[HKEY_CURRENT_USER\Software\Winlator\WFM\Language]
+"lang"="zh"
 
 [HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations\.aaa]
 "Program"="C:\\windows\\notepad.exe"
@@ -41,10 +118,12 @@ Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\Winlator\WFM\FileAssociations\.md]
 "Program"="C:\\windows\\notepad.exe"
 
-[HKEY_CURRENT_USER\Software\Winlator\WFM\Language]
-"lang"="zh"
+[HKEY_CURRENT_USER\Software\Winlator\WFM\ContextMenu\常用操作]
+"用记事本打开"="C:\\windows\\notepad.exe %FILE%"
+"打开所在目录"="explorer %DIR%"
 
-
+[HKEY_CURRENT_USER\Software\Winlator\WFM\CurrentISOPath]
+@="Z:\\Game\\disc.iso"
 ```
 
 # 实现的功能（排名不分前后）
