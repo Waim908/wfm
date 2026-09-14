@@ -24,6 +24,7 @@ static inline void loadStrings_pt() {
     lc_str.copy = L"Copiar";
     lc_str.paste = L"Colar";
     lc_str.paste_shortcut = L"Colar Atalho";
+    lc_str.clear_clipboard = L"Limpar Área de Transferência";
     lc_str.clipboard_info = L"Área de transferência: %ls %d item(ns) [%ls] ← %ls";
     lc_str.select_all = L"Selecionar Tudo";
     lc_str.view = L"Visualizar";

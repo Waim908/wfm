@@ -25,6 +25,7 @@ static inline void loadStrings_ru() {
     lc_str.copy = L"Копировать";
     lc_str.paste = L"Вставить";
     lc_str.paste_shortcut = L"Вставить Ярлык";
+    lc_str.clear_clipboard = L"Очистить буфер обмена";
     lc_str.clipboard_info = L"Буфер обмена: %ls %d шт. [%ls] ← %ls";
     lc_str.select_all = L"Выбрать все";
     lc_str.view = L"Вид";

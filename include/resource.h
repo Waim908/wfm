@@ -56,6 +56,8 @@
 #define ID_FILE_NEW_WINDOW 325
 #define ID_EDIT_PASTE_SHORTCUT 310
 #define ID_EDIT_SELECT_ALL 311
+// 「清空剪贴板」：放弃待粘贴的内容（编辑菜单与右键菜单共用这个命令 ID）
+#define ID_EDIT_CLEAR_CLIPBOARD 326
 #define ID_SHOW_ICON 312
 #define ID_VIEW_CLEAR_ICON_CACHE 313
 #define ID_MOUNT_LOCATE_ISO  314
@@ -153,6 +155,8 @@ struct LC_STR {
     wchar_t* copy;
     wchar_t* paste;
     wchar_t* paste_shortcut;
+    // 「清空剪贴板」：只丢弃待粘贴的内容，不删除文件本身
+    wchar_t* clear_clipboard;
     // 剪贴板状态指示：参数依次为「复制/剪切」词、条目数、首个文件名、源目录
     wchar_t* clipboard_info;
     wchar_t* select_all;

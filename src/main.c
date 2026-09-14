@@ -193,12 +193,14 @@ static void toggleShowHidden(void);
 
 static HMENU hMenuEdit = NULL;
 
-// 剪贴板为空时把「编辑」菜单里的两个粘贴项置灰，与右键菜单/工具栏联动
+// 剪贴板为空时把「编辑」菜单里的粘贴项与「清空剪贴板」置灰，
+// 与右键菜单/工具栏联动。三者可用性完全同源：都以 CF_HDROP 是否存在为准。
 void updatePasteMenuState() {
     if (!hMenuEdit) return;
     UINT flag = clipboardHasItems() ? MF_ENABLED : (MF_GRAYED | MF_DISABLED);
     EnableMenuItem(hMenuEdit, ID_EDIT_PASTE, MF_BYCOMMAND | flag);
     EnableMenuItem(hMenuEdit, ID_EDIT_PASTE_SHORTCUT, MF_BYCOMMAND | flag);
+    EnableMenuItem(hMenuEdit, ID_EDIT_CLEAR_CLIPBOARD, MF_BYCOMMAND | flag);
 }
 
 // 按 CommandLineToArgvW 的规则把参数写成带引号形式（追加到 buf，pos 随之推进）。
@@ -275,6 +277,12 @@ void mainMenuCommand(WPARAM wParam) {
             break;
         case ID_EDIT_PASTE_SHORTCUT:
             onMenuItemPasteShortcutClick();
+            break;
+        case ID_EDIT_CLEAR_CLIPBOARD:
+            // 只丢掉待粘贴的内容（清空 CF_HDROP），文件本身不动。
+            // clearClipboard() 内部会调 onClipboardChanged() 同步状态栏、
+            // 工具栏粘贴按钮与本次这一项的置灰状态。
+            clearClipboard();
             break;
         case ID_EDIT_SELECT_ALL:
             onMenuItemSelectAllClick();
@@ -584,6 +592,8 @@ static void createMainMenu() {
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_COPY, lc_str.copy);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_PASTE, lc_str.paste);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_PASTE_SHORTCUT, lc_str.paste_shortcut);
+    AppendMenu(hmEdit, MF_SEPARATOR, 0, NULL);
+    AppendMenu(hmEdit, MF_STRING, ID_EDIT_CLEAR_CLIPBOARD, lc_str.clear_clipboard);
     AppendMenu(hmEdit, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmEdit, MF_STRING, ID_EDIT_SELECT_ALL, lc_str.select_all);
     updatePasteMenuState();

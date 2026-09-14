@@ -25,6 +25,7 @@ static inline void loadStrings_en() {
     lc_str.copy = L"Copy";
     lc_str.paste = L"Paste";
     lc_str.paste_shortcut = L"Paste Shortcut";
+    lc_str.clear_clipboard = L"Clear Clipboard";
     lc_str.clipboard_info = L"Clipboard: %ls %d item(s) [%ls] <- %ls";
     lc_str.select_all = L"Select All";
     lc_str.view = L"View";

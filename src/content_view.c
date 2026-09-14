@@ -208,6 +208,7 @@ static void onMenuItemShowIconClick();
 static void onMenuItemOpenFileLocationClick();
 static void onMenuItemOpenLinkTargetClick();
 static void onMenuItemOpenWithClick();
+static void onMenuItemClearClipboardClick();
 static bool isInSearchMode();
 // 解析 lnk 的目标路径（实现与 lnk 图标提取放在一起，见文件末尾）
 static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch);
@@ -221,6 +222,7 @@ static struct ContextMenuItem cmiDelete = {NULL, &onMenuItemDeleteClick, NULL, f
 static struct ContextMenuItem cmiRename = {NULL, &onMenuItemRenameClick, NULL, false};
 static struct ContextMenuItem cmiPaste = {NULL, &onMenuItemPasteClick, NULL, false};
 static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcutClick, NULL, false};
+static struct ContextMenuItem cmiClearClipboard = {NULL, &onMenuItemClearClipboardClick, NULL, false};
 static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL, false};
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL, false};
 #ifdef USE_LIBCDIO
@@ -1210,12 +1212,26 @@ static void createCDDriveContextMenu(int* id) {
 #endif /* USE_LIBCDIO */
 
 
+// 在菜单末尾插入一条分隔线。addContextMenuItem 的 separate 只能把分隔线加在
+// 条目「之后」，需要「之前」时用这个（与 createCDDriveContextMenu 里的写法一致）。
+static void addContextMenuSeparator(HMENU hMenu) {
+    MENUITEMINFO item = {0};
+    item.cbSize = sizeof(MENUITEMINFO);
+    item.fMask = MIIM_TYPE;
+    item.fType = MFT_SEPARATOR;
+    InsertMenuItem(hMenu, -1, TRUE, &item);
+}
+
 static void createContextMenu(enum ContextMenuType type) {
     HMENU hMenu = CreatePopupMenu();
     hContextMenu = hMenu;
 
     // ID 从 1 开始：TPM_RETURNCMD 用返回值 0 表示"未选中任何项"（同 navbar.c）
     int id = 1;
+
+    // 「清空剪贴板」在三种菜单形态里都出现，文字统一在这儿挂上
+    // （addContextMenuItem 见到 text 为 NULL 会静默跳过这一项）
+    cmiClearClipboard.text = lc_str.clear_clipboard;
 
     if (type == MENU_SINGLE || type == MENU_MULTIPLE) {
         if (type == MENU_SINGLE) {
@@ -1256,6 +1272,12 @@ static void createContextMenu(enum ContextMenuType type) {
                 }
             }
         }
+
+        // 剪贴板组：放弃待粘贴的内容（只清空 CF_HDROP，文件本身不动）。
+        // 单选的扩展名分支各走一条，分隔线统一在这儿加，免得每个分支都管一次
+        addContextMenuSeparator(hMenu);
+        cmiClearClipboard.disabled = !clipboardHasItems();
+        addContextMenuItem(hMenu, id++, &cmiClearClipboard, false);
     }
     else {
         // 空白处右键：剪贴板为空时「粘贴」置灰；有内容时在菜单项上
@@ -1275,8 +1297,12 @@ static void createContextMenu(enum ContextMenuType type) {
         else cmiPaste.text = lc_str.paste;
         cmiPaste.disabled = !hasClip;
         cmiPasteShortcut.disabled = !hasClip;
+        cmiClearClipboard.disabled = !hasClip;
         addContextMenuItem(hMenu, id++, &cmiPaste, false);
-        addContextMenuItem(hMenu, id++, &cmiPasteShortcut, true);
+        // 分隔线原本挂在「粘贴快捷方式」之后，现在移到剪贴板组末尾，
+        // 让「粘贴 / 粘贴快捷方式 / 清空剪贴板」连成一组
+        addContextMenuItem(hMenu, id++, &cmiPasteShortcut, false);
+        addContextMenuItem(hMenu, id++, &cmiClearClipboard, true);
         #ifdef USE_LIBCDIO
         createCDDriveContextMenu(&id);
         #endif
@@ -2229,6 +2255,15 @@ void onMenuItemPasteShortcutClick() {
     getFileNodePath(currPathFileNode, path);
     if (!isPathExists(path)) return;
     pasteShortcuts(path);   
+}
+
+// 放弃待粘贴的内容：「反悔不想粘贴了」。只清空系统剪贴板里的文件数据
+// （CF_HDROP + Preferred DropEffect），文件本身原封不动，也不会碰其他程序
+// 放进剪贴板的内容（clearClipboard 内部有格式判断）。
+// 清空后 onClipboardChanged() 会把状态栏来源指示、工具栏粘贴按钮、编辑菜单
+// 与右键菜单里这一项的置灰状态一并同步。
+static void onMenuItemClearClipboardClick() {
+    clearClipboard();
 }
 
 void onMenuItemNewFolderClick() {
