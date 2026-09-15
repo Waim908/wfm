@@ -4594,29 +4594,32 @@ void refreshContentView() {
         }
     }
 
-    struct FileNode* child = currPathFileNode->children;
+    // 先数一遍子节点再一次性分配。这一步是纯指针遍历（不碰文件系统），
+    // 而旧实现从 64 起翻倍 realloc，10000 项时要累计 memcpy 约 7.7 MB；
+    // sibling 链刚由 buildChildNodes 建好，数一遍几乎免费。
+    // childCount == 0 时保持 items == NULL（上面刚 free 过），语义不变。
+    int childCount = 0;
+    for (struct FileNode* node = currPathFileNode->children; node; node = node->sibling)
+        childCount++;
 
-    // 单次遍历：计数并填充
-    int capacity = 64;
     numItems = 0;
-    items = malloc(capacity * sizeof(struct ListItem));
-    if (!items) { itemsCapacity = 0; return; }
+    itemsCapacity = 0;
+    if (childCount > 0) {
+        items = malloc((size_t)childCount * sizeof(struct ListItem));
+        if (!items) return;
 
-    while (child) {
-        if (numItems >= capacity) {
-            capacity *= 2;
-            struct ListItem* tmp = realloc(items, capacity * sizeof(struct ListItem));
-            if (!tmp) break;
-            items = tmp;
+        itemsCapacity = childCount;
+        numItems = childCount;
+
+        int idx = 0;
+        for (struct FileNode* node = currPathFileNode->children; node; node = node->sibling) {
+            struct ListItem* item = &items[idx++];
+            memset(item, 0, sizeof(struct ListItem));
+            item->node = node;
+            item->loaded = false;
+
+            fillFileInfo(node, item);
         }
-        struct ListItem* item = &items[numItems++];
-        memset(item, 0, sizeof(struct ListItem));
-        item->node = child;
-        item->loaded = false;
-
-        fillFileInfo(child, item);
-        
-        child = child->sibling;
     }
 
     // 图标缓存保留（不清空），以加速相邻导航
