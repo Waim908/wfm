@@ -373,8 +373,17 @@ static void resetScaledIconList(void) {
 
 static HIMAGELIST getScaledImageList(void) {
     if (!scaledImageList) {
-        // ILC_COLOR32 无掩码列表：加入的是带 alpha 的图标拷贝
-        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 32, 16);
+        // ILC_COLOR32 无掩码列表：加入的是带 alpha 的图标拷贝。
+        //
+        // grow 的语义（Wine comctl32/imagelist.c 的 IMAGELIST_InternalExpandBitmaps）：
+        // 新建时 cMaxImage = cInitial + 1，位图**立刻**按这个容量分配；之后每次
+        // 扩容 nNewCount = cMaxImage + max(nImageCount, cGrow) + 1，且是重建整块
+        // 位图再 BitBlt 拷贝旧内容。逐个 AddIcon 时 nImageCount 恒为 1，所以扩容
+        // 步长就等于 cGrow —— 它同时决定「重建次数」和「容量过冲」：
+        // grow=16 容下 1000 张要重建约 57 次（累计拷贝上百 MB）；
+        // grow=128 则在第 34 张图标时一次冲到 162 张，128px 下比实际用量多占 7 MB。
+        // 取 32 折中：过冲 ≤ 33 张（128px 下 2.1 MB），重建次数减半。
+        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 32, 32);
     }
     return scaledImageList;
 }
