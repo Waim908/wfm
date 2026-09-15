@@ -299,6 +299,27 @@ static HIMAGELIST scaledImageList = NULL;
 static int* scaledIconMap = NULL;     // -1 表示尚未转换
 static int scaledIconMapCap = 0;
 
+// 缩放列表的槽位池 —— 给「只增不减」的列表设硬上限。
+//
+// 列表位图按 size²×4 字节计：128px 一张 64 KB，逛一遍大目录攒到几十 MB 是常态。
+// 槽位满后按 LRU 用 ImageList_ReplaceIcon 原地换图标（Wine 侧 nIndex >= 0 时不扩容、
+// 不搬动其它帧，索引恒定），于是列表容量 = 槽位数，与浏览过多少图标无关。
+//
+// 槽位数取「字节预算 / 每张字节」，所以各图标尺寸下的槽数自动与「一屏可见项数」同步
+// 放大缩小（可见项数 ∝ 面积/格子面积，与每张字节同阶）：
+//   48px ≈ 1.8k 槽、64px ≈ 1k、96px ≈ 227、128px ≈ 128。
+// 之所以只要「槽数 ≥ 一屏可见项数」就够了：Wine 每帧重绘都会为**每个可见项**重新回调
+// LVN_GETDISPINFO 取 iImage（listview.c 的 LISTVIEW_DrawItem → LISTVIEW_GetItemW(LVIF_IMAGE)），
+// 所以被回收的槽位下次绘制会自然重新申请；此时 LRU 选中的受害者必然是已滚出视野的那个。
+#define SCALED_ICON_BUDGET_BYTES (8u * 1024u * 1024u)
+#define SCALED_ICON_MIN_SLOTS    128
+
+static int* scaledSlotOwner = NULL;      // 槽 → 系统索引（-1 表示空闲）
+static unsigned* scaledSlotTick = NULL;  // 槽的最后使用序号（LRU 判据）
+static int scaledSlotCount = 0;
+static int scaledSlotFilled = 0;
+static unsigned scaledUseTick = 0;
+
 // setViewStyle 会自己调用 updateIconViewLayout —— 这样即便 refreshContentView 因
 // 「搜索进行中」而提前返回，切换视图也仍会重算格子尺寸。refreshContentView 靠这个
 // 标志跳过它自己那次布局，免得同一次切换把「遍历全表做 GDI 文本测量 + Arrange +
@@ -369,6 +390,14 @@ static void resetScaledIconList(void) {
     free(scaledIconMap);
     scaledIconMap = NULL;
     scaledIconMapCap = 0;
+
+    free(scaledSlotOwner);
+    scaledSlotOwner = NULL;
+    free(scaledSlotTick);
+    scaledSlotTick = NULL;
+    scaledSlotCount = 0;
+    scaledSlotFilled = 0;
+    scaledUseTick = 0;
 }
 
 static HIMAGELIST getScaledImageList(void) {
@@ -382,8 +411,32 @@ static HIMAGELIST getScaledImageList(void) {
         // 步长就等于 cGrow —— 它同时决定「重建次数」和「容量过冲」：
         // grow=16 容下 1000 张要重建约 57 次（累计拷贝上百 MB）；
         // grow=128 则在第 34 张图标时一次冲到 162 张，128px 下比实际用量多占 7 MB。
-        // 取 32 折中：过冲 ≤ 33 张（128px 下 2.1 MB），重建次数减半。
-        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 32, 32);
+        // 取 32：过冲上限 33 张（128px 下 2.1 MB），重建次数减半。
+        // cInitial 取 16 而非 32：位图是「一建列表就按容量分配」的，128px 下从 33 张
+        // （2.1 MB）降到 17 张（1.1 MB）——只有几个图标的目录不该先吃 2 MB。
+        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 16, 32);
+        if (!scaledImageList) return NULL;
+
+        unsigned frameBytes = (unsigned)iconViewIconSize * (unsigned)iconViewIconSize * 4u;
+        unsigned slots = SCALED_ICON_BUDGET_BYTES / frameBytes;
+        if (slots < SCALED_ICON_MIN_SLOTS) slots = SCALED_ICON_MIN_SLOTS;
+
+        scaledSlotOwner = malloc((size_t)slots * sizeof(int));
+        scaledSlotTick = malloc((size_t)slots * sizeof(unsigned));
+        if (!scaledSlotOwner || !scaledSlotTick) {
+            // 槽位池建不起来就别留半成品：宁可退回「不缩放」，也不要一个没有上限的列表
+            free(scaledSlotOwner);
+            scaledSlotOwner = NULL;
+            free(scaledSlotTick);
+            scaledSlotTick = NULL;
+            ImageList_Destroy(scaledImageList);
+            scaledImageList = NULL;
+            return NULL;
+        }
+        for (unsigned i = 0; i < slots; i++) scaledSlotOwner[i] = -1;
+        scaledSlotCount = (int)slots;
+        scaledSlotFilled = 0;
+        scaledUseTick = 0;
     }
     return scaledImageList;
 }
@@ -396,7 +449,7 @@ static HIMAGELIST getScaledImageList(void) {
 // 以及未注册的扩展名共用 shell32 的默认图标）生成结果只取决于 sysIcon 本身。
 // 所以 createDisplayIcon 里「按路径提取」那条分支只能对 exe/lnk 开 —— 若扩展到
 // 走类型索引的类型上，同一个索引下会塞进某一个文件的图案，其余文件全部串位。
-// 映射只在重建缩放列表或显式清图标缓存时才重置。
+// 映射在重建缩放列表、显式清图标缓存、以及槽位被 LRU 顶掉时失效。
 static int getScaledIconIndex(struct ListItem* item) {
     if (!item) return -1;
     int sysIcon = item->icon;
@@ -434,10 +487,31 @@ static int getScaledIconIndex(struct ListItem* item) {
         if (!hicon) return sysIcon;
     }
 
-    int idx = ImageList_AddIcon(himl, hicon);
+    // 槽位分配：未满就直接追加，满了就 LRU 原地替换（见 scaledSlotOwner 处的说明）。
+    // ReplaceIcon 索引不变，所以控件里已挂的列表句柄和 iImage 的语义都不受影响。
+    int idx = -1;
+    if (scaledSlotFilled < scaledSlotCount) {
+        idx = ImageList_AddIcon(himl, hicon);
+        if (idx >= 0) {
+            scaledSlotOwner[idx] = sysIcon;
+            if (idx >= scaledSlotFilled) scaledSlotFilled = idx + 1;
+        }
+    }
+    else {
+        int victim = 0;
+        for (int i = 1; i < scaledSlotCount; i++) {
+            if (scaledSlotTick[i] < scaledSlotTick[victim]) victim = i;
+        }
+        // 被顶掉的图标要同时作废它的映射，否则它会一直命中一个已经装了别人图案的槽位
+        int oldOwner = scaledSlotOwner[victim];
+        if (oldOwner >= 0 && oldOwner < scaledIconMapCap) scaledIconMap[oldOwner] = -1;
+        idx = ImageList_ReplaceIcon(himl, victim, hicon);
+        if (idx >= 0) scaledSlotOwner[idx] = sysIcon;
+    }
     DestroyIcon(hicon);
     if (idx < 0) return sysIcon;
 
+    scaledSlotTick[idx] = ++scaledUseTick;
     scaledIconMap[sysIcon] = idx;
     return idx;
 }
