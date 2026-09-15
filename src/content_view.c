@@ -14,11 +14,59 @@
 static HIMAGELIST currentImageList = NULL;
 
 // 图标渲染的底层实现位于文件末尾的 PE / ICO 解码区，自建图标库要用，先声明。
-static HICON createScaledShellIcon(int sysIcon, int size);
-static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int cyDesired);
+//
+// 渲染流水线以**像素缓冲**为中间态（BYTE* = 32bpp straight-alpha，top-down），
+// 而不是 HICON：HICON 每过一趟都要付 GetIconInfo 的位图深拷贝 + CreateIconIndirect
+// 的再复制，一个图标累积起来是 MB 级的搬运。只有最后上屏前才建一次 HICON。
+static HICON createShellIconBest(int sysIcon, int desired, int* outNativeSize);
+static BYTE* extractIcoIconPixels(const wchar_t* icoPath, int desired, int* outSize);
+static BYTE* extractPeIconPixels(const wchar_t* pePath, int groupIndex, int desired, int* outSize);
 static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired);
-static HICON scaleIconToSize(HICON hIcon, int size);
-static HICON composeShortcutIcon(HICON hTarget, int outSize);
+static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize);
+static HICON createIconFromPixels(const BYTE* pixels, int width, int height);
+static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize);
+static bool stampShortcutOverlay(BYTE* dst, int outSize);
+
+// 图标补齐 / 预取（实现见文件末尾同名一节）。绘制路径发现有待补的图标时调它，
+// 因此滚动、键盘翻页、改窗口大小都自动触发，不需要单独接滚动消息。
+static bool iconFillPosted;       // 同一时刻只挂一条补齐消息，见 scheduleIconFill
+static void scheduleIconFill(void);
+static bool iconFillStep(void);   // 补一轮可见区图标；返回 true = 还没补完
+static void iconFillVisibleSync(int budgetMs);   // 在绘制之前同步补本屏
+static void updateIconPaneGate(void);            // 绘制入口决定「这一帧画不画图标」
+static void scheduleIconPrefetch(void);
+static bool iconPrefetchStep(void);   // 预取可见区两侧的邻域；返回 true = 还有可预取的
+
+// 「本屏还没齐」闸：可见区里还有「本来画得出来、却还没渲染」的项时置位，绘制路径据此
+// **整屏一律不画图标**。这是「图标一起出现」的关键 —— 少了它，先画到的格子已经把图标画
+// 出来了，后面的格子后补，看上去就是「有的一格一格冒出来」。补齐一轮把本屏补完时放掉，
+// 那一次整屏重画让所有图标同时出现。
+static bool iconPanePend;
+// 本屏连续多少轮没能补齐。到 ICON_PANE_GIVEUP_ROUNDS 就认输（见 iconFillRange 的说明）。
+static int iconFillStall;
+
+// 绘制路径上报的「这里缺图标」见证（见 getIconSlotForPaint / iconFillStep）。
+// 哨兵：iconMissLast < iconMissFirst 表示本趟还没人上报。
+static bool iconPaintMissed;   // 屏幕上确实存在「本来画得出来、现在却还是空格子」的位置
+static int iconMissFirst;
+static int iconMissLast = -1;
+
+// 滚动静默：滚动类消息（拖滚动条 / 滚轮 / 翻页键 / 改窗口大小）刚发生过的时间戳。
+// 补齐必须据此让位 —— 见 scheduleIconFill 里为什么这事关「拖动滚动条卡住」。
+static DWORD lastScrollTick;
+static bool iconFillTimerPending;      // 已经挂了一个「等滚动静默」的定时器
+static bool iconPrefetchTimerPending;  // 已经挂了一个预取定时器
+static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工（0 = 允许预取）
+// 不用 1 这种小号：Wine 的 listview 内部也用 SetTimer（滚动条按住时的连续滚动，
+// 见 comctl32/listview.c:4079，它的 id 是 (UINT_PTR)infoPtr），号段留开更省心。
+#define TIMER_ICON_FILL            0x7FFF
+#define TIMER_ICON_PREFETCH        0x7FFE
+#define ICON_FILL_SCROLL_QUIET_MS  180   // 滚动停多久之后才继续补图标
+#define ICON_FILL_BUDGET_MS        8     // 一趟补齐/预取最多占用多少毫秒
+#define ICON_PREFETCH_INTERVAL_MS  25    // 预取两趟之间歇多久（走定时器，最低优先级）
+#define ICON_SYNC_BUDGET_MS        150   // 导航/换尺寸时**同步**补首屏的时间预算
+#define ICON_SCROLL_SYNC_BUDGET_MS 8     // 离散滚动一步之后同步补新露出区域的预算
+#define ICON_PANE_GIVEUP_ROUNDS    4     // 本屏连续这么多轮补不齐就认输，见 iconFillRange
 
 // IID_IImageList 不在 mingw 的 libuuid 里，按 wine include/commoncontrols.idl
 // 的 uuid 本地定义
@@ -37,7 +85,8 @@ static DWORD lastStatusbarTick = 0;
 enum Msg {
     MSG_ADD_ITEMS_BATCH = WM_APP,
     MSG_SEARCH_DONE,
-    MSG_NAVIGATE_TO_PATH
+    MSG_NAVIGATE_TO_PATH,
+    MSG_ICON_FILL
 };
 
 enum ContextMenuType {
@@ -54,7 +103,8 @@ struct ListItem {
     wchar_t formattedDate[32];
     bool loaded;
     bool isHidden;
-    bool iconFailed;   // 图标解析失败过（来源表满/拿不到坐标）：别再每次重绘都重试
+    bool iconFailed;   // 图标确定出不来（来源表满/无坐标/渲染反复失败）：永久放弃
+    unsigned char iconTries;  // 渲染尝试次数：池满这类**瞬态**失败要给几次机会（见 iconFillStep）
     uint64_t size;
     wchar_t* path;
     FILETIME modifiedTime;
@@ -383,10 +433,15 @@ static int currentIconDisplaySize(void) {
     return (viewStyle == STYLE_LARGE_ICON) ? iconViewIconSize : 16;
 }
 
-// 键的哈希（键统一转小写后保存，所以这里就是普通 FNV-1a）
+// 键的哈希。**必须忽略大小写**：登记时存进去的是 lowerDup() 的结果、槽位也是按它的
+// 哈希算的，而查找时传进来的是原始大小写的路径/扩展名（Windows 路径几乎总含大写）。
+// 若这里按原样计算，查找就会从**另一个槽位**开始线性探测、撞到空槽就判「未登记」——
+// 于是每次解析（每次导航都会重建 items）都给同一个文件新增一条重复来源，来源表被同一
+// 批文件反复填满；撞到 ICON_SOURCE_MAX 之后，新出现的文件就再也登记不进去 → 那个文件
+// 永远没有图标。表现为「小概率某个文件压根不显示图标」，且用得越久越容易遇到。
 static unsigned iconKeyHash(const wchar_t* s) {
     unsigned h = 2166136261u;
-    for (; *s; s++) { h ^= (unsigned)(*s & 0xFFFF); h *= 16777619u; }
+    for (; *s; s++) { h ^= (unsigned)(towlower((wint_t)*s) & 0xFFFF); h *= 16777619u; }
     return h;
 }
 
@@ -546,6 +601,14 @@ static void resetIconStore(void) {
     iconSourceCount = 0;
     free(iconKeyMap);
     iconKeyMap = NULL;
+
+    // 池都没了，补齐/预取的状态一并作废
+    iconPrefetchDoneSize = 0;
+    iconPaintMissed = false;
+    iconMissFirst = 0;
+    iconMissLast = -1;
+    iconPanePend = false;
+    iconFillStall = 0;
 }
 
 // 主路径渲染失败时的最后手段：按**来源文件**查一次 shell 的系统列表索引并缓存。
@@ -558,7 +621,7 @@ static void resetIconStore(void) {
 //
 // 只在失败路径上发生一次（结果缓存在 s->shellIndex），所以正常浏览时它一次都不会
 // 走到，也就不会让 SIC 随「浏览过的文件数」增长。
-static HICON renderShellFallback(struct IconSource* s, int size) {
+static BYTE* renderShellFallbackPixels(struct IconSource* s, int desired, int* outSize) {
     if (s->shellIndex == ICON_SHELL_UNKNOWN) {
         s->shellIndex = -1;
         if (s->iconFile && s->iconFile[0]) {
@@ -568,24 +631,52 @@ static HICON renderShellFallback(struct IconSource* s, int size) {
         }
     }
     if (s->shellIndex < 0) return NULL;
-    return createScaledShellIcon(s->shellIndex, size);
+
+    int nativeSize = 0;
+    HICON h = createShellIconBest(s->shellIndex, desired, &nativeSize);
+    if (!h) return NULL;
+    BYTE* pixels = getIconPixelsSquare(h, outSize);
+    DestroyIcon(h);
+    return pixels;
 }
 
 // 按尺寸渲染一条来源。返回的 HICON 由调用方 DestroyIcon()；失败返回 NULL。
+//
+// 全流程以像素缓冲为中间态：解码出**原生帧**像素 → 一次性缩到目标尺寸 → 只建一次
+// HICON。旧实现是「解码 → 建 HICON → getIconPixels 把它拆回像素 → 缩放 → 再建
+// HICON」，中间那两个 HICON 里外各复制一遍位图（Wine 的 GetIconInfo 是
+// NtUserGetIconInfo → copy_bitmap×2，每次都现场深拷贝），一个 128px 图标就要搬
+// 约 1 MB 像素、约 30 次 win32u/GDI 调用 —— 那是「点进去慢一下」的主因。
 static HICON renderIconSource(int id, int size) {
     if (!iconIdTypeNameValid(id) || size <= 0) return NULL;
     struct IconSource* s = &iconSources[id - 1];
-    HICON h = NULL;
 
+    // shell 来源只有一条路可走（系统列表只吐 HICON），单独处理：原生尺寸正好等于
+    // 目标且不需要叠角标时直接返回，省掉全部像素往返。
     if (s->kind == ICONSRC_SHELL) {
-        // 退路：从 shell 的共享列表里**读**一张（GetIcon 不追加，不增长 SIC）
-        h = createScaledShellIcon(s->iconIndex, size);
+        int nativeSize = 0;
+        HICON h = createShellIconBest(s->iconIndex, size, &nativeSize);
+        if (!h) return NULL;
+        if (nativeSize == size && !(s->flags & ICONSRC_OVERLAY)) return h;
+        int pxSize = 0;
+        BYTE* px = getIconPixelsSquare(h, &pxSize);
+        DestroyIcon(h);
+        if (!px) return NULL;
+        BYTE* scaled = scalePixelsOwned(px, pxSize, size);
+        if (!scaled) return NULL;
+        if (s->flags & ICONSRC_OVERLAY) stampShortcutOverlay(scaled, size);
+        HICON out = createIconFromPixels(scaled, size, size);
+        free(scaled);
+        return out;
     }
-    else if (s->kind == ICONSRC_ICO) {
-        h = extractIconFromIcoFile(s->iconFile, size, size);
+
+    int srcSize = 0;
+    BYTE* src = NULL;
+    if (s->kind == ICONSRC_ICO) {
+        src = extractIcoIconPixels(s->iconFile, size, &srcSize);
     }
     else if (s->iconFile && s->iconFile[0]) {
-        // 首选自带的 PE 解码器，**不能**首选 PrivateExtractIconsW：
+        // 自带 PE 解码器，**不能**用 PrivateExtractIconsW 取首帧：
         // 后者内部的择帧规则是「不大于目标里最大」（user32/cursoricon.c 的
         // CURSORICON_FindBestIcon），选中后再由 create_icon_frame 拉伸到目标尺寸。
         // 于是「目标 128、文件里只有 16/32/48/256」时会选中 48 再放大 2.67 倍
@@ -593,31 +684,39 @@ static HICON renderIconSource(int id, int size) {
         // 的「不小于目标里最小，都不够大才取最大」，会直接挑中 256 原生帧，再由
         // 调用方平滑缩到目标尺寸（缩永远比放大清楚）。
         // 序号语义与 shell 一致：负数 = 资源 ID，目录/驱动器的图标就是 shell32.dll
-        // 的负 ID（已在 extractIconFromPeIndexed 里按 ID 解析）。
-        h = extractIconFromPeIndexed(s->iconFile, s->iconIndex, size, size);
+        // 的负 ID（已在 extractPeIconPixels 里按 ID 解析）。
+        src = extractPeIconPixels(s->iconFile, s->iconIndex, size, &srcSize);
         // 图标组序号越界（注册表里的坐标常带一个文件里并不存在的序号）：退回主图标
-        if (!h && s->iconIndex != 0)
-            h = extractIconFromPeIndexed(s->iconFile, 0, size, size);
-        // 最后手段：Wine 自己的 API。对「自带解码器啃不动的位深/PNG 变体」还有用，
-        // 代价是可能拿小帧拉伸，所以只当兜底。
-        if (!h && !PrivateExtractIconsW(s->iconFile, s->iconIndex, size, size, &h, NULL, 1, LR_DEFAULTCOLOR))
-            h = NULL;
+        if (!src && s->iconIndex != 0)
+            src = extractPeIconPixels(s->iconFile, 0, size, &srcSize);
     }
 
-    // 上面全落空：退回 shell 系统列表（只读，见 renderShellFallback 的说明）
-    if (!h && s->kind != ICONSRC_SHELL) h = renderShellFallback(s, size);
+    // 上面全落空：退回 shell 系统列表（只读，见 renderShellFallbackPixels 的说明）
+    if (!src) src = renderShellFallbackPixels(s, size, &srcSize);
+    if (!src) return NULL;
 
-    // 提取出来的常是原生帧（256/48/32），按目标尺寸平滑缩一次
-    if (h) {
-        HICON scaled = scaleIconToSize(h, size);
-        if (scaled) { DestroyIcon(h); h = scaled; }
-    }
+    // 原生尺寸就是目标尺寸时 scalePixelsOwned 直接把缓冲交回（省一次整幅 memcpy）
+    BYTE* scaled = scalePixelsOwned(src, srcSize, size);
+    if (!scaled) return NULL;
 
-    if (h && (s->flags & ICONSRC_OVERLAY)) {
-        HICON composed = composeShortcutIcon(h, size);
-        if (composed) { DestroyIcon(h); h = composed; }
-    }
+    // 角标叠在最终尺寸上；合成失败不影响主图标，只是少个箭头
+    if (s->flags & ICONSRC_OVERLAY) stampShortcutOverlay(scaled, size);
+
+    HICON h = createIconFromPixels(scaled, size, size);
+    free(scaled);
     return h;
+}
+
+// 池内查已有槽位（**不渲染**）。-1 = 这条来源还不占槽。
+// 绘制路径必须走这条：渲染一个图标要解 PE / 缩放，成本是毫秒级，一旦落在
+// WM_PAINT 里，首帧就要等整屏图标提完（Wine 先擦白再画，就是「点进去闪一下」）。
+static int poolSlotLookup(struct IconPool* p, int id) {
+    if (!p || !iconIdTypeNameValid(id)) return -1;
+    if (id - 1 >= p->idSlotCap) return -1;   // 容量没覆盖到 = 肯定没登记过
+    if (p->idSlot[id - 1] < 0) return -1;
+    int slot = p->idSlot[id - 1];
+    p->slotTick[slot] = ++p->tick;           // 命中即刷新 LRU 时间戳
+    return slot;
 }
 
 // 取某条来源在池里的槽位。不在池内就渲染 + 分配槽，池满时 LRU 淘汰独占槽。
@@ -632,11 +731,8 @@ static int poolSlotFor(struct IconPool* p, int id) {
         p->idSlot = tmp;
         p->idSlotCap = newCap;
     }
-    if (p->idSlot[id - 1] >= 0) {
-        int slot = p->idSlot[id - 1];
-        p->slotTick[slot] = ++p->tick;
-        return slot;
-    }
+    int ready = poolSlotLookup(p, id);
+    if (ready >= 0) return ready;
 
     HICON hicon = renderIconSource(id, p->size);
     if (!hicon) return -1;
@@ -649,13 +745,24 @@ static int poolSlotFor(struct IconPool* p, int id) {
     else {
         // 池满：在**非共享**槽里挑最久没用过的原地替换。ReplaceIcon 索引不变，
         // 所以控件里已挂的列表句柄与 iImage 的语义都不受影响。
-        // 共享项（目录/驱动器/扩展名）永不参与淘汰 —— 它们的数量有界，且会反复出现。
+        // 共享项（目录/驱动器/固定节点/扩展名）会反复出现，优先不动它们。
         int victim = -1;
         for (int i = 0; i < p->slotCount; i++) {
             int owner = p->slotId[i];
             if (owner <= 0) continue;
             if (iconSources[owner - 1].flags & ICONSRC_SHARED) continue;
             if (victim < 0 || p->slotTick[i] < p->slotTick[victim]) victim = i;
+        }
+        // 整池都被共享项占着时（共享槽不参与淘汰，所以它只会随浏览过的扩展名种类单调
+        // 增长；大图标 128px 的池也只有几十个槽）必须退让一步、连共享项一起挑，否则
+        // 这个独占项（exe/lnk/ico）永远挤不进池，调用方还会把它标成永久失败 ——
+        // 那正是「小概率某个文件压根不显示图标」。被顶掉的共享项下次绘制会重新渲染，
+        // 代价只是一次 shell 坐标查询。
+        if (victim < 0) {
+            for (int i = 0; i < p->slotCount; i++) {
+                if (p->slotId[i] <= 0) continue;
+                if (victim < 0 || p->slotTick[i] < p->slotTick[victim]) victim = i;
+            }
         }
         if (victim < 0) { DestroyIcon(hicon); return -1; }
         // 被顶掉的图标要同时作废它的反向映射，否则它会一直命中一个装了别人图案的槽位
@@ -889,6 +996,58 @@ static int getIconSlot(struct ListItem* item) {
     // 退回系统列表，那时的 iImage 语义与池内的槽位不对应。
     if (p->himl != currentImageList) return -1;
     return poolSlotFor(p, id);
+}
+
+// 绘制路径专用的槽位查询：**只查已渲染好的槽，绝不在这里渲染**。
+//
+// 为什么：渲染一个图标要解 PE / 缩放，是毫秒级的活。它一旦落在 WM_PAINT 里，
+// 首帧就得等整屏图标提完 —— 而 Wine 是先 WM_ERASEBKGND 把客户区擦成窗口底色再
+// 发 WM_PAINT，用户看到的就是「点进去先闪一下白」。所以绘制只管画，缺图标的项先
+// 画成空位；渲染由 iconFillStep() 在绘制之外补，**补齐期间不重画任何一格**，等可见项
+// 全部就位才整屏重画一次（这样图标是一起出现的，而不是按渲染快慢一格一格冒出来）。
+// 代价只是「图标比文字晚一两帧到位」，换来的是首帧恒定只有布局 + 描画的开销。
+//
+// 走这条路还有个好处：这个函数是绘制路径唯一知道「哪些项还没有图标」的地方，
+// 所以补齐的调度就从这里发——滚动/翻页/改窗口大小之后自然会有绘制，也就自然
+// 会重新安排补齐，不必再去接 WM_VSCROLL / WM_MOUSEWHEEL / WM_SIZE。
+static int getIconSlotForPaint(struct ListItem* item) {
+    if (!item) return -1;
+    struct IconPool* p = currentIconPool();
+    // 只在这个池确实挂在控件上时才给出索引：池创建失败时 refreshContentView 会
+    // 退回系统列表，那时的 iImage 语义与池内的槽位不对应。
+    if (!p || p->himl != currentImageList) return -1;
+
+    // 已判定补不出来的项提前退出。注意判据要放在 id 有效性**之前**：渲染失败的项
+    // 仍留着有效的 id（resolveIconId 已经把 id 记在 item->icon 上了），只按
+    // 「id 有效但池里没槽」判断的话，每次绘制都会安排一次补齐，而补齐循环里
+    // `if (item->iconFailed) continue;` 会把它跳过 —— 一进一出就变成消息空转。
+    if (item->iconFailed) return -1;
+
+    // 上报「这里缺图标」的见证：补齐循环据此把本轮范围扩到绘制真正看到过的项上。
+    // 只对**还可能补出来**的项上报 —— 已经判失败的项必须在上面就返回，否则补齐会
+    // 永远等一个补不出来的格子（判定永远不到「全部就位」，整屏重画就永远不来）。
+    if (items && item >= items && item < items + numItems) {
+        int idx = (int)(item - items);
+        if (idx < iconMissFirst) iconMissFirst = idx;
+        if (idx > iconMissLast) iconMissLast = idx;
+        iconPaintMissed = true;
+    }
+
+    // 本屏还没补齐：**整屏一律画空位**。哪怕这一格池里已经有槽也不画 —— 否则先画到的
+    // 格子有图标、后画的没有，就是「有的有、有的空，一格一格冒出来」。本屏补齐后
+    // （iconPanePend 被 iconFillRange 放掉）会整屏重画一次，那时一起出现。
+    if (iconPanePend) {
+        scheduleIconFill();
+        return -1;
+    }
+
+    if (!iconIdTypeNameValid(item->icon)) {
+        scheduleIconFill();   // 还没解析出 id：交给补齐循环去解析 + 渲染
+        return -1;
+    }
+    int slot = poolSlotLookup(p, item->icon);
+    if (slot < 0) scheduleIconFill();
+    return slot;
 }
 
 // 计算并应用大图标视图的格子尺寸（LVM_SETICONSPACING）。
@@ -1340,6 +1499,36 @@ static void execCommandLine(wchar_t* command) {
 }
 
 LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 滚动类消息一律记时间戳：图标补齐据此让位，避免和拖动抢消息队列
+    // （`switch` 下面不动它们，继续交给列表控件的默认处理）。
+    bool scrollMsg = (msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_MOUSEWHEEL ||
+                      msg == WM_MOUSEHWHEEL || msg == WM_KEYDOWN || msg == WM_SIZE);
+    if (scrollMsg) lastScrollTick = GetTickCount();
+
+    // 连续拖动（按住滚动条滑块）事后不做同步补齐：拖动期间每个鼠标移动都来一条
+    // WM_VSCROLL，每条都付一次渲染代价的话，拖动本身就卡了。它交给「滚动静默 + 异步
+    // 补齐」，而闸（iconPanePend）保证拖动期间不会出现「一半有图标一半空白」。
+    // 离散滚动（滚轮 / 翻页键 / 行滚动 / 改尺寸）只有一步，趁机把新露出来的补齐。
+    bool syncFillAfter = scrollMsg && !(msg == WM_VSCROLL && LOWORD(wParam) == SB_THUMBTRACK);
+
+    // 绘制入口：这一帧画不画图标，必须在**任何一格被画出来之前**定下来（见 updateIconPaneGate）。
+    if (msg == WM_PAINT) updateIconPaneGate();
+    // 两个一次性定时器：TIMER_ICON_FILL 是「等滚动静默」之后重新安排补齐（此时
+    // lastScrollTick 已经过期，scheduleIconFill 会真的把消息投出去）；TIMER_ICON_PREFETCH
+    // 是邻域预取的下一趟。定时器 id 不匹配就原样落给列表控件处理。
+    if (msg == WM_TIMER && (wParam == TIMER_ICON_FILL || wParam == TIMER_ICON_PREFETCH)) {
+        KillTimer(hwnd, (UINT_PTR)wParam);
+        if (wParam == TIMER_ICON_FILL) {
+            iconFillTimerPending = false;
+            scheduleIconFill();
+        }
+        else {
+            iconPrefetchTimerPending = false;
+            if (iconPrefetchStep()) scheduleIconPrefetch();
+        }
+        return 0;
+    }
+
     switch (msg) {
         case MSG_ADD_ITEMS_BATCH: {
             if (searchData != NULL && searchData->active) {
@@ -1357,14 +1546,19 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 for (int i = 0; i < batch->count; i++) {
                     struct ListItem* item = &items[numItems + i];
+                    // realloc 出来的新区是未初始化的，icon / iconFailed / iconTries 必须清零：
+                    // iconFailed 的垃圾值非 0 会让这个文件直接「没有图标」（resolveIconId 与
+                    // 补齐循环都会把它当成已知失败跳过），而 icon 的垃圾值若恰好落在已登记的
+                    // 来源范围内，还会让它显示成**别的文件**的图标。这正好是随机、小概率的。
+                    memset(item, 0, sizeof(struct ListItem));
                     item->node = batch->nodes[i];
-                    item->path = NULL;
                     item->loaded = false;
                     fillFileInfo(batch->nodes[i], item);
                 }
                 
                 numItems = newCount;
                 ListView_SetItemCountEx(hwndContentView, numItems, LVSICF_NOINVALIDATEALL);
+                scheduleIconFill();   // 搜索结果是分批追加的，每批都安排一次补齐
 
                 DWORD now = GetTickCount();
                 if (now - lastStatusbarTick >= 200) {
@@ -1372,6 +1566,13 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     updateStatusbar();
                 }
             }
+            break;
+        }
+        case MSG_ICON_FILL: {
+            // 先清闸再补：iconFillStep 开头的 UpdateWindow 会触发绘制，绘制发现仍有
+            // 缺图标就会再安排一次，所以这里必须允许重新挂号。
+            iconFillPosted = false;
+            if (iconFillStep()) scheduleIconFill();
             break;
         }
         case MSG_SEARCH_DONE: {
@@ -1458,7 +1659,13 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             break;
         }
     }
-    return OrigWndProc(hwnd, msg, wParam, lParam);  
+    LRESULT result = OrigWndProc(hwnd, msg, wParam, lParam);
+
+    // 滚动/改尺寸之后，控件已经把新露出来的那一条失效掉了，但重绘还没发生。趁这个空档
+    // 把新露出来的那一屏补齐 —— 重绘到来时就是完整的，不会「滚过去一半有图标一半空白」。
+    if (syncFillAfter) iconFillVisibleSync(ICON_SCROLL_SYNC_BUDGET_MS);
+
+    return result;
 }
 
 void updateSelectedItems() {
@@ -1938,10 +2145,13 @@ static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     int iconY = rc.top + ICONVIEW_TOP_PAD;
     if (currentImageList && item->loaded) {
         // item->icon 是自建图标库的 id，这里换成当前显示列表（iconViewIconSize 那本）
-        // 里的槽位索引。槽位池内部按尺寸渲染 + LRU，见 getIconSlot 处的说明。
-        int imageIdx = getIconSlot(item);
-        ImageList_DrawEx(currentImageList, imageIdx, hdc, iconX, iconY, 0, 0,
-                         CLR_NONE, CLR_NONE, ILD_TRANSPARENT);
+        // 里的槽位索引。只查已渲染好的槽（见 getIconSlotForPaint）；缺失的项由
+        // iconFillStep() 补上后重画这一格。
+        int imageIdx = getIconSlotForPaint(item);
+        if (imageIdx >= 0) {
+            ImageList_DrawEx(currentImageList, imageIdx, hdc, iconX, iconY, 0, 0,
+                             CLR_NONE, CLR_NONE, ILD_TRANSPARENT);
+        }
     }
 
     // 文件名：图标下方，文字区宽度与 updateIconViewLayout 的测量宽度严格
@@ -2077,7 +2287,9 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             if (mask & LVIF_IMAGE) {
                 // item->icon 是自建图标库的 id（与显示尺寸无关），这里换成当前显示
                 // 列表里的槽位索引 —— 所有视图样式走同一条路，不再区分大/小图标列表。
-                nmlvdi->item.iImage = getIconSlot(item);
+                // 只查已渲染好的槽（见 getIconSlotForPaint），缺失的项由 iconFillStep()
+                // 补上后重画；绝不在这里渲染，否则首帧要等整屏图标提完（闪白）。
+                nmlvdi->item.iImage = getIconSlotForPaint(item);
             }
             
             if (mask & LVIF_TEXT) {
@@ -3073,10 +3285,15 @@ typedef struct {
 } GRPICONDIR;
 #pragma pack(pop)
 
-// Create HICON from raw ICO image data (BITMAPINFOHEADER + XOR data + AND mask).
-// This parses the icon data directly, bypassing Wine's icon compositing which
-// can produce color-inverted results for multi-size icon groups.
-static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
+// 把 RT_ICON / .ico 条目里的图像资源解成 32bpp straight-alpha 像素（top-down，
+// 步长 = 边长×4），返回 malloc 缓冲（调用方 free()），失败返回 NULL。
+//
+// 这是 ICO 资源格式的内核：BITMAPINFOHEADER + 调色板 + XOR 位图 + AND 掩码。
+// 以前的实现直接把它写进 DIB 段再 CreateIconIndirect 成 HICON，上层拿到 HICON 后
+// 又用 GetIconInfo 把位图深拷贝出来才能缩放 —— 一个图标来回搬两趟整幅像素。
+// 现在输出裸缓冲，上层全程在缓冲上选帧 / 缩放 / 叠角标，最后只建一次 HICON。
+static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW, int* outH) {
+    *outW = *outH = 0;
     if (!data || dataSize < sizeof(BITMAPINFOHEADER)) return NULL;
 
     const BITMAPINFOHEADER* bih = (const BITMAPINFOHEADER*)data;
@@ -3118,30 +3335,19 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
     const BYTE* xorPixels = xorData + paletteSize;
     const BYTE* andData = xorPixels + xorTotalSize;
 
-    // Create 32bpp ARGB DIB section
-    HDC hdc = GetDC(NULL);
-    if (!hdc) return NULL;
+    BYTE* pixels = (BYTE*)malloc((size_t)width * height * 4);
+    if (!pixels) return NULL;
 
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    BYTE* bits = NULL;
-    HBITMAP hBmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
-    ReleaseDC(NULL, hdc);
-
-    if (!hBmp || !bits) return NULL;
-
-    // Convert XOR data to 32bpp ARGB (source is bottom-up in ICO format)
+    // Convert XOR data to 32bpp ARGB (source is bottom-up in ICO format)，
+    // 同时记录是否真存在 alpha 通道（只有 32bpp 才可能有，其余格式一律靠掩码）
+    BOOL hasAlpha = FALSE;
     for (int y = 0; y < height; y++) {
         const BYTE* srcRow = xorPixels + (size_t)(height - 1 - y) * xorRowSize;
-        BYTE* dstRow = bits + (size_t)y * width * 4;
+        BYTE* dstRow = pixels + (size_t)y * width * 4;
         if (bpp == 32) {
-            memcpy(dstRow, srcRow, width * 4);
+            memcpy(dstRow, srcRow, (size_t)width * 4);
+            for (int x = 0; x < width && !hasAlpha; x++)
+                if (dstRow[x * 4 + 3]) hasAlpha = TRUE;
         } else if (bpp == 24) {
             for (int x = 0; x < width; x++) {
                 dstRow[x * 4 + 0] = srcRow[x * 3 + 0]; // B
@@ -3171,45 +3377,39 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
         }
     }
 
-    // Check if alpha channel is present and valid
-    BOOL hasAlpha = FALSE;
-    if (bpp == 32) {
-        for (int i = 0; i < width * height && !hasAlpha; i++) {
-            if (bits[i * 4 + 3] != 0) hasAlpha = TRUE;
-        }
-    }
-
     // If no alpha (common Wine bug for multi-icon EXEs), use AND mask
     if (!hasAlpha) {
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
-                int andByteIdx = y * andRowSize + (x / 8);
+                int andByteIdx = y * (int)andRowSize + (x / 8);
                 int andBitIdx = 7 - (x % 8);
                 BOOL transparent = (andData[andByteIdx] >> andBitIdx) & 1;
 
                 int px = (y * width + x) * 4;
                 if (transparent) {
-                    bits[px + 0] = 0;
-                    bits[px + 1] = 0;
-                    bits[px + 2] = 0;
-                    bits[px + 3] = 0;
+                    pixels[px + 0] = 0;
+                    pixels[px + 1] = 0;
+                    pixels[px + 2] = 0;
+                    pixels[px + 3] = 0;
                 } else {
-                    bits[px + 3] = 255;
+                    pixels[px + 3] = 255;
                 }
             }
         }
     }
 
-    // Create icon from fixed bitmap
-    HBITMAP hMask = CreateBitmap(width, height, 1, 1, NULL);
-    ICONINFO iconInfo = {0};
-    iconInfo.fIcon = TRUE;
-    iconInfo.hbmColor = hBmp;
-    iconInfo.hbmMask = hMask;
-    HICON hIcon = CreateIconIndirect(&iconInfo);
+    *outW = width;
+    *outH = height;
+    return pixels;
+}
 
-    DeleteObject(hBmp);
-    DeleteObject(hMask);
+// Create HICON from raw ICO image data（保留 HICON 形态的入口：图标查看器要用）。
+static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
+    int width = 0, height = 0;
+    BYTE* pixels = decodeIconDataToPixels(data, dataSize, &width, &height);
+    if (!pixels) return NULL;
+    HICON hIcon = createIconFromPixels(pixels, width, height);
+    free(pixels);
     return hIcon;
 }
 
@@ -3330,10 +3530,18 @@ static bool isBetterIconEntry(int side, int depth, int bestSide, int bestDepth, 
 //   >= 0  RT_GROUP_ICON 的枚举序号（0 = 主图标，工具栏与 exe 用这个）
 //   <  0  按资源 ID 查找，ID = -groupIndex —— 目录（IDI_SHELL_FOLDER=4，shell 给
 //         出的就是 -4）、驱动器、注册过扩展名走的都是这种负数坐标
-static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired) {
-    if (!pePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+// 打开 PE 里的图标资源，返回模块句柄（调用方负责 FreeLibrary）+ 资源数据指针/长度，
+// 并只按 desired 算出最合适的那一帧。失败返回 NULL。
+//
+// 单独抽出来是为了让「取 HICON」和「取像素」两条路共用同一套定位逻辑。注意数据指针
+// 只在模块活着期间有效（LOAD_LIBRARY_AS_DATAFILE 是文件映射视图），调用方必须在拿到
+// 的 hModule 上完成解码再 FreeLibrary。
+static HMODULE peOpenIconResource(const wchar_t* pePath, int groupIndex, int desired,
+                                  const BYTE** outData, DWORD* outSize) {
+    *outData = NULL;
+    *outSize = 0;
+    if (!pePath || !pePath[0]) return NULL;
 
-    HICON result = NULL;
     HMODULE hModule = LoadLibraryExW(pePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
     if (!hModule) return NULL;
 
@@ -3347,57 +3555,129 @@ static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int
             if (enumData.ids[i] == wantId) { groupIndex = i; break; }
         }
     }
+    if (groupIndex < 0 || groupIndex >= enumData.count) {
+        FreeLibrary(hModule);
+        return NULL;
+    }
 
-    if (groupIndex >= 0 && groupIndex < enumData.count) {
-        HRSRC hGroupRes = enumData.hRes[groupIndex];
-        HGLOBAL hGroupGlob = hGroupRes ? LoadResource(hModule, hGroupRes) : NULL;
-        const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
+    HRSRC hGroupRes = enumData.hRes[groupIndex];
+    HGLOBAL hGroupGlob = hGroupRes ? LoadResource(hModule, hGroupRes) : NULL;
+    const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
+    if (!grpDir || grpDir->idType != 1 || grpDir->idCount == 0) {
+        FreeLibrary(hModule);
+        return NULL;
+    }
 
-        if (grpDir && grpDir->idType == 1 && grpDir->idCount > 0) {
-            // 防畸形 PE：目录声明的条目数必须落在资源实际大小内，否则越界读
-            DWORD groupSize = SizeofResource(hModule, hGroupRes);
-            if (groupSize >= 6 &&
-                (DWORD)grpDir->idCount <= (groupSize - 6) / sizeof(GRPICONDIRENTRY)) {
+    // 防畸形 PE：目录声明的条目数必须落在资源实际大小内，否则越界读
+    DWORD groupSize = SizeofResource(hModule, hGroupRes);
+    if (groupSize < 6 || (DWORD)grpDir->idCount > (groupSize - 6) / sizeof(GRPICONDIRENTRY)) {
+        FreeLibrary(hModule);
+        return NULL;
+    }
 
-                int bestIndex = -1;
-                int bestSide = 0;
-                int bestDepth = 0;
-                for (WORD i = 0; i < grpDir->idCount; i++) {
-                    const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
-                    int w = entry->bWidth ? entry->bWidth : 256;
-                    int h = entry->bHeight ? entry->bHeight : 256;
-                    int side = (w > h) ? w : h;
-                    if (bestIndex < 0 ||
-                        isBetterIconEntry(side, entry->wBitCount, bestSide, bestDepth, cxDesired)) {
-                        bestIndex = i;
-                        bestSide = side;
-                        bestDepth = entry->wBitCount;
-                    }
-                }
+    int bestIndex = -1;
+    int bestSide = 0;
+    int bestDepth = 0;
+    for (WORD i = 0; i < grpDir->idCount; i++) {
+        const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
+        int w = entry->bWidth ? entry->bWidth : 256;
+        int h = entry->bHeight ? entry->bHeight : 256;
+        int side = (w > h) ? w : h;
+        if (bestIndex < 0 ||
+            isBetterIconEntry(side, entry->wBitCount, bestSide, bestDepth, desired)) {
+            bestIndex = i;
+            bestSide = side;
+            bestDepth = entry->wBitCount;
+        }
+    }
+    if (bestIndex < 0) {
+        FreeLibrary(hModule);
+        return NULL;
+    }
 
-                if (bestIndex >= 0) {
-                    const GRPICONDIRENTRY* entry = &grpDir->idEntries[bestIndex];
-                    HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
-                    HGLOBAL hIconGlob = hIconRes ? LoadResource(hModule, hIconRes) : NULL;
-                    const BYTE* iconData = hIconGlob ? (const BYTE*)LockResource(hIconGlob) : NULL;
-                    DWORD iconResSize = hIconRes ? SizeofResource(hModule, hIconRes) : 0;
+    const GRPICONDIRENTRY* entry = &grpDir->idEntries[bestIndex];
+    HRSRC hIconRes = FindResourceW(hModule, MAKEINTRESOURCE(entry->nID), RT_ICON);
+    HGLOBAL hIconGlob = hIconRes ? LoadResource(hModule, hIconRes) : NULL;
+    const BYTE* iconData = hIconGlob ? (const BYTE*)LockResource(hIconGlob) : NULL;
+    DWORD iconResSize = hIconRes ? SizeofResource(hModule, hIconRes) : 0;
+    if (!iconData || iconResSize == 0) {
+        FreeLibrary(hModule);
+        return NULL;
+    }
 
-                    if (iconData && iconResSize > 0) {
-                        // 与 extractAllIconGroupsFromPE 相同的三级 fallback
-                        result = createIconFromRawData(iconData, iconResSize);
-                        if (!result) result = createIconFromPngData(iconData, iconResSize);
-                        if (!result) {
-                            result = CreateIconFromResourceEx((PBYTE)iconData, iconResSize,
-                                TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
-                        }
-                    }
-                }
+    *outData = iconData;
+    *outSize = iconResSize;
+    return hModule;
+}
+
+// 取 PE 图标组里最合适的那一帧，解成**原生尺寸**的 32bpp 像素缓冲（方形，边长写回
+// *outSize）。失败返回 NULL。
+//
+// 三级 fallback 与批量提取一致：自带解码器（BITMAPINFOHEADER 资源）→ GDI+（现代 exe
+// 的 256 JUMBO 常是 PNG 压缩帧，Wine 的 load_png 有 B/R 颠倒 bug 才走 GDI+）→
+// Wine 的 CreateIconFromResourceEx。后两条只能吐 HICON，所以各多一次像素往返，
+// 但它们只在「自带解码器啃不动」时才发生。
+static BYTE* extractPeIconPixels(const wchar_t* pePath, int groupIndex, int desired, int* outSize) {
+    *outSize = 0;
+    if (!pePath || !pePath[0] || desired <= 0) return NULL;
+
+    BYTE* pixels = NULL;
+    const BYTE* data = NULL;
+    DWORD len = 0;
+    HMODULE hModule = peOpenIconResource(pePath, groupIndex, desired, &data, &len);
+
+    if (hModule) {
+        int w = 0, h = 0;
+        pixels = decodeIconDataToPixels(data, len, &w, &h);
+        if (pixels && w != h) {   // 非方形（畸形资源）：交给后面的 HICON 路线处理
+            free(pixels);
+            pixels = NULL;
+        }
+
+        if (pixels) {
+            *outSize = w;
+        }
+        else {
+            HICON hIcon = createIconFromPngData(data, len);
+            // 0/0 = 按帧原生尺寸建，不许 Wine 替我们拉伸（它的择帧会挑小帧放大）
+            if (!hIcon) hIcon = CreateIconFromResourceEx((PBYTE)data, len,
+                                                         TRUE, 0x00030000, 0, 0, LR_DEFAULTCOLOR);
+            if (hIcon) {
+                pixels = getIconPixelsSquare(hIcon, outSize);
+                DestroyIcon(hIcon);
             }
+        }
+        FreeLibrary(hModule);
+    }
+
+    if (!pixels) {
+        // 最后手段：Wine 自己的完整图标 API（按路径 + 序号/负 ID 自己找资源）。
+        // 老实现把它当兜底，专门救「上面两条都啃不动」的位深/PNG 变体，保留同一层
+        // 保险。代价是它会按 desired 拉伸（可能选到小帧再放大），所以只放在最后。
+        HICON hIcon = NULL;
+        if (PrivateExtractIconsW(pePath, groupIndex, desired, desired, &hIcon, NULL, 1, LR_DEFAULTCOLOR) && hIcon) {
+            pixels = getIconPixelsSquare(hIcon, outSize);
+            DestroyIcon(hIcon);
         }
     }
 
-    FreeLibrary(hModule);
-    return result;
+    return pixels;
+}
+
+static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired) {
+    if (!pePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+
+    // 本文件所有调用点都是方形；非方形取宽（旧实现把它当拉伸目标，这里只做等比缩放）
+    int size = 0;
+    BYTE* pixels = extractPeIconPixels(pePath, groupIndex, cxDesired, &size);
+    if (!pixels) return NULL;
+
+    BYTE* scaled = scalePixelsOwned(pixels, size, cxDesired);
+    if (!scaled) return NULL;
+
+    HICON h = createIconFromPixels(scaled, cxDesired, cxDesired);
+    free(scaled);
+    return h;
 }
 
 // 兼容入口：主图标 = 枚举到的第一个图标组（工具栏 CMD/Explorer 按钮用）
@@ -3424,14 +3704,14 @@ typedef struct {
 } ICOFILEDIR;
 #pragma pack(pop)
 
-// 从独立 .ico 文件提取最接近目标尺寸的图标（lnk 的 ICON_LOCATION 直接指向
-// 图标文件时用）。条目数据与 PE 里的 RT_ICON 相同，PNG 压缩条目（Vista+
-// 常见）以 PNG 签名开头，分别复用 createIconFromRawData / createIconFromPngData。
-// 失败返回 NULL。
-static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int cyDesired) {
-    if (!icoPath || cxDesired <= 0 || cyDesired <= 0) return NULL;
+// 从独立 .ico 文件取最接近目标尺寸的那一帧，解成**原生尺寸**的像素缓冲（方形，边长
+// 写回 *outSize）。条目数据与 PE 里的 RT_ICON 相同，PNG 压缩条目（Vista+ 常见）以
+// PNG 签名开头，分别复用 decodeIconDataToPixels / createIconFromPngData。
+// lnk 的 ICON_LOCATION 直接指向图标文件时走这条。失败返回 NULL。
+static BYTE* extractIcoIconPixels(const wchar_t* icoPath, int desired, int* outSize) {
+    *outSize = 0;
+    if (!icoPath || desired <= 0) return NULL;
 
-    HICON result = NULL;
     HANDLE hFile = CreateFileW(icoPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return NULL;
@@ -3441,6 +3721,7 @@ static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int c
     if (fileSize != INVALID_FILE_SIZE && fileSize >= sizeof(ICOFILEDIR) && fileSize <= 8u * 1024 * 1024)
         buf = (BYTE*)malloc(fileSize);
 
+    BYTE* pixels = NULL;
     DWORD bytesRead = 0;
     if (buf && ReadFile(hFile, buf, fileSize, &bytesRead, NULL) && bytesRead == fileSize) {
         const ICOFILEDIR* dir = (const ICOFILEDIR*)buf;
@@ -3457,7 +3738,7 @@ static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int c
                 int h = entries[i].bHeight ? entries[i].bHeight : 256;
                 int side = (w > h) ? w : h;
                 if (bestIndex < 0 ||
-                    isBetterIconEntry(side, entries[i].wBitCount, bestSide, bestDepth, cxDesired)) {
+                    isBetterIconEntry(side, entries[i].wBitCount, bestSide, bestDepth, desired)) {
                     bestIndex = i;
                     bestSide = side;
                     bestDepth = entries[i].wBitCount;
@@ -3470,14 +3751,23 @@ static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int c
                 // 防畸形文件：条目声明的数据块必须整体落在文件内，否则越界读
                 if (len > 0 && off <= fileSize && len <= fileSize - off) {
                     const BYTE* data = buf + off;
-                    if (len >= 8 && data[0] == 0x89 && memcmp(data + 1, "PNG", 3) == 0) {
-                        result = createIconFromPngData(data, len);
-                    } else {
-                        result = createIconFromRawData(data, len);
-                        if (!result) result = createIconFromPngData(data, len);
-                        if (!result) {
-                            result = CreateIconFromResourceEx((PBYTE)data, len,
-                                TRUE, 0x00030000, cxDesired, cyDesired, LR_DEFAULTCOLOR);
+                    bool isPng = (len >= 8 && data[0] == 0x89 && memcmp(data + 1, "PNG", 3) == 0);
+
+                    if (!isPng) {
+                        int w = 0, h = 0;
+                        pixels = decodeIconDataToPixels(data, len, &w, &h);
+                        if (pixels && w == h) *outSize = w;
+                        else { free(pixels); pixels = NULL; }
+                    }
+                    if (!pixels) {
+                        // GDI+ 解 PNG（Wine 的 load_png 有 B/R 颠倒 bug），再兜底 Wine 的 API。
+                        // 都按帧原生尺寸建 HICON，缩放留给上层 —— 不许 Wine 替我们择帧拉伸。
+                        HICON hIcon = createIconFromPngData(data, len);
+                        if (!hIcon) hIcon = CreateIconFromResourceEx((PBYTE)data, len,
+                                                                     TRUE, 0x00030000, 0, 0, LR_DEFAULTCOLOR);
+                        if (hIcon) {
+                            pixels = getIconPixelsSquare(hIcon, outSize);
+                            DestroyIcon(hIcon);
                         }
                     }
                 }
@@ -3487,7 +3777,7 @@ static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int c
 
     free(buf);
     CloseHandle(hFile);
-    return result;
+    return pixels;
 }
 
 // 取 HICON 的 32bpp 像素副本（straight alpha）。来源缺 alpha（24 位/调色板
@@ -3789,12 +4079,9 @@ static HICON createIconFromPixels(const BYTE* pixels, int width, int height) {
     return result;
 }
 
-// 把任意尺寸的方形 HICON 平滑缩放到 size×size。整数倍缩小走盒式均值（预乘后
-// 平均，像素干净），其余（含放大）走双线性——两条路都不会出现最近邻放大那种
-// 块状。已经是目标尺寸时只做一次像素往返。失败返回 NULL。
-static HICON scaleIconToSize(HICON hIcon, int size) {
-    if (!hIcon || size <= 0) return NULL;
-
+// getIconPixels 的方形封装：非方形视为失败（本文件的图标全是方形）。
+static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize) {
+    *outSize = 0;
     int width = 0, height = 0;
     BYTE* pixels = getIconPixels(hIcon, &width, &height);
     if (!pixels) return NULL;
@@ -3802,18 +4089,27 @@ static HICON scaleIconToSize(HICON hIcon, int size) {
         free(pixels);
         return NULL;
     }
+    *outSize = width;
+    return pixels;
+}
 
-    if (width == size) {
-        HICON result = createIconFromPixels(pixels, size, size);
+// 把方形像素缓冲缩放到 dstSize×dstSize。整数倍缩小先反复折半（每步都是整数倍盒式
+// 均值），最后一步再收尾：256→48 若直接用点采样式双线性，会漏掉大部分源像素、细节
+// 发花；非整数倍（含放大）走双线性，不会出现最近邻那种块状。
+//
+// **无论成功失败都消费 pixels**（尺寸相同则原样交回，省掉一次整幅 memcpy；需要重采样
+// 时旧缓冲已被释放）。渲染路径要的就是这个语义：解码出的原生帧缓冲直接传进来，拿到
+// 的即最终尺寸的缓冲 —— 中途不需要经过任何 HICON。
+static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize) {
+    if (!pixels || srcSize <= 0 || dstSize <= 0) {
         free(pixels);
-        return result;
+        return NULL;
     }
+    if (srcSize == dstSize) return pixels;
 
-    // 大倍数缩小先反复折半（每步都是整数倍盒式均值），最后一步再收尾：
-    // 256→48 若直接用点采样式双线性，会漏掉大部分源像素、细节发花。
     BYTE* cur = pixels;
-    int curSize = width;
-    while (curSize >= size * 2 && curSize % 2 == 0) {
+    int curSize = srcSize;
+    while (curSize >= dstSize * 2 && curSize % 2 == 0) {
         BYTE* half = downsampleIconPixels(cur, curSize, curSize / 2);
         if (!half) break;
         free(cur);
@@ -3822,61 +4118,36 @@ static HICON scaleIconToSize(HICON hIcon, int size) {
     }
 
     BYTE* scaled = cur;
-    if (curSize != size) {
-        scaled = (curSize > size && curSize % size == 0)
-            ? downsampleIconPixels(cur, curSize, size)
-            : scaleIconPixelsBilinear(cur, curSize, size);
+    if (curSize != dstSize) {
+        scaled = (curSize > dstSize && curSize % dstSize == 0)
+            ? downsampleIconPixels(cur, curSize, dstSize)
+            : scaleIconPixelsBilinear(cur, curSize, dstSize);
         free(cur);
     }
-    if (!scaled) return NULL;
-
-    HICON result = createIconFromPixels(scaled, size, size);
-    free(scaled);
-    return result;
+    return scaled;
 }
 
-// 用自带的快捷方式箭头在目标图标左下角合成角标。合成在目标尺寸 outSize 上做：
-// 目标图标先平滑缩放到 outSize，箭头再以素材帧像素叠加——箭头的清晰度与目标
-// 图标的实际分辨率无关。outSize 是 16/32（列表槽位）或大图标视图的显示尺寸。
-// 失败返回 NULL，调用方回退到不带角标的目标图标。
-static HICON composeShortcutIcon(HICON hTarget, int outSize) {
-    if (!hTarget || outSize <= 0) return NULL;
-
-    int width = 0, height = 0;
-    BYTE* dst = getIconPixels(hTarget, &width, &height);
-    if (!dst || width != height) {
-        free(dst);
-        return NULL;
-    }
-
-    if (width != outSize) {
-        BYTE* scaled = scaleIconPixelsBilinear(dst, width, outSize);
-        if (scaled) {
-            free(dst);
-            dst = scaled;
-            width = outSize;
-            height = outSize;
-        }
-    }
+// 把自带的快捷方式箭头叠到像素缓冲的左下角（原地 src-over alpha 合成）。
+//
+// 调用时机：缓冲**已经缩到最终尺寸**。素材（res/shortcut_overlay.ico）只在这一步
+// 缩放，与目标图标的分辨率无关，所以箭头的清晰度不会被目标图标的原生帧大小影响。
+// outSize 是 16/32（列表槽位）或大图标视图的显示尺寸。
+// 返回 false = 没叠上（素材取不到 / 尺寸畸形），调用方照旧用无角标的主图标。
+static bool stampShortcutOverlay(BYTE* dst, int outSize) {
+    if (!dst || outSize <= 0) return false;
 
     int overlaySize = 0;
     const BYTE* overlay = getShortcutOverlayPixels(&overlaySize);
-    if (!overlay) {
-        free(dst);
-        return NULL;
-    }
+    if (!overlay) return false;
 
     // 箭头尺寸：素材帧整体缩到图标边长的 75% 后叠在左下角，并按素材原生
     // 边长封顶（大图标视图下不让 48px 素材再被放大，见 SHORTCUT_ARROW_MAX_STAMP）
-    int stamp = width * SHORTCUT_ARROW_PERCENT / 100;
-    if (stamp > width) stamp = width;
+    int stamp = outSize * SHORTCUT_ARROW_PERCENT / 100;
+    if (stamp > outSize) stamp = outSize;
     if (stamp > SHORTCUT_ARROW_MAX_STAMP) stamp = SHORTCUT_ARROW_MAX_STAMP;
     // 畸形图标（边长 1px）会让 stamp 算成 0，下一步 overlaySize % stamp 就是整数
-    // 除零。角标画不出来不影响主图标，这里直接放弃、由调用方回退到无角标图标。
-    if (stamp < 1) {
-        free(dst);
-        return NULL;
-    }
+    // 除零。角标画不出来不影响主图标，直接放弃。
+    if (stamp < 1) return false;
 
     // 覆盖层缩放到叠加尺寸：整数倍用盒式均值（预乘后平均，像素干净），
     // 否则双线性。缩放只发生在素材帧这一步，与目标图标的分辨率无关
@@ -3885,19 +4156,16 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     if (stamp != overlaySize) {
         if (overlaySize % stamp == 0) scaledBuf = downsampleIconPixels(overlay, overlaySize, stamp);
         else scaledBuf = scaleIconPixelsBilinear(overlay, overlaySize, stamp);
-        if (!scaledBuf) {
-            free(dst);
-            return NULL;
-        }
+        if (!scaledBuf) return false;
         scaled = scaledBuf;
     }
 
     // 标准 src-over alpha 合成，固定在左下角（glyph 在素材帧内自带定位）
-    int dstSkip = width - stamp;
+    int dstSkip = outSize - stamp;
     for (int y = 0; y < stamp; y++) {
         for (int x = 0; x < stamp; x++) {
             const BYTE* s = scaled + ((size_t)y * stamp + x) * 4;
-            BYTE* d = dst + ((size_t)(y + dstSkip) * width + x) * 4;
+            BYTE* d = dst + ((size_t)(y + dstSkip) * outSize + x) * 4;
             unsigned aO = s[3];
             if (!aO) continue;
             unsigned aD = d[3];
@@ -3912,12 +4180,7 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
         }
     }
     free(scaledBuf);
-
-    // 合成结果转 HICON（CreateIconIndirect 复制位图，随后即可释放）
-    HICON result = createIconFromPixels(dst, width, height);
-
-    free(dst);
-    return result;
+    return true;
 }
 
 // 解析 lnk 的图标来源，优先用 lnk 里存的 ICON_LOCATION（含图标组序号）；没有就
@@ -4032,8 +4295,16 @@ static IImageList* shellScaledLists[4] = {0};
 static int shellScaledSizes[4] = {0};
 static bool shellScaledInit = false;
 
-static HICON createScaledShellIcon(int sysIcon, int size) {
-    if (sysIcon < 0 || size <= 0) return NULL;
+// 从 shell 的系统列表里取最合适的一张，**按原生尺寸**返回（不缩放），边长写回
+// *outNativeSize。返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL。
+//
+// 为什么不在这里直接把目标尺寸缩好：shell 的四个镜像列表尺寸是固定的
+// （16/32/48/256），把「选哪张」与「缩到目标」拆开后，渲染路径可以用像素缓冲统一
+// 缩一次（全程只有一次像素往返）；否则这里缩完还会被 getIconPixels 拆回像素，
+// 白白多一趟整幅拷贝。
+static HICON createShellIconBest(int sysIcon, int desired, int* outNativeSize) {
+    *outNativeSize = 0;
+    if (sysIcon < 0 || desired <= 0) return NULL;
 
     // 候选按尺寸从大到小：挑「不小于目标尺寸里最小的」那个，退而求其次用最大的。
     // SHIL_SMALL 也在候选里，16px 的详细视图因此能拿到 shell 的原生 16 帧，
@@ -4057,14 +4328,14 @@ static HICON createScaledShellIcon(int sysIcon, int size) {
         }
     }
 
-    int bestIdx = -1, bestSize = 0;          // 不小于 size 里最小的
+    int bestIdx = -1, bestSize = 0;          // 不小于 desired 里最小的
     int biggestIdx = -1, biggestSize = 0;    // 兜底：最大的
     for (int i = 0; i < numLists; i++) {
         int cx = shellScaledSizes[i];
         if (cx <= 0 || !shellScaledLists[i]) continue;
 
         if (cx > biggestSize) { biggestSize = cx; biggestIdx = i; }
-        if (cx >= size && (bestIdx < 0 || cx < bestSize)) { bestSize = cx; bestIdx = i; }
+        if (cx >= desired && (bestIdx < 0 || cx < bestSize)) { bestSize = cx; bestIdx = i; }
     }
     if (bestIdx < 0) { bestIdx = biggestIdx; bestSize = biggestSize; }
     if (bestIdx < 0) return NULL;
@@ -4073,12 +4344,8 @@ static HICON createScaledShellIcon(int sysIcon, int size) {
     HRESULT hr = IImageList_GetIcon(shellScaledLists[bestIdx], sysIcon, ILD_TRANSPARENT, &src);
     if (FAILED(hr) || !src) return NULL;
 
-    // 挑中的源尺寸已经等于槽位尺寸：原样用，省掉一次像素往返
-    if (bestSize == size) return src;
-
-    HICON scaled = scaleIconToSize(src, size);
-    DestroyIcon(src);
-    return scaled;
+    *outNativeSize = bestSize;
+    return src;
 }
 
 // ========== Icon viewer window ==========
@@ -4835,6 +5102,7 @@ void clearIconCaches() {
     for (int i = 0; i < numItems; i++) {
         items[i].icon = 0;
         items[i].iconFailed = false;
+        items[i].iconTries = 0;
     }
 }
 
@@ -4882,49 +5150,311 @@ void sortItems() {
     }
 }
 
-// 预热「首屏 + 一屏余量」的图标，把渲染工作从首帧绘制里搬走。
+// ===== 图标补齐 / 预取（把图标渲染搬出首帧绘制）=====
 //
-// 为什么需要：图标提取（展开 PE、解资源、缩放）现在都在 LVN_GETDISPINFO / 自绘里
-// 同步做，于是**首帧绘制**要等这一屏图标全提完。而 Wine 是先处理 WM_ERASEBKGND
-// （把客户区擦成窗口底色）再发 WM_PAINT 的 —— 用户看到的就是「点进去先闪一下白/空，
-// 再慢慢出图标」。把同样的工作挪到最终 InvalidateRect() **之前**做完，擦除与绘制
-// 就变成背靠背的两步：屏幕上是「旧内容停一下 → 新内容完整出现」，不再闪。
-// 总耗时不变（只是不再经过「擦白」这一帧），而且池子是跨导航保留的，来回进出过的
-// 目录直接命中，这一步连提都不用提。
+// 绘制路径（LVN_GETDISPINFO / 大图标自绘）只查已渲染好的槽，绝不现场渲染图标
+// （见 getIconSlotForPaint）。缺的图标由这里补。
 //
-// 只做「一屏 + 一屏余量」（上限 256 项）：覆盖首帧与「刚进来就滚一下」，又不会让
-// 大目录每次导航都把整本解一遍。
-static void prefetchFirstScreenIcons(void) {
-    if (!hwndContentView || !items || numItems <= 0) return;
+// 为什么值得这么绕：渲染一个图标要展开 PE / 解资源 / 缩放，是毫秒级的活。只要它在
+// WM_PAINT 里，首帧就得等整屏图标提完；而 Wine 是先 WM_ERASEBKGND 把客户区擦成窗口
+// 底色再发 WM_PAINT，用户看到的就是「点进去闪一下白/空」。所以先画（布局 + 文字 +
+// 已有图标的格子），后补。
+//
+// **一次成型**：补齐期间不重画任何一格，只有可见项**全部**就位之后才整屏重画一次。
+// 以前是每轮重画「刚补好的那几项」（LVM_REDRAWITEMS），看着更「渐进」，观感恰恰相反：
+// 同屏的目录 / 常见扩展名图标早在池里、当场就画得出来，而 exe / lnk 要现查 shell、
+// 慢得多 —— 两类项交错落在不同的轮次里，屏幕上就出现「一部分有图标、一部分空白」，
+// 而哪几个空白取决于池里恰好缓存了什么，看上去毫无规律。等齐了一次换一帧才是同时。
+//
+// 这套循环是**无状态**的：每一趟都重新按当前可见区算范围、重新找还没补的项，因此
+// 导航/换尺寸后残留的旧消息只会白跑一趟，不需要代次号。
 
-    struct IconPool* p = currentIconPool();
-    if (!p || p->himl != currentImageList) return;   // 池没挂上：这轮不预热
-
+// 一屏可见区的项数（多算一列两行：贴边被切掉半格的那些，Wine 也会画）。
+// 注意**不能**用 LVM_GETCOUNTPERPAGE：Wine 对图标视图直接返回 nItemCount
+// （listview.c:6601），在这里等于「把整个目录都算成一屏」。
+static int visibleIconSpan(void) {
     RECT rc;
-    if (!GetClientRect(hwndContentView, &rc)) return;
+    if (!GetClientRect(hwndContentView, &rc)) return 0;
     int clientW = rc.right - rc.left, clientH = rc.bottom - rc.top;
-    if (clientW <= 0 || clientH <= 0) return;
+    if (clientW <= 0 || clientH <= 0) return 0;
 
-    // 注意**不能**用 LVM_GETCOUNTPERPAGE：Wine 对图标视图直接返回 nItemCount
-    // （listview.c:6601），在这里等于「把整个目录都预热一遍」。自己按格子尺寸算。
     DWORD spacing = (DWORD)ListView_GetItemSpacing(hwndContentView, viewStyle != STYLE_LARGE_ICON);
     int cellW = (int)LOWORD(spacing), cellH = (int)HIWORD(spacing);
-    if (cellW <= 0 || cellH <= 0) return;
+    if (cellW <= 0 || cellH <= 0) return 0;
 
     int cols = clientW / cellW; if (cols < 1) cols = 1;
     int rows = clientH / cellH; if (rows < 1) rows = 1;
-    int count = cols * rows * 2;
-    if (count > 256) count = 256;
+    return (cols + 1) * (rows + 2);
+}
 
+// 当前可见区对应的项范围 [first, last)。「本屏要补哪些项」只允许用这一个函数算：
+// 补齐循环拿它定范围，绘制入口拿它判「本屏齐没齐」。两边若各算各的，就会出现
+// 「补齐说齐了、绘制说还缺」的往复，整屏重画一轮接一轮。
+static void visibleItemRange(int* outFirst, int* outLast) {
     int first = (int)ListView_GetTopIndex(hwndContentView);
     if (first < 0) first = 0;
-    int last = first + count;
+    if (first > numItems) first = numItems;
+
+    int span = visibleIconSpan();
+    if (span <= 0) span = 64;      // 客户区还没成形 / 取不到格子尺寸：保守按一屏算
+    int last = first + span;
     if (last > numItems) last = numItems;
 
-    for (int i = first; i < last; i++) {
-        if (!items[i].node) continue;
-        getIconSlot(&items[i]);   // 渲染 + 占槽；失败也只是这一项没图标
+    *outFirst = first;
+    *outLast = last;
+}
+
+// 纯查询：这一项现在画得出来吗？（**不做任何渲染**）
+// 只有「能画出来」的项才允许拦住整屏 —— 补不出来的项（iconFailed）必须算就位，
+// 否则整屏永远等不到「全部就位」，图标就再也不显示了。
+static bool itemIconPainted(struct IconPool* p, struct ListItem* item) {
+    if (!item->node) return true;      // 空占位项：本来就不画图标
+    if (item->iconFailed) return true; // 已判定补不出来：不再等它
+    return iconIdTypeNameValid(item->icon) && poolSlotLookup(p, item->icon) >= 0;
+}
+
+// 让第 i 项「该有图标就有图标」。返回 false = 还没就位（这一轮挑不出槽 / 解析还没成功）。
+static bool itemIconReady(struct IconPool* p, int i) {
+    struct ListItem* item = &items[i];
+    if (!item->node) return true;      // 空占位项：本来就不画图标
+    if (!item->loaded) loadItemData(item);
+    if (item->iconFailed) return true; // 已判定补不出来：不再等它，否则整屏永远等不到「全部就位」
+    if (itemIconPainted(p, item)) return true;
+
+    // 判据是「池里有没有槽」，**不是**「有没有解析出 id」。
+    // loadItemData() 早就把 id 解析好了，但槽位只有下面的 getIconSlot() → poolSlotFor()
+    // 才会真正去建；拿 id 判断等于把全部待渲染项都跳过 → 池永远是空的，图标一个都不显示。
+    if (getIconSlot(item) < 0) {
+        // 解析层失败（拿不到坐标 / 来源表满）是确定性的，重试多少次都一样：直接放弃。
+        // 渲染层失败大多数是**瞬态**的（池满且这一刻挑不出可淘汰的槽），给几次机会
+        // 再放弃 —— 否则偶发一次失败就让这个文件在这次浏览里彻底没有图标。
+        if (!iconIdTypeNameValid(item->icon) || ++item->iconTries >= 3) item->iconFailed = true;
+        return false;
     }
+    item->iconTries = 0;
+    return true;
+}
+
+// 补一轮可见区（含绘制上报的项），deadline = 时间预算到点时刻。
+// 返回 true = 范围内还有没就位的（本屏这一帧还画不出来）。
+static bool iconFillRange(DWORD deadline) {
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) { iconPanePend = false; return false; }
+
+    DWORD scrollTickAtEntry = lastScrollTick;
+
+    int first, last;
+    visibleItemRange(&first, &last);
+
+    // 把绘制路径上报的「缺图标」区间并进来（取走后立刻复位）。绘制看到的东西必然在屏上；
+    // 只要漏掉一个，就会出现「补齐判定完成 → 整屏重画 → 绘制还是缺 → 又安排补齐」的往复。
+    if (iconMissLast >= iconMissFirst) {
+        if (iconMissFirst < first) first = iconMissFirst;
+        if (iconMissLast + 1 > last) last = iconMissLast + 1;
+    }
+    iconMissFirst = numItems;
+    iconMissLast = -1;
+    if (first < 0) first = 0;
+    if (last > numItems) last = numItems;
+
+    // 从这一刻起本屏按「还没齐」对待：绘制一律画空位，直到下面把闸放掉。
+    iconPanePend = true;
+
+    // 本轮开始时本屏已就位的项数。收工时再数一次：**没有变多**说明这一轮虽然在渲染，
+    // 但渲染进来的又被顶掉了（池容量与这一屏的项数对不上），那是空转而不是推进。
+    int paintedAtEntry = 0;
+    for (int i = first; i < last; i++) if (itemIconPainted(p, &items[i])) paintedAtEntry++;
+
+    // 时间预算按「处理完一项再判」的方式用：即使预算早已过期也要保证每趟至少推进一项，
+    // 否则就成了「0 进展却不停投递」的空转。
+    bool ready = true, abortedByScroll = false;
+    for (int i = first; i < last; i++) {
+        if (!itemIconReady(p, i)) ready = false;
+        if (lastScrollTick != scrollTickAtEntry) { ready = false; abortedByScroll = true; break; }
+        if (GetTickCount() >= deadline) { if (i + 1 < last) ready = false; break; }
+    }
+
+    if (ready) {
+        iconFillStall = 0;
+        iconPanePend = false;      // 本屏齐了：下一次绘制可以整体画出
+        return false;
+    }
+
+    if (abortedByScroll) return true;   // 用户又在滚了：让位，这不算「补不齐」
+
+    int paintedAtExit = 0;
+    for (int i = first; i < last; i++) if (itemIconPainted(p, &items[i])) paintedAtExit++;
+
+    // 认输阀：连续几轮「本屏已就位的项数一个都没变多」＝ 渲染一个、顶掉一个。典型是大图标
+    // 128px 只有几十个槽，而整屏几乎全是各自带图标的独占项：被顶掉的下轮又被重新渲染，
+    // 互相顶替、永远凑不齐。这时把还没就位的项标记掉（它们画成空位是稳定的），并放开闸让
+    // 其余图标正常显示 —— 宁可有几格空着，也不要整屏一直空着 + 后台空转。
+    // 注意判据是「这一轮有没有推进」而不是「这一轮做完了没有」：一轮被 8ms 预算截断是正常的。
+    if (paintedAtExit <= paintedAtEntry) {
+        if (++iconFillStall >= ICON_PANE_GIVEUP_ROUNDS) {
+            iconFillStall = 0;
+            for (int i = first; i < last; i++) {
+                if (!itemIconPainted(p, &items[i])) items[i].iconFailed = true;
+            }
+            iconPanePend = false;
+            return false;
+        }
+    }
+    else iconFillStall = 0;
+
+    return true;   // 下一趟继续（scheduleIconFill 按滚动静默决定立刻投递还是挂定时器）
+}
+
+// 补一轮可见区图标（异步路径）。返回 true = 还没补完，需要继续投递。
+static bool iconFillStep(void) {
+    // 没有可补的内容（空目录 / 导航中途 items 被释放）：闸必须放掉，否则图标会一直空着。
+    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return false; }
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) { iconPanePend = false; return false; }   // 池没挂上：交给系统列表兜底
+
+    // 先把当前区域（还没画出来的）画出来：首帧因此不必等任何图标提取。没有脏区时
+    // UpdateWindow 是空操作。注意若此时本屏还没齐，这一帧画的是**整屏空位**（闸开着），
+    // 不会出现「一半有图标一半空白」。
+    UpdateWindow(hwndContentView);
+
+    if (iconFillRange(GetTickCount() + ICON_FILL_BUDGET_MS)) return true;
+
+    // 可见项全部就位 —— **整屏重画一次**，让它们同时出现。只在绘制确实画过空格子时做，
+    // 省掉「补齐先于首次绘制完成」这种情形下的一次无谓全屏重绘。
+    if (iconPaintMissed) {
+        iconPaintMissed = false;
+        InvalidateRect(hwndContentView, NULL, FALSE);
+    }
+    scheduleIconPrefetch();    // 可见区搞定了，再用空档预取邻域
+    return false;
+}
+
+// 在**下一次绘制之前**同步把本屏补齐。绘制路径只画已经就位的图标，所以补齐跑在绘制
+// 前面时，那一帧就是完整的 —— 图标一起出现，不会「有的一格一格冒」。
+// 预算内补不完就交给异步循环收尾：此时闸（iconPanePend）已经置位，接下来的绘制整屏画
+// 空位（整屏一致，仍然是「一起出现」），补齐把本屏补完时再一次性画出。
+static void iconFillVisibleSync(int budgetMs) {
+    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return; }
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) { iconPanePend = false; return; }
+
+    if (iconFillRange(GetTickCount() + (DWORD)budgetMs)) {
+        scheduleIconFill();     // 没补完：交给异步循环接着补
+        return;
+    }
+    scheduleIconPrefetch();
+}
+
+// 绘制入口：在**任何一格被画出来之前**决定这一帧画不画图标。
+// Wine 是一格一格画过去的，等画到第一个缺图标的格子才置位就太晚了 —— 它前面那些格子
+// 已经把图标画上去了，看上去还是参差。所以这里先扫一遍可见区（纯池查询，一屏最多几十次
+// 数组读取，绝不渲染），发现「本来画得出来、却还没就位」的项就把闸打开，让这一帧整屏
+// 统一画空位，并把补齐安排上。
+static void updateIconPaneGate(void) {
+    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return; }
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) { iconPanePend = false; return; }
+    if (iconPanePend) return;   // 已经在「整屏空位」状态，等补齐放闸
+
+    int first, last;
+    visibleItemRange(&first, &last);
+    for (int i = first; i < last; i++) {
+        if (!itemIconPainted(p, &items[i])) {
+            iconPanePend = true;
+            scheduleIconFill();
+            return;
+        }
+    }
+}
+
+// ===== 邻域预取 =====
+//
+// 拖滚动条时新滚进来的区域之所以「有的有图标、有的空白」，是因为那些项从来没被渲染过，
+// 而同屏的目录 / 常见扩展名图标早在池里 —— 于是哪几个空白取决于池里恰好缓存了什么。
+// 这里在可见区就位之后，把两侧邻域也提前渲染好。
+//
+// 严格只用**空槽**（p->filled < p->slotCount）：槽用完就收工。这样既天然有界（一个尺寸
+// 的池最多预取 slotCount 个），也绝不会为了还没看到的东西去淘汰屏上正在显示的图标 ——
+// 一旦允许淘汰，刚预取的那批就会成为 LRU 受害者、被随后的渲染顶掉，来回翻烧饼。
+//
+// 走 WM_TIMER 而不是 PostMessage：定时器是消息队列里优先级最低的，输入永远排在它前面。
+// 补齐消息当初就因为优先级高于输入，把拖动「粘住」过（见 scheduleIconFill）；预取没有
+// 「必须立刻做」的理由，不该冒这个险。
+static bool iconPrefetchStep(void) {
+    if (!hwndContentView || !items || numItems <= 0) return false;
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) return false;
+    if (iconPrefetchDoneSize == p->size) return false;   // 这个尺寸已经收工
+    if (p->filled >= p->slotCount) { iconPrefetchDoneSize = p->size; return false; }  // 没有空槽
+    if (iconFillPosted) return true;                     // 可见区还有活没干完：先紧着它
+    if (GetTickCount() - lastScrollTick < ICON_FILL_SCROLL_QUIET_MS) return true;     // 还在滚：下趟再说
+
+    int span = visibleIconSpan();
+    if (span <= 0) return false;
+    int visFirst = (int)ListView_GetTopIndex(hwndContentView);
+    if (visFirst < 0) visFirst = 0;
+    int visLast = visFirst + span;
+    if (visLast > numItems) visLast = numItems;
+
+    int filledAtEntry = p->filled;
+    DWORD deadline = GetTickCount() + ICON_FILL_BUDGET_MS;
+    DWORD scrollTickAtEntry = lastScrollTick;
+
+    // 向下、再向上：拖动多数是往下走，先补下面。两个方向都走到头才算收工。
+    for (int dir = 0; dir < 2; dir++) {
+        int i    = (dir == 0) ? visLast : visFirst - 1;
+        int end  = (dir == 0) ? numItems : -1;
+        int step = (dir == 0) ? 1 : -1;
+        for (; i != end; i += step) {
+            if (p->filled >= p->slotCount) { iconPrefetchDoneSize = p->size; return false; }
+            if (lastScrollTick != scrollTickAtEntry) return true;   // 用户又在滚了：下趟再说
+            if (GetTickCount() >= deadline) {
+                // 一趟下来一个图标都没进池（例如整段目录全是共享图标，光扫前缀就吃满预算）：
+                // 再继续也只是反复扫同一段，收工。宁可不预取，也不要后台空转。
+                if (p->filled == filledAtEntry) iconPrefetchDoneSize = p->size;
+                return p->filled != filledAtEntry;
+            }
+            itemIconReady(p, i);   // 失败也不管：预取不需要「全部就位」的语义
+        }
+    }
+    iconPrefetchDoneSize = p->size;   // 目录两端都走到了：彻底收工
+    return false;
+}
+
+static void scheduleIconPrefetch(void) {
+    if (iconPrefetchTimerPending || !hwndContentView) return;
+    iconPrefetchTimerPending = true;
+    if (!SetTimer(hwndContentView, TIMER_ICON_PREFETCH, ICON_PREFETCH_INTERVAL_MS, NULL))
+        iconPrefetchTimerPending = false;
+}
+
+// 同一时刻只挂一条补齐消息：绘制每帧都会来安排一次，不设这个闸就会一次排上一屏
+// 消息，把 WM_PAINT 挤到最后。（变量本体声明在文件开头，供窗口过程引用。）
+static void scheduleIconFill(void) {
+    if (iconFillPosted || !hwndContentView) return;
+
+    // 滚动刚发生过就先让位。这一步不是优化而是必须的：
+    // 拖动滚动条时列表在连续重绘，每一帧绘制都会走到这里；而 PostMessage 投出去的消息
+    // 在队列里的优先级**高于输入消息**，于是「补齐 → 每轮开头的 UpdateWindow 又触发绘制
+    // → 绘制又安排补齐」这个自续环会把鼠标消息一直压在后面 —— 拖动就感觉「粘住了」，
+    // 文件越多（滚动范围越大、越容易滚到还没补图标的区域）越明显。
+    // 这里改成挂一个一次性定时器等滚动静默；WM_TIMER 的优先级最低，不会跟拖动抢。
+    if (GetTickCount() - lastScrollTick < ICON_FILL_SCROLL_QUIET_MS) {
+        if (!iconFillTimerPending) {
+            iconFillTimerPending = true;
+            SetTimer(hwndContentView, TIMER_ICON_FILL, ICON_FILL_SCROLL_QUIET_MS, NULL);
+        }
+        return;
+    }
+
+    iconFillPosted = true;
+    // 投递失败必须把闸复位：这个闸是「同一时刻只挂一条」的唯一凭据，一旦卡在 true，
+    // 之后所有补齐调度都会被它挡掉，整个图标子系统就再也不动了。
+    if (!PostMessage(hwndContentView, MSG_ICON_FILL, 0, 0)) iconFillPosted = false;
 }
 
 void refreshContentView() {
@@ -5051,14 +5581,24 @@ void refreshContentView() {
         ListView_SetItemCountEx(hwndContentView, numItems, 0);
     }
 
-    // 预热首屏图标：必须在最终 InvalidateRect 之前 —— 否则这部分工作会落在首帧
-    // 绘制里，客户区先擦白再逐张出图标，看上去就是「点进去闪一下」。
-    prefetchFirstScreenIcons();
+    // 图标：**先补、后画**。把首屏图标在这一次重绘之前补出来，新目录画出来的第一帧
+    // 就是完整的 —— 图标一起出现，而不是「一半有图标、一半空白，剩下的过一会儿才冒」。
+    // （旧路径参差的根源：池是按目录保留的，上一个目录的共享图标和一些独占图标都还在，
+    // 首帧只画得出来这些，其余靠异步补齐 —— 同屏两批人，看上去就是不同步。）
+    // 预算（ICON_SYNC_BUDGET_MS）内补不完就走异步：此时闸已置位，首帧整屏画空位
+    // （整屏一致），补齐一轮把本屏补完时再整屏重画一次 —— 任何时刻都不会参差。
+    iconPaintMissed = false;      // 上一屏的「缺图标」见证属于旧内容，作废
+    iconMissFirst = numItems;
+    iconMissLast = -1;
+    iconPrefetchDoneSize = 0;     // 换了内容：邻域预取重新开始
+    iconFillStall = 0;
+    iconFillVisibleSync(ICON_SYNC_BUDGET_MS);
 
     // 整表失效重绘，恢复原版绘制路径。不用 LVSICF_NOINVALIDATEALL 做增量刷新：
     // Wine/Winlator 上增量路径会让旧行不重画（图标、文字残缺或滞留旧内容），
     // 渲染正确性优先于这点重绘开销。
     InvalidateRect(hwndContentView, NULL, TRUE);
+    scheduleIconFill();
 
     // 排序指示箭头：列结构或排序状态一变就重设（建列、点列头、切视图都汇到这里）
     updateSortIndicator();
