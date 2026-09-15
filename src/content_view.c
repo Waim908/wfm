@@ -1,5 +1,6 @@
 #include "main.h"
-#include <commoncontrols.h>   // IImageList：往 SIC 的全部共享镜像列表补图标用
+#include <commoncontrols.h>   // IImageList：读 shell 的共享镜像列表用
+#include <wctype.h>           // towlower：图标去重键统一转小写
 
 #define COLUMN_NAME_IDX 0
 #define COLUMN_TYPE_IDX 1
@@ -8,24 +9,16 @@
 #define COLUMN_PATH_IDX 4
 
 
-// 目录图标缓存
-// 缓存键必须带上「大图标/小图标」维度：getFileInfo 返回的是对应图像列表内的
-// 索引，大小图标图像列表的索引空间不同，不区分维度必然串图标。
-static int folderIconCachedForStyle = -1;   // -1 表示未缓存
-static int folderIconIndex = 0;
-
-// exe/lnk 文件图标缓存（按路径 + 图标尺寸缓存图标索引）
-#define EXE_ICON_CACHE_SIZE 64
-static struct {
-    wchar_t path[MAX_PATH];
-    int iconIndex;
-    bool large;
-} exeIconCache[EXE_ICON_CACHE_SIZE];
-static int exeIconCacheCount = 0;
+// 当前挂在内容区上的图像列表。正常情况下就是自建图标库里的那一份；只有自建列表
+// 建不起来（或刚被释放）时才会是 shell 的系统列表。
 static HIMAGELIST currentImageList = NULL;
 
-// lnk 快捷方式图标解析入口（实现位于文件末尾的 PE/lnk 图标提取区）
-static int getLnkIconIndex(const wchar_t* path, bool large);
+// 图标渲染的底层实现位于文件末尾的 PE / ICO 解码区，自建图标库要用，先声明。
+static HICON createScaledShellIcon(int sysIcon, int size);
+static HICON extractIconFromIcoFile(const wchar_t* icoPath, int cxDesired, int cyDesired);
+static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired);
+static HICON scaleIconToSize(HICON hIcon, int size);
+static HICON composeShortcutIcon(HICON hTarget, int outSize);
 
 // IID_IImageList 不在 mingw 的 libuuid 里，按 wine include/commoncontrols.idl
 // 的 uuid 本地定义
@@ -35,55 +28,6 @@ static const IID wfm_IID_IImageList =
 // 状态栏节流：搜索期间每批（100 项）都刷新一次状态栏没有意义，限制到约 5 次/秒。
 // 最终值由 MSG_SEARCH_DONE 里的 updateStatusbar() 保证正确。
 static DWORD lastStatusbarTick = 0;
-
-// 扩展名 → 图标索引 内存缓存（仅限当次会话，不持久化）
-#define EXT_CACHE_SIZE 64
-struct ExtIconCacheEntry {
-    wchar_t ext[16];
-    int icon;
-    wchar_t typeName[64];
-    bool large;
-};
-static struct ExtIconCacheEntry extIconCache[EXT_CACHE_SIZE];
-static int extCacheCount = 0;
-
-// 一次查找同时拿到图标索引与类型名（旧实现分两次线性扫描）
-static struct ExtIconCacheEntry* findExtCache(const wchar_t* ext, bool large) {
-    if (!ext) return NULL;
-    for (int i = 0; i < extCacheCount; i++) {
-        if (extIconCache[i].large == large && wcsicmp(extIconCache[i].ext, ext) == 0)
-            return &extIconCache[i];
-    }
-    return NULL;
-}
-
-static void addExtIconCache(const wchar_t* ext, int icon, const wchar_t* typeName, bool large) {
-    if (!ext || extCacheCount >= EXT_CACHE_SIZE) return;
-    wcsncpy_s(extIconCache[extCacheCount].ext, 16, ext, 15);
-    extIconCache[extCacheCount].icon = icon;
-    extIconCache[extCacheCount].large = large;
-    if (typeName) wcsncpy_s(extIconCache[extCacheCount].typeName, 64, typeName, 63);
-    else extIconCache[extCacheCount].typeName[0] = L'\0';
-    extCacheCount++;
-}
-
-static int findExeIconCache(const wchar_t* path, bool large) {
-    if (!path || !currentImageList) return -1;
-    for (int i = 0; i < exeIconCacheCount; i++) {
-        if (exeIconCache[i].large == large && wcsicmp(exeIconCache[i].path, path) == 0) {
-            return exeIconCache[i].iconIndex;
-        }
-    }
-    return -1;
-}
-
-static int addExeIconCache(const wchar_t* path, int iconIndex, bool large) {
-    if (!path || exeIconCacheCount >= EXE_ICON_CACHE_SIZE) return iconIndex;
-    wcsncpy_s(exeIconCache[exeIconCacheCount].path, MAX_PATH, path, MAX_PATH - 1);
-    exeIconCache[exeIconCacheCount].iconIndex = iconIndex;
-    exeIconCache[exeIconCacheCount].large = large;
-    return exeIconCacheCount++, iconIndex;
-}
 
 
 
@@ -110,17 +54,13 @@ struct ListItem {
     wchar_t formattedDate[32];
     bool loaded;
     bool isHidden;
+    bool iconFailed;   // 图标解析失败过（来源表满/拿不到坐标）：别再每次重绘都重试
     uint64_t size;
     wchar_t* path;
     FILETIME modifiedTime;
     uint64_t driveTotalBytes;
     uint64_t driveFreeBytes;
 };
-
-// 大图标视图按显示尺寸重新生成图标（实现位于文件末尾的图标提取区）。
-// 声明必须放在 struct ListItem 之后：若写在结构体定义之前，参数表里的
-// struct 标签会落进 prototype scope，与文件作用域的 ListItem 不是同一个类型。
-static HICON createDisplayIcon(struct ListItem* item, int size);
 
 // 搜索线程持有的只读节点池。
 // 搜索线程绝不调用 buildChildNodes（那会 free 掉 UI 线程正在使用的节点），
@@ -217,6 +157,8 @@ static void onMenuItemClearClipboardClick();
 static bool isInSearchMode();
 // 解析 lnk 的目标路径（实现与 lnk 图标提取放在一起，见文件末尾）
 static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch);
+// 解析 lnk 自带的图标位置（ICON_LOCATION，没有则退到目标文件本身）
+static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, int iconPathCch, int* iconIndex);
 
 static struct ContextMenuItem cmiOpen = {NULL, &onMenuItemOpenClick, NULL, false};
 static struct ContextMenuItem cmiEdit = {NULL, &onMenuItemEditClick, NULL, false};
@@ -294,31 +236,90 @@ static void formatDriveSizeText(struct ListItem* item) {
     }
 }
 
-// 缩放图像列表（iconViewIconSize > 32 时启用）+ 系统 big 列表索引 → 缩放列表索引的懒映射
-static HIMAGELIST scaledImageList = NULL;
-static int* scaledIconMap = NULL;     // -1 表示尚未转换
-static int scaledIconMapCap = 0;
-
-// 缩放列表的槽位池 —— 给「只增不减」的列表设硬上限。
+// ========== 自建图标库 ==========
 //
-// 列表位图按 size²×4 字节计：128px 一张 64 KB，逛一遍大目录攒到几十 MB 是常态。
-// 槽位满后按 LRU 用 ImageList_ReplaceIcon 原地换图标（Wine 侧 nIndex >= 0 时不扩容、
-// 不搬动其它帧，索引恒定），于是列表容量 = 槽位数，与浏览过多少图标无关。
+// 【为什么不拿 shell 的系统镜像列表（SIC）当图标容器】
+// SIC 的缓存键是「图标来源文件 + 资源序号」。每缓存一个新的来源文件，它就往**全部 5 个**
+// 共享镜像列表各追加一帧（32/16/48/16/256）—— 那帧 256×256 单独就是 256 KB，实测每个
+// exe/lnk 约 367 KB。它是进程级、**没有任何回收 API**（SIC_Destroy 未导出），于是
+// 「逛一遍 exe 多的目录内存涨几十 MB、点『清除图标缓存』也降不下来」是必然的。
 //
-// 槽位数取「字节预算 / 每张字节」，所以各图标尺寸下的槽数自动与「一屏可见项数」同步
-// 放大缩小（可见项数 ∝ 面积/格子面积，与每张字节同阶）：
-//   48px ≈ 1.8k 槽、64px ≈ 1k、96px ≈ 227、128px ≈ 128。
-// 之所以只要「槽数 ≥ 一屏可见项数」就够了：Wine 每帧重绘都会为**每个可见项**重新回调
-// LVN_GETDISPINFO 取 iImage（listview.c 的 LISTVIEW_DrawItem → LISTVIEW_GetItemW(LVIF_IMAGE)），
-// 所以被回收的槽位下次绘制会自然重新申请；此时 LRU 选中的受害者必然是已滚出视野的那个。
-#define SCALED_ICON_BUDGET_BYTES (8u * 1024u * 1024u)
-#define SCALED_ICON_MIN_SLOTS    128
+// 【改法：shell 只当「查图标坐标」的目录服务】
+//   SHGetFileInfoW(路径, 0, &sfi, sizeof(sfi), SHGFI_ICONLOCATION)
+// 走的是 IExtractIconW::GetIconLocation（shell32_main.c 的对应分支），**完全不碰 SIC**；
+// 拿到「图标文件 + 资源序号」后用 PrivateExtractIconsW 自己按尺寸提取。
+// 实测（宿主 wine 11.17）：该路径下 5 个共享列表计数零增长，且提取出的 32px 图标与
+// shell 自己渲染的图标**像素完全一致**。
+//
+// 【三层结构】
+//   ① 图标来源表 iconSources[]：id → 「图标文件 + 序号 / shell 索引 / .ico 路径」。
+//      共享项（目录、驱动器、按扩展名的普通文件）永不淘汰；独占项（exe/lnk/.ico）
+//      按路径各占一项 —— 每项只是几十字节的字符串，和 SIC 的 367 KB/项不在一个量级。
+//      表只增不删，这保证 item->icon 这个 id 永远有效，重绘时不必回查路径。
+//   ② 显示列表池：按显示尺寸各一份 ImageList，槽位用 LRU 原地替换，容量按字节封顶。
+//      位图（每张 size²×4）才是有可能吃掉几十 MB 的东西，这里给它设死上限。
+//   ③ item->icon = ①的 id（0 = 尚未解析）。重绘时经 ② 换成当前尺寸的槽位索引。
+//
+// 槽位数取「字节预算 / 每张字节」，所以各尺寸下的槽数自动与「一屏可见项数」同步缩放
+// （可见项数 ∝ 面积/格子面积，与每张字节同阶）：16px≈2k、32px≈512、48px≈227、
+// 64px≈128、96/128px 落到下限 64。
+// 之所以只要「槽数 ≥ 一屏可见项数」就够：Wine 每帧重绘都会为**每个可见项**重新回调
+// LVN_GETDISPINFO 取 iImage（listview.c 的 LISTVIEW_DrawItem → LISTVIEW_GetItemW），
+// 被回收的槽位下次绘制会自然重新申请；此时 LRU 选中的受害者必然是已滚出视野的那个。
+//
+// 预算取 2 MB（原 8 MB）：手机上大图标视图一帧就 64 KB（128px），128 个槽 = 8 MB，
+// 「看 128 个不同的 exe 就能摸到顶」——这是用户实际感知到的主要增长源。降到 2 MB 后
+// 16px 详细视图仍能放 2k 张（够几屏滚动 + 来回浏览），128px 靠下限 64 槽 = 4 MB。
+// 下限 64 是「一屏可见项数的两倍」（手机 128px 下一屏约 24~30 项），保证 LRU 不会
+// 淘汰掉仍在视野里的图标而抖动。
+#define ICON_SLOT_BUDGET_BYTES (2u * 1024u * 1024u)
+#define ICON_SLOT_MIN_COUNT    64
+#define ICON_SOURCE_MAX        8192
+#define ICON_KEYMAP_SIZE       16384   // 2 的幂；来源表的去重索引
+#define ICON_KEYMAP_MASK       (ICON_KEYMAP_SIZE - 1)
+#define ICON_POOL_MAX          8
+#define ICON_SHELL_UNKNOWN     (-1000)  // shellIndex 的「还没查过」哨兵（0 是合法的列表索引）
 
-static int* scaledSlotOwner = NULL;      // 槽 → 系统索引（-1 表示空闲）
-static unsigned* scaledSlotTick = NULL;  // 槽的最后使用序号（LRU 判据）
-static int scaledSlotCount = 0;
-static int scaledSlotFilled = 0;
-static unsigned scaledUseTick = 0;
+// 来源类型
+enum IconSrcKind {
+    ICONSRC_FILE  = 0,  // (iconFile, iconIndex) → PrivateExtractIconsW
+    ICONSRC_SHELL = 1,  // shell 系统镜像列表索引（只读，不追加，不增长 SIC）
+    ICONSRC_ICO   = 2   // iconFile 是 .ico，走自带的 ICO 解码器（PrivateExtractIconsW 不认 .ico）
+};
+
+// 来源标志
+enum IconSrcFlags {
+    ICONSRC_SHARED  = 1u << 0,  // 共享项：槽位不参与 LRU 淘汰
+    ICONSRC_OVERLAY = 1u << 1   // .lnk：渲染后要合成快捷方式角标
+};
+
+struct IconSource {
+    wchar_t* key;        // 去重键（已转小写）：独占=完整路径，共享=扩展名或 \x01..\x04 前缀的固定标识
+    wchar_t* iconFile;   // ICONSRC_FILE / ICONSRC_ICO 的图标文件
+    wchar_t* typeName;   // 顺带缓存的类型名（loadItemData 用，独占项也填）
+    int iconIndex;       // ICONSRC_FILE 的资源序号；ICONSRC_SHELL 时是列表索引
+    int shellIndex;      // 兜底用的 shell 系统列表索引（ICON_SHELL_UNKNOWN = 还没查过，见 renderShellFallback）
+    unsigned kind;
+    unsigned flags;
+};
+
+static struct IconSource* iconSources = NULL;
+static int iconSourceCount = 0;
+static int* iconKeyMap = NULL;       // 键哈希 → id（0 = 空槽）
+
+struct IconPool {
+    int size;                 // 边长
+    HIMAGELIST himl;
+    int* slotId;              // 槽 → 图标 id（-1 = 空闲）
+    unsigned* slotTick;       // 槽的最后使用序号（LRU 判据）
+    int slotCount;            // 容量上限（按字节预算反推）
+    int filled;               // 已分配到的槽数（AddIcon 的行进指针）
+    unsigned tick;
+    int* idSlot;              // 图标 id → 槽（-1 = 不在池内）
+    int idSlotCap;
+};
+
+static struct IconPool iconPools[ICON_POOL_MAX];
 
 // setViewStyle 会自己调用 updateIconViewLayout —— 这样即便 refreshContentView 因
 // 「搜索进行中」而提前返回，切换视图也仍会重算格子尺寸。refreshContentView 靠这个
@@ -375,145 +376,519 @@ static void fillFileInfo(struct FileNode* node, struct ListItem* item) {
     memcpy(&item->modifiedTime, &node->modifiedTime, sizeof(FILETIME));
 }
 
-// ---- 大图标视图：缩放图像列表 + 格子尺寸计算 ----
+// ---- 自建图标库：来源表 + 显示列表池 ----
 
-static bool isScaledLargeIconView(void) {
-    return viewStyle == STYLE_LARGE_ICON && iconViewIconSize != 32;
+// 显示尺寸：大图标视图用设置里的尺寸，其余视图（详细/列表/小图标）都是 16。
+static int currentIconDisplaySize(void) {
+    return (viewStyle == STYLE_LARGE_ICON) ? iconViewIconSize : 16;
 }
 
-static void resetScaledIconList(void) {
-    // 只能在列表控件已改挂其他图像列表之后调用（set 函数里先 reset 再 refresh）
-    if (scaledImageList) {
-        ImageList_Destroy(scaledImageList);
-        scaledImageList = NULL;
+// 键的哈希（键统一转小写后保存，所以这里就是普通 FNV-1a）
+static unsigned iconKeyHash(const wchar_t* s) {
+    unsigned h = 2166136261u;
+    for (; *s; s++) { h ^= (unsigned)(*s & 0xFFFF); h *= 16777619u; }
+    return h;
+}
+
+// 小写副本。路径与扩展名在 Windows 上都是大小写不敏感的，统一小写后
+// 「同一个图标的两个键」不会因为大小写差异各占一项。
+static wchar_t* lowerDup(const wchar_t* s) {
+    if (!s) return NULL;
+    size_t n = wcslen(s);
+    wchar_t* p = malloc((n + 1) * sizeof(wchar_t));
+    if (!p) return NULL;
+    for (size_t i = 0; i <= n; i++) p[i] = (wchar_t)towlower((wint_t)s[i]);
+    return p;
+}
+
+// 按去重键查 id（0 = 未登记）。开放寻址线性探测；表只增不删，所以不必处理墓碑。
+static int iconKeyLookup(const wchar_t* key) {
+    if (!iconKeyMap || !key || !key[0]) return 0;
+    unsigned i = iconKeyHash(key) & ICON_KEYMAP_MASK;
+    for (int probe = 0; probe < ICON_KEYMAP_SIZE; probe++) {
+        int id = iconKeyMap[i];
+        if (id == 0) return 0;
+        if (iconSources && wcsicmp(iconSources[id - 1].key, key) == 0) return id;
+        i = (i + 1) & ICON_KEYMAP_MASK;
     }
-    free(scaledIconMap);
-    scaledIconMap = NULL;
-    scaledIconMapCap = 0;
-
-    free(scaledSlotOwner);
-    scaledSlotOwner = NULL;
-    free(scaledSlotTick);
-    scaledSlotTick = NULL;
-    scaledSlotCount = 0;
-    scaledSlotFilled = 0;
-    scaledUseTick = 0;
+    return 0;
 }
 
-static HIMAGELIST getScaledImageList(void) {
-    if (!scaledImageList) {
-        // ILC_COLOR32 无掩码列表：加入的是带 alpha 的图标拷贝。
-        //
-        // grow 的语义（Wine comctl32/imagelist.c 的 IMAGELIST_InternalExpandBitmaps）：
-        // 新建时 cMaxImage = cInitial + 1，位图**立刻**按这个容量分配；之后每次
-        // 扩容 nNewCount = cMaxImage + max(nImageCount, cGrow) + 1，且是重建整块
-        // 位图再 BitBlt 拷贝旧内容。逐个 AddIcon 时 nImageCount 恒为 1，所以扩容
-        // 步长就等于 cGrow —— 它同时决定「重建次数」和「容量过冲」：
-        // grow=16 容下 1000 张要重建约 57 次（累计拷贝上百 MB）；
-        // grow=128 则在第 34 张图标时一次冲到 162 张，128px 下比实际用量多占 7 MB。
-        // 取 32：过冲上限 33 张（128px 下 2.1 MB），重建次数减半。
-        // cInitial 取 16 而非 32：位图是「一建列表就按容量分配」的，128px 下从 33 张
-        // （2.1 MB）降到 17 张（1.1 MB）——只有几个图标的目录不该先吃 2 MB。
-        scaledImageList = ImageList_Create(iconViewIconSize, iconViewIconSize, ILC_COLOR32, 16, 32);
-        if (!scaledImageList) return NULL;
+// 登记一条来源，返回 id（>0）。iconFile 按原样保存（不能转小写：Wine 侧
+// 解析路径时可能大小写敏感），只有去重键统一小写。
+static int iconSourceAdd(const wchar_t* key, unsigned kind, unsigned flags,
+                         const wchar_t* iconFile, int iconIndex,
+                         const wchar_t* typeName) {
+    if (!key || !key[0] || iconSourceCount >= ICON_SOURCE_MAX) return 0;
+    if (!iconKeyMap) {
+        iconKeyMap = calloc(ICON_KEYMAP_SIZE, sizeof(int));
+        if (!iconKeyMap) return 0;
+    }
+    if (!iconSources) {
+        iconSources = calloc(ICON_SOURCE_MAX, sizeof(struct IconSource));
+        if (!iconSources) return 0;
+    }
 
-        unsigned frameBytes = (unsigned)iconViewIconSize * (unsigned)iconViewIconSize * 4u;
-        unsigned slots = SCALED_ICON_BUDGET_BYTES / frameBytes;
-        if (slots < SCALED_ICON_MIN_SLOTS) slots = SCALED_ICON_MIN_SLOTS;
+    struct IconSource* s = &iconSources[iconSourceCount];
+    memset(s, 0, sizeof(*s));
+    s->key = lowerDup(key);
+    if (!s->key) return 0;
+    if (iconFile && iconFile[0]) {
+        s->iconFile = wcsdup(iconFile);
+        if (!s->iconFile) { free(s->key); s->key = NULL; return 0; }
+    }
+    if (typeName && typeName[0]) s->typeName = wcsdup(typeName);
+    s->iconIndex = iconIndex;
+    s->shellIndex = ICON_SHELL_UNKNOWN;
+    s->kind = kind;
+    s->flags = flags;
 
-        scaledSlotOwner = malloc((size_t)slots * sizeof(int));
-        scaledSlotTick = malloc((size_t)slots * sizeof(unsigned));
-        if (!scaledSlotOwner || !scaledSlotTick) {
-            // 槽位池建不起来就别留半成品：宁可退回「不缩放」，也不要一个没有上限的列表
-            free(scaledSlotOwner);
-            scaledSlotOwner = NULL;
-            free(scaledSlotTick);
-            scaledSlotTick = NULL;
-            ImageList_Destroy(scaledImageList);
-            scaledImageList = NULL;
-            return NULL;
+    int id = ++iconSourceCount;
+    unsigned i = iconKeyHash(s->key) & ICON_KEYMAP_MASK;
+    while (iconKeyMap[i] != 0) i = (i + 1) & ICON_KEYMAP_MASK;
+    iconKeyMap[i] = id;
+    return id;
+}
+
+static int iconIdTypeNameValid(int id) {
+    return id > 0 && id <= iconSourceCount;
+}
+
+static const wchar_t* iconIdTypeName(int id) {
+    if (!iconIdTypeNameValid(id)) return NULL;
+    return iconSources[id - 1].typeName;
+}
+
+// 取（必要时创建）指定尺寸的显示列表池
+static struct IconPool* getIconPool(int size) {
+    if (size <= 0) return NULL;
+    for (int i = 0; i < ICON_POOL_MAX; i++)
+        if (iconPools[i].himl && iconPools[i].size == size) return &iconPools[i];
+
+    struct IconPool* p = NULL;
+    for (int i = 0; i < ICON_POOL_MAX; i++)
+        if (!iconPools[i].himl) { p = &iconPools[i]; break; }
+    if (!p) return NULL;
+
+    // 槽数先算出来 —— grow 要按它缩放（见下）
+    unsigned frameBytes = (unsigned)size * (unsigned)size * 4u;
+    int slots = (int)(ICON_SLOT_BUDGET_BYTES / frameBytes);
+    if (slots < ICON_SLOT_MIN_COUNT) slots = ICON_SLOT_MIN_COUNT;
+
+    // grow 的语义（Wine comctl32/imagelist.c 的 IMAGELIST_InternalExpandBitmaps）：
+    // 新建时 cMaxImage = cInitial + 1，位图**立刻**按这个容量分配；之后每次扩容
+    // nNewCount = cMaxImage + max(nImageCount, cGrow) + 1，且是重建整块位图再 BitBlt
+    // 拷贝旧内容。逐个 AddIcon 时 nImageCount 恒为 1，所以扩容步长就等于 cGrow ——
+    // 它同时决定「重建次数」和「容量过冲」：grow=16 容下 1000 张要重建约 57 次；
+    // grow=128 则在第 34 张图标时一次冲到 162 张（128px 下比实际用量多占 7 MB）。
+    // 取「槽数/4，夹在 8..32」：大池（16px 下 2k 槽）用 32 摊薄重建次数，过冲 ≤ 33 帧
+    // 只有 33 KB；小池（128px 下 64 槽）用 16，过冲 ≤ 16 帧 = 1 MB —— 池本身越小，
+    // 越不能让它被固定步长的过冲放大。
+    // cInitial 取 16：位图一建列表就按容量分配，128px 下起步从 2.1 MB 降到 1.1 MB。
+    int grow = slots / 4;
+    if (grow < 8) grow = 8;
+    if (grow > 32) grow = 32;
+
+    HIMAGELIST himl = ImageList_Create(size, size, ILC_COLOR32, 16, grow);
+    if (!himl) return NULL;
+
+    p->slotId = malloc((size_t)slots * sizeof(int));
+    p->slotTick = calloc((size_t)slots, sizeof(unsigned));
+    if (!p->slotId || !p->slotTick) {
+        // 池建不起来就别留半成品：宁可退回「不画图标」，也不要一个没有上限的列表
+        free(p->slotId); p->slotId = NULL;
+        free(p->slotTick); p->slotTick = NULL;
+        ImageList_Destroy(himl);
+        return NULL;
+    }
+    for (int i = 0; i < slots; i++) p->slotId[i] = -1;
+    p->size = size;
+    p->himl = himl;
+    p->slotCount = slots;
+    p->filled = 0;
+    p->tick = 0;
+    p->idSlot = NULL;
+    p->idSlotCap = 0;
+    return p;
+}
+
+// 当前视图该用哪个池
+static struct IconPool* currentIconPool(void) {
+    return getIconPool(currentIconDisplaySize());
+}
+
+// 释放除 keep 之外的所有池。必须在 ListView 已改挂 keep->himl（或系统列表）之后
+// 调用，否则会释放控件仍持有的列表句柄。
+static void pruneIconPools(struct IconPool* keep) {
+    for (int i = 0; i < ICON_POOL_MAX; i++) {
+        struct IconPool* p = &iconPools[i];
+        if (!p->himl || p == keep) continue;
+        ImageList_Destroy(p->himl);
+        free(p->slotId);
+        free(p->slotTick);
+        free(p->idSlot);
+        memset(p, 0, sizeof(*p));
+    }
+}
+
+// 释放全部自建列表与来源表。调用方必须保证此刻控件已改挂系统列表。
+static void resetIconStore(void) {
+    pruneIconPools(NULL);
+    if (iconSources) {
+        for (int i = 0; i < iconSourceCount; i++) {
+            free(iconSources[i].key);
+            free(iconSources[i].iconFile);
+            free(iconSources[i].typeName);
         }
-        for (unsigned i = 0; i < slots; i++) scaledSlotOwner[i] = -1;
-        scaledSlotCount = (int)slots;
-        scaledSlotFilled = 0;
-        scaledUseTick = 0;
+        free(iconSources);
+        iconSources = NULL;
     }
-    return scaledImageList;
+    iconSourceCount = 0;
+    free(iconKeyMap);
+    iconKeyMap = NULL;
 }
 
-// 把条目的图标按显示尺寸准备好后放进自建列表，返回自建列表内的索引。
+// 主路径渲染失败时的最后手段：按**来源文件**查一次 shell 的系统列表索引并缓存。
 //
-// 映射按系统索引缓存，这个键成立的前提是「一个系统索引只对应一种图标」：
-// Wine 的 SIC 以「来源文件 + 资源序号」为键（iconcache.c 的 SIC_CompareEntries），
-// exe/lnk 因此天然各占一个索引；而按类型给图标的（文件夹、注册过的扩展名、
-// 以及未注册的扩展名共用 shell32 的默认图标）生成结果只取决于 sysIcon 本身。
-// 所以 createDisplayIcon 里「按路径提取」那条分支只能对 exe/lnk 开 —— 若扩展到
-// 走类型索引的类型上，同一个索引下会塞进某一个文件的图案，其余文件全部串位。
-// 映射在重建缩放列表、显式清图标缓存、以及槽位被 LRU 顶掉时失效。
-static int getScaledIconIndex(struct ListItem* item) {
-    if (!item) return -1;
-    int sysIcon = item->icon;
-
-    HIMAGELIST himlBig = NULL, himlSmall = NULL;
-    Shell_GetImageLists(&himlBig, &himlSmall);
-    if (!himlBig || sysIcon < 0) return sysIcon;
-
-    int count = ImageList_GetImageCount(himlBig);
-    if (sysIcon >= count) return sysIcon;
-
-    if (!scaledIconMap || scaledIconMapCap < count) {
-        int* tmp = realloc(scaledIconMap, count * sizeof(int));
-        if (!tmp) return sysIcon;
-        for (int i = scaledIconMapCap; i < count; i++) tmp[i] = -1;
-        scaledIconMap = tmp;
-        scaledIconMapCap = count;
+// 为什么必须有它：注册表里的关联可能指向一个本 prefix 里并不存在的文件
+// （实测 Wine 里 .html → C:\Program Files (x86)\Internet Explorer\iexplore.exe，
+// 该文件不存在）——ICONLOCATION 会「成功」地给出这个坐标，但 PrivateExtractIconsW
+// 提不出任何东西。没有这条退路的话，这类文件会画成空白，而旧实现（直接取
+// SYSICONINDEX）是能画出通用图标的。
+//
+// 只在失败路径上发生一次（结果缓存在 s->shellIndex），所以正常浏览时它一次都不会
+// 走到，也就不会让 SIC 随「浏览过的文件数」增长。
+static HICON renderShellFallback(struct IconSource* s, int size) {
+    if (s->shellIndex == ICON_SHELL_UNKNOWN) {
+        s->shellIndex = -1;
+        if (s->iconFile && s->iconFile[0]) {
+            struct FileInfo fi = {0};
+            getFileInfo(s->iconFile, TYPE_FILE, false, &fi);
+            s->shellIndex = fi.icon;
+        }
     }
-    if (scaledIconMap[sysIcon] >= 0) return scaledIconMap[sysIcon];
+    if (s->shellIndex < 0) return NULL;
+    return createScaledShellIcon(s->shellIndex, size);
+}
 
-    HIMAGELIST himl = getScaledImageList();
-    if (!himl) return sysIcon;
+// 按尺寸渲染一条来源。返回的 HICON 由调用方 DestroyIcon()；失败返回 NULL。
+static HICON renderIconSource(int id, int size) {
+    if (!iconIdTypeNameValid(id) || size <= 0) return NULL;
+    struct IconSource* s = &iconSources[id - 1];
+    HICON h = NULL;
 
-    // 首选：按显示尺寸重新提取 / 从大列表平滑缩放
-    HICON hicon = createDisplayIcon(item, iconViewIconSize);
-
-    // 兜底：任一环节失败（拿不到像素、非方形图标、shell 列表都不可用）时退回
-    // 旧行为——32px 最近邻放大。块状总比没图标强，且这条路上的失败是异常情况。
-    if (!hicon) {
-        HICON src = ImageList_GetIcon(himlBig, sysIcon, ILD_TRANSPARENT);
-        if (!src) return sysIcon;
-        // CopyImage：目标尺寸与原图不同时按位块拉伸（Wine 侧是最近邻）
-        hicon = (HICON)CopyImage(src, IMAGE_ICON, iconViewIconSize, iconViewIconSize, 0);
-        DestroyIcon(src);
-        if (!hicon) return sysIcon;
+    if (s->kind == ICONSRC_SHELL) {
+        // 退路：从 shell 的共享列表里**读**一张（GetIcon 不追加，不增长 SIC）
+        h = createScaledShellIcon(s->iconIndex, size);
+    }
+    else if (s->kind == ICONSRC_ICO) {
+        h = extractIconFromIcoFile(s->iconFile, size, size);
+    }
+    else if (s->iconFile && s->iconFile[0]) {
+        // 首选自带的 PE 解码器，**不能**首选 PrivateExtractIconsW：
+        // 后者内部的择帧规则是「不大于目标里最大」（user32/cursoricon.c 的
+        // CURSORICON_FindBestIcon），选中后再由 create_icon_frame 拉伸到目标尺寸。
+        // 于是「目标 128、文件里只有 16/32/48/256」时会选中 48 再放大 2.67 倍
+        // —— 实测这就是大图标视图发糊的原因。自带解码器用的是 isBetterIconEntry
+        // 的「不小于目标里最小，都不够大才取最大」，会直接挑中 256 原生帧，再由
+        // 调用方平滑缩到目标尺寸（缩永远比放大清楚）。
+        // 序号语义与 shell 一致：负数 = 资源 ID，目录/驱动器的图标就是 shell32.dll
+        // 的负 ID（已在 extractIconFromPeIndexed 里按 ID 解析）。
+        h = extractIconFromPeIndexed(s->iconFile, s->iconIndex, size, size);
+        // 图标组序号越界（注册表里的坐标常带一个文件里并不存在的序号）：退回主图标
+        if (!h && s->iconIndex != 0)
+            h = extractIconFromPeIndexed(s->iconFile, 0, size, size);
+        // 最后手段：Wine 自己的 API。对「自带解码器啃不动的位深/PNG 变体」还有用，
+        // 代价是可能拿小帧拉伸，所以只当兜底。
+        if (!h && !PrivateExtractIconsW(s->iconFile, s->iconIndex, size, size, &h, NULL, 1, LR_DEFAULTCOLOR))
+            h = NULL;
     }
 
-    // 槽位分配：未满就直接追加，满了就 LRU 原地替换（见 scaledSlotOwner 处的说明）。
-    // ReplaceIcon 索引不变，所以控件里已挂的列表句柄和 iImage 的语义都不受影响。
-    int idx = -1;
-    if (scaledSlotFilled < scaledSlotCount) {
-        idx = ImageList_AddIcon(himl, hicon);
-        if (idx >= 0) {
-            scaledSlotOwner[idx] = sysIcon;
-            if (idx >= scaledSlotFilled) scaledSlotFilled = idx + 1;
+    // 上面全落空：退回 shell 系统列表（只读，见 renderShellFallback 的说明）
+    if (!h && s->kind != ICONSRC_SHELL) h = renderShellFallback(s, size);
+
+    // 提取出来的常是原生帧（256/48/32），按目标尺寸平滑缩一次
+    if (h) {
+        HICON scaled = scaleIconToSize(h, size);
+        if (scaled) { DestroyIcon(h); h = scaled; }
+    }
+
+    if (h && (s->flags & ICONSRC_OVERLAY)) {
+        HICON composed = composeShortcutIcon(h, size);
+        if (composed) { DestroyIcon(h); h = composed; }
+    }
+    return h;
+}
+
+// 取某条来源在池里的槽位。不在池内就渲染 + 分配槽，池满时 LRU 淘汰独占槽。
+static int poolSlotFor(struct IconPool* p, int id) {
+    if (!p || !iconIdTypeNameValid(id)) return -1;
+
+    if (p->idSlotCap < iconSourceCount) {
+        int newCap = iconSourceCount + 64;
+        int* tmp = realloc(p->idSlot, (size_t)newCap * sizeof(int));
+        if (!tmp) return -1;
+        for (int i = p->idSlotCap; i < newCap; i++) tmp[i] = -1;
+        p->idSlot = tmp;
+        p->idSlotCap = newCap;
+    }
+    if (p->idSlot[id - 1] >= 0) {
+        int slot = p->idSlot[id - 1];
+        p->slotTick[slot] = ++p->tick;
+        return slot;
+    }
+
+    HICON hicon = renderIconSource(id, p->size);
+    if (!hicon) return -1;
+
+    int slot;
+    if (p->filled < p->slotCount) {
+        slot = ImageList_AddIcon(p->himl, hicon);
+        if (slot >= p->filled) p->filled = slot + 1;
+    }
+    else {
+        // 池满：在**非共享**槽里挑最久没用过的原地替换。ReplaceIcon 索引不变，
+        // 所以控件里已挂的列表句柄与 iImage 的语义都不受影响。
+        // 共享项（目录/驱动器/扩展名）永不参与淘汰 —— 它们的数量有界，且会反复出现。
+        int victim = -1;
+        for (int i = 0; i < p->slotCount; i++) {
+            int owner = p->slotId[i];
+            if (owner <= 0) continue;
+            if (iconSources[owner - 1].flags & ICONSRC_SHARED) continue;
+            if (victim < 0 || p->slotTick[i] < p->slotTick[victim]) victim = i;
+        }
+        if (victim < 0) { DestroyIcon(hicon); return -1; }
+        // 被顶掉的图标要同时作废它的反向映射，否则它会一直命中一个装了别人图案的槽位
+        int oldOwner = p->slotId[victim];
+        if (oldOwner > 0 && oldOwner <= p->idSlotCap) p->idSlot[oldOwner - 1] = -1;
+        slot = ImageList_ReplaceIcon(p->himl, victim, hicon);
+    }
+    DestroyIcon(hicon);
+    if (slot < 0) return -1;
+
+    p->slotId[slot] = id;
+    p->slotTick[slot] = ++p->tick;
+    p->idSlot[id - 1] = slot;
+    return slot;
+}
+
+// 解析并登记条目对应的图标来源，返回图标 id（0 = 失败）。
+//
+// 这是全局唯一碰「shell 图标 API」的地方：
+//   - 独占项（exe / lnk / .ico）按完整路径登记 —— 它们每个文件都可能有不同图案；
+//   - 共享项（目录、驱动器、其他扩展名）按扩展名/固定标识登记，数量有界；
+//   - 坐标一律优先走 SHGFI_ICONLOCATION（不碰 SIC），只有它拿不到时才退回
+//     shell 的系统列表索引（ICONSRC_SHELL，只读、不追加、不增长 SIC）。
+// 顺带把类型名一起缓存进来源项，loadItemData 因此不再需要自己调 getFileInfo。
+static int resolveIconId(struct ListItem* item) {
+    if (!item || !item->node) return 0;
+    struct FileNode* node = item->node;
+    if (iconIdTypeNameValid(item->icon)) return item->icon;
+    if (item->iconFailed) return 0;
+
+    wchar_t key[MAX_PATH] = {0};
+    bool shared = true;
+    bool overlay = false;
+    unsigned kind = ICONSRC_FILE;
+
+    // 键先算出来 —— 命中就不必碰任何 shell API（大目录里绝大多数条目走这条路）
+    if (node->type == TYPE_DRIVE) {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(node, path);
+        key[0] = L'\x02'; key[1] = path[0]; key[2] = L'\0';
+    }
+    else if (node->type == TYPE_DIR) {
+        key[0] = L'\x01'; key[1] = L'\0';
+    }
+    else if (node->type == TYPE_FILE) {
+        const wchar_t* ext = wcsrchr(node->name, L'.');
+        bool exclusive = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0
+                                 || wcsicmp(ext, L".ico") == 0);
+        if (exclusive) {
+            wchar_t path[MAX_PATH] = {0};
+            getFileNodePath(node, path);
+            wcsncpy_s(key, MAX_PATH, path, _TRUNCATE);
+            shared = false;
+            overlay = (wcsicmp(ext, L".lnk") == 0);
+        }
+        else if (ext) {
+            wcsncpy_s(key, MAX_PATH, ext, _TRUNCATE);
+        }
+        else {
+            key[0] = L'\x03'; key[1] = L'\0';   // 无扩展名
         }
     }
     else {
-        int victim = 0;
-        for (int i = 1; i < scaledSlotCount; i++) {
-            if (scaledSlotTick[i] < scaledSlotTick[victim]) victim = i;
-        }
-        // 被顶掉的图标要同时作废它的映射，否则它会一直命中一个已经装了别人图案的槽位
-        int oldOwner = scaledSlotOwner[victim];
-        if (oldOwner >= 0 && oldOwner < scaledIconMapCap) scaledIconMap[oldOwner] = -1;
-        idx = ImageList_ReplaceIcon(himl, victim, hicon);
-        if (idx >= 0) scaledSlotOwner[idx] = sysIcon;
+        // 桌面 / 个人目录 / 计算机 等固定节点：按类型共享
+        key[0] = L'\x04'; key[1] = (wchar_t)(L'a' + (int)node->type); key[2] = L'\0';
     }
-    DestroyIcon(hicon);
-    if (idx < 0) return sysIcon;
 
-    scaledSlotTick[idx] = ++scaledUseTick;
-    scaledIconMap[sysIcon] = idx;
-    return idx;
+    int id = iconKeyLookup(key);
+    if (id > 0) { item->icon = id; return id; }
+
+    wchar_t file[MAX_PATH] = {0};
+    wchar_t typeName[80] = {0};
+    int index = 0;
+    int shellIndex = -1;
+
+    if (node->type == TYPE_DRIVE) {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(node, path);
+        wcsncpy_s(typeName, 80, isCDDrivePath(path) ? lc_str.cd_drive : lc_str.local_drive, _TRUNCATE);
+        SHFILEINFO sfi = {0};
+        if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICONLOCATION) && sfi.szDisplayName[0]) {
+            wcsncpy_s(file, MAX_PATH, sfi.szDisplayName, _TRUNCATE);
+            index = sfi.iIcon;
+        }
+        else {
+            struct FileInfo fi = {0};
+            getFileInfo(path, TYPE_DRIVE, false, &fi);
+            shellIndex = fi.icon;
+        }
+    }
+    else if (node->type == TYPE_DIR) {
+        // 所有目录共用一张「文件夹」图标（与原实现的 folderIconCachedForStyle 语义一致）。
+        // 目录的图标与路径无关，所以不必按路径去查，一个常量键就够。
+        wcsncpy_s(typeName, 80, lc_str.folder, _TRUNCATE);
+        // USEFILEATTRIBUTES 分支只看扩展名/属性，不看路径 —— 传个哑名字即可，
+        // 传空串在部分实现上会退化成「查当前目录」而失败。
+        SHFILEINFO sfi = {0};
+        if (SHGetFileInfoW(L"a", FILE_ATTRIBUTE_DIRECTORY, &sfi, sizeof(sfi),
+                           SHGFI_ICONLOCATION | SHGFI_USEFILEATTRIBUTES) && sfi.szDisplayName[0]) {
+            wcsncpy_s(file, MAX_PATH, sfi.szDisplayName, _TRUNCATE);
+            index = sfi.iIcon;
+        }
+        else {
+            // 退路：system 列表里的目录类型图标（只读，不追加）
+            struct FileInfo fi = {0};
+            getFileInfo(L"a", TYPE_DIR, false, &fi);
+            shellIndex = fi.icon;
+        }
+    }
+    else if (node->type == TYPE_FILE) {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(node, path);
+        const wchar_t* ext = wcsrchr(node->name, L'.');
+        bool isExe = ext && wcsicmp(ext, L".exe") == 0;
+        bool isLnk = ext && wcsicmp(ext, L".lnk") == 0;
+        bool isIco = ext && wcsicmp(ext, L".ico") == 0;
+
+        if (isExe || isLnk) {
+            wcsncpy_s(typeName, 80, isExe ? lc_str.application : lc_str.shortcut, _TRUNCATE);
+            if (isLnk) {
+                // .lnk 必须自己读 lnk 里的 ICON_LOCATION，**不能**用
+                // SHGFI_ICONLOCATION：Wine 对快捷方式直接返回 shell32.dll 的通用
+                // 文档图标（实测 file=SHELL32.dll idx=0），于是最后画出来的就只剩
+                // 我们合成的那个角标。详见 resolveLnkIconLocation 的说明。
+                wchar_t iconPath[MAX_PATH] = {0};
+                int iconIndex = 0;
+                if (resolveLnkIconLocation(path, iconPath, MAX_PATH, &iconIndex)) {
+                    wcsncpy_s(file, MAX_PATH, iconPath, _TRUNCATE);
+                    index = iconIndex;
+                    const wchar_t* iext = wcsrchr(iconPath, L'.');
+                    // 图标来源本身是 .ico：走自带 ICO 解码器（PE 解码器与
+                    // PrivateExtractIconsW 都不认 .ico）
+                    if (iext && wcsicmp(iext, L".ico") == 0) kind = ICONSRC_ICO;
+                }
+                else {
+                    // lnk 损坏 / 目标是 URL 等：退回 lnk 自己的注册表坐标，
+                    // 再不行 renderIconSource 还有 shell 兜底。
+                    SHFILEINFO sfi = {0};
+                    if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICONLOCATION) && sfi.szDisplayName[0]) {
+                        wcsncpy_s(file, MAX_PATH, sfi.szDisplayName, _TRUNCATE);
+                        index = sfi.iIcon;
+                    }
+                }
+            }
+            else {
+                SHFILEINFO sfi = {0};
+                if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICONLOCATION) && sfi.szDisplayName[0]) {
+                    wcsncpy_s(file, MAX_PATH, sfi.szDisplayName, _TRUNCATE);
+                    index = sfi.iIcon;
+                }
+                if (!file[0]) {
+                    // ICONLOCATION 落空：exe 用文件自己（自带 PE 解码器兜底），
+                    // 同样不必再碰 shell，也就不会增长 SIC。
+                    wcsncpy_s(file, MAX_PATH, path, _TRUNCATE);
+                }
+            }
+        }
+        else if (isIco) {
+            // .ico 必须按文件取真图案：注册表里 .ico 常映射到 shell32 的通用图标，
+            // 走 ICONLOCATION 会得到「不是这个文件」的图案。用自带的 ICO 解码器。
+            kind = ICONSRC_ICO;
+            wcsncpy_s(file, MAX_PATH, path, _TRUNCATE);
+            wchar_t upper[30] = {0};
+            if (ext[1]) strToUpper(ext + 1, upper, 30);
+            swprintfTrunc(typeName, 80, lc_str.fmt_file, upper);
+        }
+        else {
+            // 普通文件：类型名在本地拼（与 getFileInfo 的 default 分支同一套规则 ——
+            // exe/lnk 上面的分支已经处理掉，这里只会是「<大写扩展名> 文件」，无扩展名
+            // 则是「文件」），图标取注册表登记的坐标。
+            //
+            // 刻意**不**预调 getFileInfo：它唯一的产出是 SYSICONINDEX，而
+            // USEFILEATTRIBUTES 分支每碰到一个新扩展名就往 SIC 里塞一项（≈367 KB，
+            // 主要是那份 256×256 JUMBO 帧）。坐标拿不到时才退到它，当作最后手段。
+            wcsncpy_s(typeName, 80, lc_str.file, _TRUNCATE);
+            if (ext && ext[1]) {
+                wchar_t upper[30] = {0};
+                strToUpper(ext + 1, upper, 30);
+                swprintfTrunc(typeName, 80, lc_str.fmt_file, upper);
+            }
+            SHFILEINFO sfi = {0};
+            if (SHGetFileInfoW(path, FILE_ATTRIBUTE_ARCHIVE, &sfi, sizeof(sfi),
+                               SHGFI_ICONLOCATION | SHGFI_USEFILEATTRIBUTES) && sfi.szDisplayName[0]) {
+                wcsncpy_s(file, MAX_PATH, sfi.szDisplayName, _TRUNCATE);
+                index = sfi.iIcon;
+            }
+            else {
+                struct FileInfo fi = {0};
+                getFileInfo(path, TYPE_FILE, false, &fi);
+                shellIndex = fi.icon;
+            }
+        }
+    }
+    else {
+        wchar_t path[MAX_PATH] = {0};
+        getFileNodePath(node, path);
+        struct FileInfo fi = {0};
+        getFileInfo(path, node->type, false, &fi);
+        wcsncpy_s(typeName, 80, fi.typeName, _TRUNCATE);
+        shellIndex = fi.icon;
+    }
+
+    if (file[0]) {
+        id = iconSourceAdd(key, kind,
+                           (shared ? ICONSRC_SHARED : 0) | (overlay ? ICONSRC_OVERLAY : 0),
+                           file, index, typeName);
+    }
+    else if (shellIndex >= 0) {
+        id = iconSourceAdd(key, ICONSRC_SHELL, ICONSRC_SHARED | (overlay ? ICONSRC_OVERLAY : 0),
+                           NULL, shellIndex, typeName);
+    }
+    else {
+        id = 0;
+    }
+
+    item->icon = id;
+    // 登记失败（来源表已满、或坐标与索引都拿不到）：打个标记，别让每次重绘都重来
+    // 一遍 ICONLOCATION —— 那种情况下重试既不会成功，还会把 shell 调用变成热点。
+    if (id <= 0) item->iconFailed = true;
+    return id;
+}
+
+// 条目在当前显示列表里的槽位（-1 = 这次画不出图标）
+static int getIconSlot(struct ListItem* item) {
+    if (!item) return -1;
+    int id = resolveIconId(item);
+    if (id <= 0) return -1;
+    struct IconPool* p = currentIconPool();
+    if (!p) return -1;
+    // 只在这个池确实挂在控件上时才给出索引：池创建失败时 refreshContentView 会
+    // 退回系统列表，那时的 iImage 语义与池内的槽位不对应。
+    if (p->himl != currentImageList) return -1;
+    return poolSlotFor(p, id);
 }
 
 // 计算并应用大图标视图的格子尺寸（LVM_SETICONSPACING）。
@@ -635,29 +1010,11 @@ void setIconViewIconSize(int size) {
     if (size != iconViewIconSize) {
         iconViewIconSize = size;
         saveIconViewSettings();
-        if (viewStyle == STYLE_LARGE_ICON) {
-            // 旧缩放列表此刻仍挂在控件的 LVSIL_NORMAL 上：先把引用从全局变量上摘掉、
-            // 让 refreshContentView 新建并挂上按新尺寸生成的列表，**挂好之后**才销毁
-            // 旧列表（顺序反过来就是控件短暂持有已销毁的句柄，见 clearIconCaches 里
-            // 「不要销毁仍挂在控件上的列表」那条约定）。
-            // 映射必须立刻作废：iconViewIconSize 已变，旧索引与新列表不再对应。
-            HIMAGELIST oldList = scaledImageList;
-            scaledImageList = NULL;
-            free(scaledIconMap);
-            scaledIconMap = NULL;
-            scaledIconMapCap = 0;
-            refreshContentView();   // 内部会建新列表并调用 updateIconViewLayout
-            if (oldList) ImageList_Destroy(oldList);
-        }
-        else if (scaledImageList) {
-            // 非大图标视图下重建：缩放列表此刻可能仍挂在控件的 LVSIL_NORMAL 上
-            // （从大图标视图切走时不会重挂），必须先把系统列表挂回去、再销毁它
-            HIMAGELIST himlBig = NULL, himlSmall = NULL;
-            Shell_GetImageLists(&himlBig, &himlSmall);
-            currentImageList = himlBig;
-            ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
-            resetScaledIconList();
-        }
+        // 仅大图标视图的显示尺寸会变；其他视图固定 16px，不受影响。
+        // 条目里的 item->icon 是「图标来源 id」，与尺寸无关 —— 换个尺寸只是换个
+        // 显示列表池，不必清任何缓存。refreshContentView 会把新尺寸的池挂上，
+        // 然后把不再使用的池释放掉（旧池此时已从控件上摘下，销毁是安全的）。
+        if (viewStyle == STYLE_LARGE_ICON) refreshContentView();
     }
     updateIconViewMenuCheckmarks();
 }
@@ -1494,70 +1851,15 @@ static HBRUSH getUiBrush(HBRUSH* slot, COLORREF color) {
 // 否则虚拟列表会被物化，排序时就把整个目录的图标都解析一遍。
 static void loadItemData(struct ListItem* item) {
     if (!item || !item->node || item->loaded) return;
+    struct FileNode* node = item->node;
 
-    const bool large = (viewStyle == STYLE_LARGE_ICON);
+    // 图标与类型名都由自建图标库一次性给出：resolveIconId 内部按「路径 / 扩展名 /
+    // 固定标识」去重，命中已登记项时连 shell 都不碰，所以这里的代价与目录规模无关。
+    item->icon = resolveIconId(item);
+    const wchar_t* typeName = iconIdTypeName(item->icon);
+    wcsncpy_s(item->type, 64, typeName ? typeName : L"", _TRUNCATE);
 
-    if (item->node->type == TYPE_DIR) {
-        // 目录图标缓存：记录缓存时使用的视图样式（大小图标的索引空间不同）
-        if (folderIconCachedForStyle != (int)viewStyle) {
-            wchar_t path[MAX_PATH] = {0};
-            getFileNodePath(item->node, path);
-            struct FileInfo fi = {0};
-            getFileInfo(path, TYPE_DIR, large, &fi);
-            folderIconIndex = fi.icon;
-            folderIconCachedForStyle = (int)viewStyle;
-        }
-        item->icon = folderIconIndex;
-        wcsncpy_s(item->type, 64, lc_str.folder, _TRUNCATE);
-    }
-    else if (item->node->type == TYPE_FILE) {
-        // 获取扩展名
-        wchar_t* ext = wcsrchr(item->node->name, L'.');
-
-        // exe 和 lnk 文件不使用扩展名缓存，每个文件可能有不同图标
-        bool isExeOrLnk = ext && (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0);
-
-        if (isExeOrLnk) {
-            // exe/lnk 使用路径缓存
-            wchar_t path[MAX_PATH] = {0};
-            getFileNodePath(item->node, path);
-            int cachedIcon = findExeIconCache(path, large);
-            const wchar_t* typeName = wcsicmp(ext + 1, L"exe") == 0 ? lc_str.application : lc_str.shortcut;
-            if (cachedIcon >= 0) {
-                item->icon = cachedIcon;
-            } else if (wcsicmp(ext + 1, L"lnk") == 0) {
-                // lnk：解析目标图标 + 合成快捷方式箭头（内部含缓存与兜底）
-                item->icon = getLnkIconIndex(path, large);
-            } else {
-                struct FileInfo fi = {0};
-                getFileInfo(path, TYPE_FILE, large, &fi);
-                item->icon = fi.icon;
-                addExeIconCache(path, fi.icon, large);
-            }
-            wcsncpy_s(item->type, 64, typeName, _TRUNCATE);
-        } else {
-            // 非 exe/lnk：先查内存缓存（一次查到图标索引 + 类型名）
-            struct ExtIconCacheEntry* ce = findExtCache(ext, large);
-            if (ce) {
-                item->icon = ce->icon;
-                if (ce->typeName[0]) wcsncpy_s(item->type, 64, ce->typeName, _TRUNCATE);
-                else {
-                    wchar_t upper[30] = {0};
-                    if (ext && ext[1]) strToUpper(ext + 1, upper, 30);
-                    swprintfTrunc(item->type, 64, lc_str.fmt_file, upper);
-                }
-            } else {
-                wchar_t path[MAX_PATH] = {0};
-                getFileNodePath(item->node, path);
-                struct FileInfo fi = {0};
-                getFileInfo(path, TYPE_FILE, large, &fi);
-                item->icon = fi.icon;
-                wcsncpy_s(item->type, 64, fi.typeName, _TRUNCATE);
-                addExtIconCache(ext, fi.icon, fi.typeName, large);
-            }
-        }
-
-        // 格式化文件大小和日期
+    if (node->type == TYPE_FILE) {
         formatFileSize(item->size, item->formattedSize);
         SYSTEMTIME systemTime = {0};
         FILETIME localFiletime;
@@ -1565,23 +1867,16 @@ static void loadItemData(struct ListItem* item) {
             formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
         }
     }
-    else {
-        // 其他类型（驱动器等）
+    else if (node->type == TYPE_DRIVE) {
         wchar_t path[MAX_PATH] = {0};
-        getFileNodePath(item->node, path);
-        struct FileInfo fi = {0};
-        getFileInfo(path, item->node->type, large, &fi);
-        item->icon = fi.icon;
-        wcsncpy_s(item->type, 64, fi.typeName, _TRUNCATE);
-        if (item->node->type == TYPE_DRIVE) {
-            wchar_t rootPath[4] = {0};
-            swprintfTrunc(rootPath, 4, L"%lc:\\", path[0]);
-            ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
-            if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
-                item->driveTotalBytes = totalBytes.QuadPart;
-                item->driveFreeBytes = freeBytesAvail.QuadPart;
-                formatDriveSizeText(item);
-            }
+        getFileNodePath(node, path);
+        wchar_t rootPath[4] = {0};
+        swprintfTrunc(rootPath, 4, L"%lc:\\", path[0]);
+        ULARGE_INTEGER freeBytesAvail, totalBytes, freeBytesTotal;
+        if (GetDiskFreeSpaceExW(rootPath, &freeBytesAvail, &totalBytes, &freeBytesTotal)) {
+            item->driveTotalBytes = totalBytes.QuadPart;
+            item->driveFreeBytes = freeBytesAvail.QuadPart;
+            formatDriveSizeText(item);
         }
     }
 
@@ -1606,21 +1901,45 @@ static COLORREF getContentTextColor(void) {
 
 static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     HDC hdc = nmcd->hdc;
+    int itemIndex = (int)nmcd->dwItemSpec;
 
     // 不信任通知携带的矩形（Wine 各版本给的矩形不一致），直接取完整格子
     RECT rc;
-    if (!ListView_GetItemRect(hwndContentView, nmcd->dwItemSpec, &rc, LVIR_BOUNDS))
+    if (!ListView_GetItemRect(hwndContentView, itemIndex, &rc, LVIR_BOUNDS))
         rc = nmcd->rc;
 
+    // 选中/焦点位以**控件**为准，通知里的 uItemState 只当补充。
+    //
+    // Wine 的 uItemState 来自 comctl32/listview.c 的 customdraw_fill()，而那份
+    // state 是 LISTVIEW_GetItemT() 在 owner-data 分支里拼出来的：先把 state 清 0
+    // （listview.c:6705），回调 LVN_GETDISPINFO 取应用侧数据，最后再把「由控件
+    // 自己负责」的那两位或回去（6768 焦点 / 6776 选中）。这条链任何一环没走到
+    // 最后，通知里就是 0 —— 表现就是「明明选中了，蓝底却没画出来」，而且因为
+    // 触发条件与绘制时机相关，看上去是**概率性**丢的。
+    //
+    // LVM_GETITEMSTATE 走的是同一个函数的收尾分支，但在 owner-data 下它是纯内存
+    // 查询（mask 只有 LVIF_STATE，不满足 6709/6710 的回调条件，不会反过来调我们
+    // 的 LVN_GETDISPINFO），直接给出控件记录的真实选中/焦点位。只在该位缺席时补问
+    // 一次，正常路径一次额外调用都不多花。
     bool selected = (nmcd->uItemState & CDIS_SELECTED) != 0;
     bool focused = (nmcd->uItemState & CDIS_FOCUS) != 0;
+    if (!selected) {
+        selected = (ListView_GetItemState(hwndContentView, itemIndex, LVIS_SELECTED)
+                    & LVIS_SELECTED) != 0;
+    }
+    if (!focused) {
+        focused = (ListView_GetItemState(hwndContentView, itemIndex, LVIS_FOCUSED)
+                   & LVIS_FOCUSED) != 0;
+    }
 
     // 图标：水平居中放在格子顶部（TOP_PAD 与 Wine 的 ICON_TOP_PADDING 一致）
     int iconSize = iconViewIconSize;
     int iconX = rc.left + ((rc.right - rc.left) - iconSize) / 2;
     int iconY = rc.top + ICONVIEW_TOP_PAD;
     if (currentImageList && item->loaded) {
-        int imageIdx = isScaledLargeIconView() ? getScaledIconIndex(item) : item->icon;
+        // item->icon 是自建图标库的 id，这里换成当前显示列表（iconViewIconSize 那本）
+        // 里的槽位索引。槽位池内部按尺寸渲染 + LRU，见 getIconSlot 处的说明。
+        int imageIdx = getIconSlot(item);
         ImageList_DrawEx(currentImageList, imageIdx, hdc, iconX, iconY, 0, 0,
                          CLR_NONE, CLR_NONE, ILD_TRANSPARENT);
     }
@@ -1756,9 +2075,9 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             // 这里保持不修改，由控件决定。
 
             if (mask & LVIF_IMAGE) {
-                // 大图标视图 + 自定义尺寸时，item->icon 是系统 big 列表的索引，
-                // 必须经映射转换成缩放列表里的索引（映射内部按显示尺寸生成图标）
-                nmlvdi->item.iImage = isScaledLargeIconView() ? getScaledIconIndex(item) : item->icon;
+                // item->icon 是自建图标库的 id（与显示尺寸无关），这里换成当前显示
+                // 列表里的槽位索引 —— 所有视图样式走同一条路，不再区分大/小图标列表。
+                nmlvdi->item.iImage = getIconSlot(item);
             }
             
             if (mask & LVIF_TEXT) {
@@ -1786,6 +2105,22 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     }                       
                 }
             }           
+            break;
+        }
+        case LVN_ITEMCHANGED: {
+            // 大图标视图的蓝底是**我们自绘**的（见 drawLargeIconItem），而 Wine 在
+            // 选中状态变化时只失效「它自己算出来的」那个项矩形。位置数据刚变过时
+            // （例如刚进目录、首帧绘制还没跑完）那个矩形可能还没算对，于是出现
+            // 「点了但蓝底不出来，过一会儿/下次重绘才补上」——看着就是概率性丢失，
+            // 严重时第二下点击（打开）都到了蓝底还没画出来，像是单击直接进去。
+            // 这里按我们自己取的格子矩形再失效一次：只重画一个格子，代价可忽略。
+            NMLISTVIEW* nmlv = (NMLISTVIEW*)nmhdr;
+            if (viewStyle == STYLE_LARGE_ICON && nmlv->iItem >= 0
+                && nmlv->iItem < numItems) {
+                RECT rc;
+                if (ListView_GetItemRect(hwndContentView, nmlv->iItem, &rc, LVIR_BOUNDS))
+                    InvalidateRect(hwndContentView, &rc, TRUE);
+            }
             break;
         }
         case NM_RCLICK: {
@@ -2144,10 +2479,9 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     // 强制 ListView 识别样式变更并重新布局
     SetWindowPos(hwndContentView, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
-    // 必须先把图标缓存清空再刷新：大/小图标在系统图像列表里的索引不同，
-    // 旧实现先 refresh 再清缓存，refresh 里命中的是上一个尺寸的索引 —— 这正是
-    // README 里「图标混淆」的根因。
-    clearIconCaches();
+    // 这里不再需要清图标缓存：item->icon 现在是「图标来源 id」，与显示尺寸无关
+    // （旧实现存的是系统图像列表索引，大/小列表索引空间不同 —— 那才是 README 里
+    // 「图标混淆」的根因）。换视图只需换一份显示列表池，来源表原样复用。
     viewStyle = newViewStyle;
     // 布局统一由下面这次调用负责，让 refreshContentView 跳过它自己那次
     // （正常情况下两者等价，纯属重复；见 skipLayoutInRefresh 的说明）
@@ -2879,17 +3213,25 @@ static HICON createIconFromRawData(const BYTE* data, DWORD dataSize) {
     return hIcon;
 }
 
+// 枚举容量的独立上限：文件里的图标组数可以远超 MAX_ICON_GROUPS（那是图标查看
+// 窗口的分组上限），而「按资源 ID 找组」必须能覆盖到靠后的组 —— shell32.dll 有
+// 64 个组，且 IDI_SHELL_FOLDER 之类的 ID 并不总是排在最前。
+#define ICON_GROUP_ENUM_MAX 128
+
 struct GroupIconEnumData {
-    HRSRC hRes[MAX_ICON_GROUPS];
+    HRSRC hRes[ICON_GROUP_ENUM_MAX];
+    int ids[ICON_GROUP_ENUM_MAX];   // 对应的资源 ID（命名资源记 -1）
     int count;
 };
 
 static BOOL CALLBACK enumGroupIconProc(HMODULE hModule, LPCWSTR lpType, LPWSTR lpName, LONG_PTR lParam) {
     (void)lpType;   // 枚举时只关心 RT_GROUP_ICON，类型参数不使用
     struct GroupIconEnumData* data = (struct GroupIconEnumData*)lParam;
-    if (data->count < MAX_ICON_GROUPS) {
+    if (data->count < ICON_GROUP_ENUM_MAX) {
         HRSRC hRes = FindResourceW(hModule, lpName, RT_GROUP_ICON);
         if (hRes) {
+            // 整数 ID 就是 lpName 本身（MAKEINTRESOURCE 的形式）；命名资源记 -1
+            data->ids[data->count] = IS_INTRESOURCE(lpName) ? (int)(ULONG_PTR)lpName : -1;
             data->hRes[data->count++] = hRes;
         }
     }
@@ -2984,8 +3326,12 @@ static bool isBetterIconEntry(int side, int depth, int bestSide, int bestDepth, 
 // 绕开 Wine 有颜色反转 bug 的 ExtractIconEx 系图标 API。工具栏启动时用
 // index 0（主图标），lnk 解析用 GetIconLocation 给出的索引。
 // 返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL。
+// groupIndex 有两种含义（与 shell 的约定一致）：
+//   >= 0  RT_GROUP_ICON 的枚举序号（0 = 主图标，工具栏与 exe 用这个）
+//   <  0  按资源 ID 查找，ID = -groupIndex —— 目录（IDI_SHELL_FOLDER=4，shell 给
+//         出的就是 -4）、驱动器、注册过扩展名走的都是这种负数坐标
 static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired) {
-    if (!pePath || groupIndex < 0 || cxDesired <= 0 || cyDesired <= 0) return NULL;
+    if (!pePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
 
     HICON result = NULL;
     HMODULE hModule = LoadLibraryExW(pePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
@@ -2994,7 +3340,15 @@ static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int
     struct GroupIconEnumData enumData = {0};
     EnumResourceNamesW(hModule, RT_GROUP_ICON, enumGroupIconProc, (LONG_PTR)&enumData);
 
-    if (groupIndex < enumData.count) {
+    if (groupIndex < 0) {
+        int wantId = -groupIndex;
+        groupIndex = -1;
+        for (int i = 0; i < enumData.count; i++) {
+            if (enumData.ids[i] == wantId) { groupIndex = i; break; }
+        }
+    }
+
+    if (groupIndex >= 0 && groupIndex < enumData.count) {
         HRSRC hGroupRes = enumData.hRes[groupIndex];
         HGLOBAL hGroupGlob = hGroupRes ? LoadResource(hModule, hGroupRes) : NULL;
         const GRPICONDIR* grpDir = hGroupGlob ? (const GRPICONDIR*)LockResource(hGroupGlob) : NULL;
@@ -3342,7 +3696,11 @@ static const BYTE* getShortcutOverlayPixels(int* outSize) {
 // 原生帧叠加，不随目标图标一起被放大成马赛克。srcSize/dstSize 为边长。
 static BYTE* scaleIconPixelsBilinear(const BYTE* src, int srcSize, int dstSize) {
     if (srcSize <= 0 || dstSize <= 0 || srcSize == dstSize) return NULL;
-    BYTE* out = (BYTE*)malloc((size_t)dstSize * dstSize * 4);
+    // calloc 而不是 malloc：下面每个像素的四通道都会被赋值，但赋值点埋在两层
+    // 循环 + 手算下标里，-fanalyzer 无法证明「全量写入」而会报
+    // -Wanalyzer-use-of-uninitialized-value 假警告。清零让「缓冲区已初始化」
+    // 这个事实对分析器显式成立，代价只是每帧一次 memset（≤128×128×4）。
+    BYTE* out = (BYTE*)calloc((size_t)dstSize * dstSize * 4, 1);
     if (!out) return NULL;
 
     for (int y = 0; y < dstSize; y++) {
@@ -3562,45 +3920,16 @@ static HICON composeShortcutIcon(HICON hTarget, int outSize) {
     return result;
 }
 
-// 解析 lnk 指向的目标路径（不取图标，只取路径）。用 SLGP_RAWPATH 拿 lnk 里存的
-// 原始路径再自己展开 %var%：Wine 的 IShellLinkW_fnGetPath 完全忽略 fFlags、直接
-// 返回 Load 时存下的 sPath，而真 Windows 下 SLGP_RAWPATH 正好也是不展开的形式，
-// 两边都靠这一步统一。取不到路径（目标是 URL、MSI 广告式快捷方式、路径为空）
-// 返回 false——注意 Wine 用 S_FALSE 表示「没有路径」，SUCCEEDED(S_FALSE) 为真，
-// 所以必须靠内容判空，不能只看 HRESULT。
-static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch) {
-    if (!targetPath || targetCch <= 0) return false;
-    targetPath[0] = L'\0';
-    if (!lnkPath || !lnkPath[0]) return false;
-
-    bool ok = false;
-    IShellLinkW* isl = NULL;
-    if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
-                                   &IID_IShellLinkW, (void**)&isl))) {
-        IPersistFile* ipf = NULL;
-        if (SUCCEEDED(IShellLinkW_QueryInterface(isl, &IID_IPersistFile, (void**)&ipf))) {
-            if (SUCCEEDED(IPersistFile_Load(ipf, lnkPath, STGM_READ | STGM_SHARE_DENY_WRITE))) {
-                wchar_t raw[MAX_PATH] = {0};
-                if (SUCCEEDED(IShellLinkW_GetPath(isl, raw, MAX_PATH, NULL, SLGP_RAWPATH)) && raw[0]) {
-                    // lnk 里常见 %windir%\system32\... 形式，先展开；放不下保留原样
-                    wchar_t expanded[MAX_PATH] = {0};
-                    DWORD n = ExpandEnvironmentStringsW(raw, expanded, MAX_PATH);
-                    const wchar_t* finalPath = (n > 0 && n <= MAX_PATH && expanded[0]) ? expanded : raw;
-                    wcsncpy_s(targetPath, (size_t)targetCch, finalPath, _TRUNCATE);
-                    ok = true;
-                }
-            }
-            IPersistFile_Release(ipf);
-        }
-        IShellLinkW_Release(isl);
-    }
-    return ok;
-}
-
-// 解析 lnk 的图标来源。优先 ICON_LOCATION 字符串（含图标组索引）；没有则
-// 回退到目标文件本身的主图标（GetPath）。iconPath 已做 %var% 环境变量展开。
-// 成功返回 true。
+// 解析 lnk 的图标来源，优先用 lnk 里存的 ICON_LOCATION（含图标组序号）；没有就
+// 退到目标文件本身的主图标（GetPath）。
+//
+// 为什么不能拿 SHGFI_ICONLOCATION 代替：Wine 对快捷方式这条路径走的是
+// IExtractIconW::GetIconLocation，实测直接吐出 shell32.dll 的通用文档图标
+// （file=SHELL32.dll idx=0）——它根本不解析 lnk。于是图标链路上就只剩我们自己
+// 合成的那个角标，看上去就是「快捷方式图标变成一个孤零零的箭头」。
+// 图标里的 %var% 在这里统一展开（与 resolveLnkTargetPath 同一套理由）。
 static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, int iconPathCch, int* iconIndex) {
+    if (!iconPath || iconPathCch <= 0 || !iconIndex) return false;
     iconPath[0] = L'\0';
     *iconIndex = 0;
     if (!lnkPath || !lnkPath[0]) return false;
@@ -3637,6 +3966,41 @@ static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, in
     return ok;
 }
 
+// 解析 lnk 指向的目标路径（不取图标，只取路径）。用 SLGP_RAWPATH 拿 lnk 里存的
+// 原始路径再自己展开 %var%：Wine 的 IShellLinkW_fnGetPath 完全忽略 fFlags、直接
+// 返回 Load 时存下的 sPath，而真 Windows 下 SLGP_RAWPATH 正好也是不展开的形式，
+// 两边都靠这一步统一。取不到路径（目标是 URL、MSI 广告式快捷方式、路径为空）
+// 返回 false——注意 Wine 用 S_FALSE 表示「没有路径」，SUCCEEDED(S_FALSE) 为真，
+// 所以必须靠内容判空，不能只看 HRESULT。
+static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch) {
+    if (!targetPath || targetCch <= 0) return false;
+    targetPath[0] = L'\0';
+    if (!lnkPath || !lnkPath[0]) return false;
+
+    bool ok = false;
+    IShellLinkW* isl = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IShellLinkW, (void**)&isl))) {
+        IPersistFile* ipf = NULL;
+        if (SUCCEEDED(IShellLinkW_QueryInterface(isl, &IID_IPersistFile, (void**)&ipf))) {
+            if (SUCCEEDED(IPersistFile_Load(ipf, lnkPath, STGM_READ | STGM_SHARE_DENY_WRITE))) {
+                wchar_t raw[MAX_PATH] = {0};
+                if (SUCCEEDED(IShellLinkW_GetPath(isl, raw, MAX_PATH, NULL, SLGP_RAWPATH)) && raw[0]) {
+                    // lnk 里常见 %windir%\system32\... 形式，先展开；放不下保留原样
+                    wchar_t expanded[MAX_PATH] = {0};
+                    DWORD n = ExpandEnvironmentStringsW(raw, expanded, MAX_PATH);
+                    const wchar_t* finalPath = (n > 0 && n <= MAX_PATH && expanded[0]) ? expanded : raw;
+                    wcsncpy_s(targetPath, (size_t)targetCch, finalPath, _TRUNCATE);
+                    ok = true;
+                }
+            }
+            IPersistFile_Release(ipf);
+        }
+        IShellLinkW_Release(isl);
+    }
+    return ok;
+}
+
 // ========== 大图标视图：按显示尺寸重新生成图标 ==========
 //
 // 旧的缩放路径是「拿系统 32px 列表里的图 → CopyImage 放大」，而 Wine 的
@@ -3658,35 +4022,55 @@ static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, in
 // 取「不小于目标的列表里最小的那个」，48 能直接命中原生的 48 帧，64/96/128 则
 // 从 256 帧缩下来（缩小永远比放大清楚）。都够不着时退到最大的那个。
 // 失败返回 NULL。
+// shell 那 5 个共享镜像列表的尺寸在进程生命周期内不会变，而 SHGetImageList() 每次
+// 都要现场造一个 IImageList 包装对象（Wine 侧是 SHGetImageList → 包装 + AddRef）。
+// 原实现在**每渲染一张图标**时查 4 个列表 = 4 次 SHGetImageList + 4 次 GetIconSize
+// + 4 次 Release；在 Winlator 上这些调用全要经 box86/box64 翻译，纯属浪费。
+// 这里查一次存下来。**刻意不释放**：它们本来就是 shell 的进程级全局对象，
+// SIC 也没有销毁 API，持有引用不会拖着任何东西不还。
+static IImageList* shellScaledLists[4] = {0};
+static int shellScaledSizes[4] = {0};
+static bool shellScaledInit = false;
+
 static HICON createScaledShellIcon(int sysIcon, int size) {
     if (sysIcon < 0 || size <= 0) return NULL;
 
-    static const int lists[] = { SHIL_JUMBO, SHIL_EXTRALARGE, SHIL_LARGE };
+    // 候选按尺寸从大到小：挑「不小于目标尺寸里最小的」那个，退而求其次用最大的。
+    // SHIL_SMALL 也在候选里，16px 的详细视图因此能拿到 shell 的原生 16 帧，
+    // 而不是把 32 帧缩下去（原生帧更锐）。
+    static const int lists[] = { SHIL_JUMBO, SHIL_EXTRALARGE, SHIL_LARGE, SHIL_SMALL };
     const int numLists = (int)(sizeof(lists) / sizeof(lists[0]));
 
-    int bestList = -1, bestSize = 0;          // 不小于 size 里最小的
-    int biggestList = -1, biggestSize = 0;    // 兜底：最大的
-    for (int i = 0; i < numLists; i++) {
-        IImageList* piml = NULL;
-        if (FAILED(SHGetImageList(lists[i], &wfm_IID_IImageList, (void**)&piml)) || !piml) continue;
-
-        int cx = 0, cy = 0;
-        HRESULT hr = IImageList_GetIconSize(piml, &cx, &cy);
-        IImageList_Release(piml);
-        if (FAILED(hr) || cx <= 0 || cx != cy) continue;
-
-        if (cx > biggestSize) { biggestSize = cx; biggestList = lists[i]; }
-        if (cx >= size && (bestList < 0 || cx < bestSize)) { bestSize = cx; bestList = lists[i]; }
+    if (!shellScaledInit) {
+        shellScaledInit = true;   // 失败也只试一次：语义与原来「查不到就跳过」一致
+        for (int i = 0; i < numLists; i++) {
+            IImageList* piml = NULL;
+            if (FAILED(SHGetImageList(lists[i], &wfm_IID_IImageList, (void**)&piml)) || !piml)
+                continue;
+            int cx = 0, cy = 0;
+            if (FAILED(IImageList_GetIconSize(piml, &cx, &cy)) || cx <= 0 || cx != cy) {
+                IImageList_Release(piml);
+                continue;
+            }
+            shellScaledLists[i] = piml;
+            shellScaledSizes[i] = cx;
+        }
     }
-    if (bestList < 0) bestList = biggestList;
-    if (bestList < 0) return NULL;
 
-    IImageList* piml = NULL;
-    if (FAILED(SHGetImageList(bestList, &wfm_IID_IImageList, (void**)&piml)) || !piml) return NULL;
+    int bestIdx = -1, bestSize = 0;          // 不小于 size 里最小的
+    int biggestIdx = -1, biggestSize = 0;    // 兜底：最大的
+    for (int i = 0; i < numLists; i++) {
+        int cx = shellScaledSizes[i];
+        if (cx <= 0 || !shellScaledLists[i]) continue;
+
+        if (cx > biggestSize) { biggestSize = cx; biggestIdx = i; }
+        if (cx >= size && (bestIdx < 0 || cx < bestSize)) { bestSize = cx; bestIdx = i; }
+    }
+    if (bestIdx < 0) { bestIdx = biggestIdx; bestSize = biggestSize; }
+    if (bestIdx < 0) return NULL;
 
     HICON src = NULL;
-    HRESULT hr = IImageList_GetIcon(piml, sysIcon, ILD_TRANSPARENT, &src);
-    IImageList_Release(piml);
+    HRESULT hr = IImageList_GetIcon(shellScaledLists[bestIdx], sysIcon, ILD_TRANSPARENT, &src);
     if (FAILED(hr) || !src) return NULL;
 
     // 挑中的源尺寸已经等于槽位尺寸：原样用，省掉一次像素往返
@@ -3695,147 +4079,6 @@ static HICON createScaledShellIcon(int sysIcon, int size) {
     HICON scaled = scaleIconToSize(src, size);
     DestroyIcon(src);
     return scaled;
-}
-
-// 按目标尺寸从文件里重新提取 exe / lnk 的图标。lnk 额外合成快捷方式角标
-// （合成发生在目标尺寸上，角标按素材原生边长封顶，不会被放大成马赛克）。
-// 返回的 HICON 由调用方 DestroyIcon()，失败返回 NULL（调用方走 shell 兜底）。
-//
-// 只处理 exe / lnk，**不处理 .ico**：item->icon 是缩放映射的缓存键，而这里的
-// 结果是按路径生成的，两者必须一一对应。exe/lnk 在 Wine 里都拿得到按路径区分的
-// 索引（SIC 的键是「来源文件 + 资源序号」；lnk 更是每次追加一个新图标），
-// 而 .ico 走的是 WFM 的扩展名缓存（addExtIconCache），一个索引代表整整一类文件
-// ——同一个索引下塞进「某一个 .ico 的真实图案」就会串位，让其余 .ico 都显示它。
-static HICON extractItemIconAtSize(const wchar_t* path, int size) {
-    if (!path || !path[0] || size <= 0) return NULL;
-
-    const wchar_t* ext = wcsrchr(path, L'.');
-    if (!ext) return NULL;
-    bool isLnk = (wcsicmp(ext, L".lnk") == 0);
-    if (!isLnk && wcsicmp(ext, L".exe") != 0) return NULL;
-
-    HICON src = NULL;
-    if (isLnk) {
-        wchar_t iconPath[MAX_PATH] = {0};
-        int iconIndex = 0;
-        if (resolveLnkIconLocation(path, iconPath, MAX_PATH, &iconIndex)) {
-            const wchar_t* iconExt = wcsrchr(iconPath, L'.');
-            bool iconIsIco = iconExt && wcsicmp(iconExt, L".ico") == 0;
-
-            src = iconIsIco ? extractIconFromIcoFile(iconPath, size, size)
-                            : extractIconFromPeIndexed(iconPath, iconIndex, size, size);
-            // 图标组索引越界（安装程序生成的 lnk 常见）：退回主图标再试一次
-            if (!src && !iconIsIco && iconIndex != 0)
-                src = extractIconFromPeIndexed(iconPath, 0, size, size);
-        }
-    }
-    else {
-        src = extractIconFromPeIndexed(path, 0, size, size);
-    }
-    if (!src) return NULL;
-
-    // 提取出来的往往是原生帧（256/48/32），先平滑缩到目标尺寸；缩不了就用原生图，
-    // 由图像列表自行处理（比返回失败强）。
-    HICON scaled = scaleIconToSize(src, size);
-    if (scaled) {
-        DestroyIcon(src);
-        src = scaled;
-    }
-
-    if (isLnk) {
-        HICON composed = composeShortcutIcon(src, size);
-        if (composed) {
-            DestroyIcon(src);
-            return composed;
-        }
-    }
-    return src;
-}
-
-// 大图标视图下单个条目在 size×size 上的图标：能自己按尺寸提取的（exe/lnk）
-// 走自建解码器，其余走 shell 大列表 + 平滑缩放。失败返回 NULL，调用方回退到
-// 旧的「32px 最近邻放大」路径，保证任何情况下都有图可画。
-static HICON createDisplayIcon(struct ListItem* item, int size) {
-    if (!item || size <= 0) return NULL;
-
-    // 只有 exe/lnk 值得拼路径去提取：其余类型的 item->icon 是「按扩展名共享」的
-    // 索引（一个索引代表一类文件），放不进按路径生成的结果。先看扩展名，顺带
-    // 省掉绝大多数条目的路径拼接。
-    const wchar_t* ext = (item->node && item->node->name) ? wcsrchr(item->node->name, L'.') : NULL;
-    if (item->node && item->node->type == TYPE_FILE && ext &&
-        (wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0)) {
-        wchar_t path[MAX_PATH] = {0};
-        getFileNodePath(item->node, path);
-        HICON hIcon = extractItemIconAtSize(path, size);
-        if (hIcon) return hIcon;
-    }
-
-    return createScaledShellIcon(item->icon, size);
-}
-
-// lnk 图标解析入口：读出图标位置 → 提取目标图标 → 合成快捷方式箭头 → 加入
-// 系统镜像列表（Shell_GetImageLists 的进程级共享列表；大/小列表索引空间不同，
-// 按 large 分别添加并走 exeIconCache 缓存）。任何一步失败回退 getFileInfo 的
-// 默认图标。返回值是对应镜像列表内的索引，可直接用于 ListView。
-static int getLnkIconIndex(const wchar_t* path, bool large) {
-    if (!path || !path[0]) return -1;
-
-    int cached = findExeIconCache(path, large);
-    if (cached >= 0) return cached;
-
-    int result = -1;
-    wchar_t iconPath[MAX_PATH] = {0};
-    int iconIndex = 0;
-    if (resolveLnkIconLocation(path, iconPath, MAX_PATH, &iconIndex)) {
-        int cx = large ? 32 : 16;
-        const wchar_t* ext = wcsrchr(iconPath, L'.');
-        bool isIco = ext && wcsicmp(ext, L".ico") == 0;
-
-        HICON hIcon = isIco ? extractIconFromIcoFile(iconPath, cx, cx)
-                            : extractIconFromPeIndexed(iconPath, iconIndex, cx, cx);
-        // 图标组索引越界（安装程序生成的 lnk 常见）：退回主图标再试一次
-        if (!hIcon && !isIco && iconIndex != 0)
-            hIcon = extractIconFromPeIndexed(iconPath, 0, cx, cx);
-
-        if (hIcon) {
-            HICON hComposed = composeShortcutIcon(hIcon, cx);
-            if (hComposed) {
-                DestroyIcon(hIcon);
-                hIcon = hComposed;
-            }
-            HIMAGELIST himlBig = NULL, himlSmall = NULL;
-            Shell_GetImageLists(&himlBig, &himlSmall);
-            HIMAGELIST himl = large ? himlBig : himlSmall;
-            if (himl) result = ImageList_AddIcon(himl, hIcon);
-
-            // Wine 的 SIC（shell 图标缓存）把 5 个共享镜像列表当索引严格同步的
-            // 整体，追加时取最后一个列表（JUMBO）返回的索引当作通用索引。只往
-            // big/small 追加会让五个列表计数错开，之后任何经 SHGetFileInfo 走
-            // SIC 的文件拿到的索引会落在我们 lnk 图标的槽位上，图标互相串位。
-            // 这里把其余三个列表也补上保持计数一致（EXTRALARGE/JUMBO wfm 不
-            // 使用，ReplaceIcon 会按列表尺寸自行缩放）。
-            for (int shil = SHIL_EXTRALARGE; shil <= SHIL_JUMBO; shil++) {
-                IImageList* extra = NULL;
-                if (SUCCEEDED(SHGetImageList(shil, &wfm_IID_IImageList, (void**)&extra))) {
-                    int added = -1;
-                    IImageList_ReplaceIcon(extra, -1, hIcon, &added);
-                    IImageList_Release(extra);
-                }
-            }
-            DestroyIcon(hIcon);
-        }
-    }
-
-    if (result < 0) {
-        // 兜底：shell 给的 lnk 默认图标（目标不可解析时的正确行为）
-        wchar_t pathBuf[MAX_PATH] = {0};
-        wcsncpy_s(pathBuf, MAX_PATH, path, _TRUNCATE);
-        struct FileInfo fi = {0};
-        getFileInfo(pathBuf, TYPE_FILE, large, &fi);
-        result = fi.icon;
-    }
-    addExeIconCache(path, result, large);
-    return result;
 }
 
 // ========== Icon viewer window ==========
@@ -4573,33 +4816,25 @@ static int compareDate(const void* a, const void* b) {
 }
 
 void clearIconCaches() {
-    extCacheCount = 0;
-    exeIconCacheCount = 0;
-    folderIconCachedForStyle = -1;
-
-    // 自建缩放列表（大图标视图 >32px）才是真正占内存的那个：128px 下一张图标
-    // 就是 64 KB，逛一遍大目录能攒到几十 MB —— 这也正是用户点「清除图标缓存」
-    // 想释放的东西。只重置映射是不够的：列表里的图标还在，下次绘制会按新索引
-    // 把它们**再追加一遍**，内存只增不减。
+    // 「清除图标缓存」的唯一职责：把自建图标库（来源表 + 所有显示列表池）整个丢掉，
+    // 并让所有条目下次重绘时重新解析。换 exe、改文件关联之后必须走这里才能看到新
+    // 图标 —— navigateRefresh()/refreshContentView() 按设计不重查图标。
     //
-    // 于是这里统一成「映射失效 ⟺ 列表销毁」：凡是要让映射作废的路径都必须释放
-    // 列表，否则必然出现重复条目。销毁顺序同 setIconViewIconSize —— 先把系统
-    // 列表挂回控件的 LVSIL_NORMAL（大图标视图下自建列表就挂在这个槽位），再销毁
-    // 自建列表；调用方随后的 refreshContentView 会按当前设置重建并挂上新列表。
-    if (scaledImageList) {
-        HIMAGELIST himlBig = NULL, himlSmall = NULL;
-        Shell_GetImageLists(&himlBig, &himlSmall);
-        if (hwndContentView && himlBig) {
-            currentImageList = himlBig;
-            ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
-        }
-        resetScaledIconList();
+    // 销毁顺序：先把系统列表挂回控件的两个槽位，再释放自建列表。反过来就是控件
+    // 短暂持有已销毁的句柄（Wine 下会画到野指针）。调用方随后的 refreshContentView
+    // 会按当前设置重建池并挂上。
+    HIMAGELIST himlBig = NULL, himlSmall = NULL;
+    Shell_GetImageLists(&himlBig, &himlSmall);
+    if (hwndContentView) {
+        if (himlBig) ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
+        if (himlSmall) ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
     }
-    else {
-        // 列表不存在时映射也不该留（正常两者同生共死，这里只是兜底）
-        free(scaledIconMap);
-        scaledIconMap = NULL;
-        scaledIconMapCap = 0;
+    currentImageList = himlBig;
+
+    resetIconStore();
+    for (int i = 0; i < numItems; i++) {
+        items[i].icon = 0;
+        items[i].iconFailed = false;
     }
 }
 
@@ -4644,6 +4879,51 @@ void sortItems() {
         case COLUMN_DATE_IDX:
             qsort(items, numItems, sizeof(struct ListItem), compareDate);
             break;
+    }
+}
+
+// 预热「首屏 + 一屏余量」的图标，把渲染工作从首帧绘制里搬走。
+//
+// 为什么需要：图标提取（展开 PE、解资源、缩放）现在都在 LVN_GETDISPINFO / 自绘里
+// 同步做，于是**首帧绘制**要等这一屏图标全提完。而 Wine 是先处理 WM_ERASEBKGND
+// （把客户区擦成窗口底色）再发 WM_PAINT 的 —— 用户看到的就是「点进去先闪一下白/空，
+// 再慢慢出图标」。把同样的工作挪到最终 InvalidateRect() **之前**做完，擦除与绘制
+// 就变成背靠背的两步：屏幕上是「旧内容停一下 → 新内容完整出现」，不再闪。
+// 总耗时不变（只是不再经过「擦白」这一帧），而且池子是跨导航保留的，来回进出过的
+// 目录直接命中，这一步连提都不用提。
+//
+// 只做「一屏 + 一屏余量」（上限 256 项）：覆盖首帧与「刚进来就滚一下」，又不会让
+// 大目录每次导航都把整本解一遍。
+static void prefetchFirstScreenIcons(void) {
+    if (!hwndContentView || !items || numItems <= 0) return;
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) return;   // 池没挂上：这轮不预热
+
+    RECT rc;
+    if (!GetClientRect(hwndContentView, &rc)) return;
+    int clientW = rc.right - rc.left, clientH = rc.bottom - rc.top;
+    if (clientW <= 0 || clientH <= 0) return;
+
+    // 注意**不能**用 LVM_GETCOUNTPERPAGE：Wine 对图标视图直接返回 nItemCount
+    // （listview.c:6601），在这里等于「把整个目录都预热一遍」。自己按格子尺寸算。
+    DWORD spacing = (DWORD)ListView_GetItemSpacing(hwndContentView, viewStyle != STYLE_LARGE_ICON);
+    int cellW = (int)LOWORD(spacing), cellH = (int)HIWORD(spacing);
+    if (cellW <= 0 || cellH <= 0) return;
+
+    int cols = clientW / cellW; if (cols < 1) cols = 1;
+    int rows = clientH / cellH; if (rows < 1) rows = 1;
+    int count = cols * rows * 2;
+    if (count > 256) count = 256;
+
+    int first = (int)ListView_GetTopIndex(hwndContentView);
+    if (first < 0) first = 0;
+    int last = first + count;
+    if (last > numItems) last = numItems;
+
+    for (int i = first; i < last; i++) {
+        if (!items[i].node) continue;
+        getIconSlot(&items[i]);   // 渲染 + 占槽；失败也只是这一项没图标
     }
 }
 
@@ -4731,32 +5011,27 @@ void refreshContentView() {
     }
 
     // 图标缓存保留（不清空），以加速相邻导航
-    // 视图切换时更新图像列表
-    if (viewStyle == STYLE_LARGE_ICON) {
-        if (iconViewIconSize != 32) {
-            HIMAGELIST himlScaled = getScaledImageList();
-            if (himlScaled) {
-                currentImageList = himlScaled;
-            }
-            else {
-                // 自建列表失败：退回系统 32px 列表，保证功能可用
-                HIMAGELIST himlBig = NULL, himlSmall = NULL;
-                Shell_GetImageLists(&himlBig, &himlSmall);
-                currentImageList = himlBig;
-            }
+    // 更新图像列表：挂上当前显示尺寸对应的自建列表池。
+    // 两个槽位都挂同一份 —— LVS_SMALL 供详细/列表/小图标视图用，LVS_NORMAL 供大图标
+    // 视图用；两个都挂上，就不存在「换尺寸后旧列表仍被控件引着」的窗口。
+    {
+        struct IconPool* pool = currentIconPool();
+        if (pool) {
+            currentImageList = pool->himl;
+            ListView_SetImageList(hwndContentView, pool->himl, LVSIL_NORMAL);
+            ListView_SetImageList(hwndContentView, pool->himl, LVSIL_SMALL);
         }
         else {
+            // 自建列表建不起来：退回系统列表，保证「有图可看」而不是一片空白
             HIMAGELIST himlBig = NULL, himlSmall = NULL;
             Shell_GetImageLists(&himlBig, &himlSmall);
-            currentImageList = himlBig;
+            currentImageList = (viewStyle == STYLE_LARGE_ICON) ? himlBig : himlSmall;
+            ListView_SetImageList(hwndContentView, currentImageList, LVSIL_NORMAL);
+            ListView_SetImageList(hwndContentView, currentImageList, LVSIL_SMALL);
         }
-        ListView_SetImageList(hwndContentView, currentImageList, LVSIL_NORMAL);
-    }
-    else {
-        HIMAGELIST himlBig = NULL, himlSmall = NULL;
-        Shell_GetImageLists(&himlBig, &himlSmall);
-        currentImageList = himlSmall;
-        ListView_SetImageList(hwndContentView, himlSmall, LVSIL_SMALL);
+        // 此刻控件已经不再引用旧尺寸的池，可以安全释放（位图预算按「同时只有一个
+        // 池在用」算，最多 8 MB，不会因为来回切尺寸累积）
+        pruneIconPools(pool);
     }
 
     if (sortColumnIdx != -1) sortItems();
@@ -4775,6 +5050,10 @@ void refreshContentView() {
         else ListView_Arrange(hwndContentView, LVA_DEFAULT);
         ListView_SetItemCountEx(hwndContentView, numItems, 0);
     }
+
+    // 预热首屏图标：必须在最终 InvalidateRect 之前 —— 否则这部分工作会落在首帧
+    // 绘制里，客户区先擦白再逐张出图标，看上去就是「点进去闪一下」。
+    prefetchFirstScreenIcons();
 
     // 整表失效重绘，恢复原版绘制路径。不用 LVSICF_NOINVALIDATEALL 做增量刷新：
     // Wine/Winlator 上增量路径会让旧行不重画（图标、文字残缺或滞留旧内容），
