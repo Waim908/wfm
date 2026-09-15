@@ -1502,6 +1502,19 @@ static void loadItemData(struct ListItem* item) {
 // 大图标视图条目自绘。Wine 的 ListView 默认只给非选中项画一行截断的文件名
 // （选中后才展开多行），这与 Windows 不一致，也无法靠调整格子高度改变，
 // 所以完全接管绘制：图标居中在上，文件名多行换行铺在下方。
+// ListView 的文本色：只要没人调用过 LVM_SETTEXTCOLOR，Wine 的 LVM_GETTEXTCOLOR
+// 返回的就是 CLR_DEFAULT（commctrl.h 里 0xff000000）。而 GDI 的 SetTextColor 只取
+// 低 24 位，CLR_DEFAULT 于是成了纯黑 —— 浅色主题下看着没问题，深色主题下就是
+// 「深色背景 + 黑字」，等于看不见。
+// Wine 自己绘制条目时对 CLR_DEFAULT 的处理是回落系统色（comctl32/listview.c 的
+// prepaint_setup：`if (textcolor == CLR_DEFAULT) textcolor = clrWindowText`，而
+// comctl32 的系统色缓存又直接来自 GetSysColor），这里照同一条规则解析，
+// 大图标视图的文字颜色就和其他视图保持一致。
+static COLORREF getContentTextColor(void) {
+    COLORREF c = ListView_GetTextColor(hwndContentView);
+    return (c == (COLORREF)CLR_DEFAULT) ? GetSysColor(COLOR_WINDOWTEXT) : c;
+}
+
 static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     HDC hdc = nmcd->hdc;
 
@@ -1544,7 +1557,7 @@ static void drawLargeIconItem(NMCUSTOMDRAW* nmcd, struct ListItem* item) {
     SetBkMode(hdc, TRANSPARENT);
     if (selected) SetTextColor(hdc, GetSysColor(COLOR_HIGHLIGHTTEXT));
     else if (item->isHidden) SetTextColor(hdc, RGB(160, 160, 160));  // 与其他视图的隐藏文件颜色一致
-    else SetTextColor(hdc, ListView_GetTextColor(hwndContentView));
+    else SetTextColor(hdc, getContentTextColor());
 
     // 无限行模式：不带 DT_END_ELLIPSIS、带 DT_NOCLIP —— Wine 的 DrawTextW
     // 只在 rect 装不下剩余文字时才画省略号，这里直接让它没有任何截断手段；
