@@ -1831,7 +1831,11 @@ static DWORD WINAPI searchTask(void* param) {
     wchar_t keyword[64] = {0};
     strToLower(searchData->keyword, keyword, 64);
 
-    const int BATCH_SIZE = 100;
+    // 批大小 = 搜索线程与 UI 线程的同步粒度：每批一次 SendMessage，而它是同步的，
+    // 搜索线程必须等 UI 线程处理完（items 扩容 + SetItemCountEx + 状态栏节流）才返回。
+    // 100 太密：10000 项上限下要同步 100 次。400 把它降到 25 次，同时结果仍是
+    // 分批渐进出现的，用户感知不到差别。
+    const int BATCH_SIZE = 400;
     struct BatchItems batch;
     batch.capacity = BATCH_SIZE;
     batch.nodes = malloc(batch.capacity * sizeof(struct FileNode*));
