@@ -4502,10 +4502,31 @@ void clearIconCaches() {
     extCacheCount = 0;
     exeIconCacheCount = 0;
     folderIconCachedForStyle = -1;
-    // 缩放列表里的图标同样是「解析结果」，一并失效：这里只重置映射
-    // （-1 = 待转换），不销毁列表本身 —— 大图标视图下它此刻仍挂在控件的
-    // LVSIL_NORMAL 上，销毁会留下悬空句柄。下次绘制会按新图标重新追加。
-    for (int i = 0; i < scaledIconMapCap; i++) scaledIconMap[i] = -1;
+
+    // 自建缩放列表（大图标视图 >32px）才是真正占内存的那个：128px 下一张图标
+    // 就是 64 KB，逛一遍大目录能攒到几十 MB —— 这也正是用户点「清除图标缓存」
+    // 想释放的东西。只重置映射是不够的：列表里的图标还在，下次绘制会按新索引
+    // 把它们**再追加一遍**，内存只增不减。
+    //
+    // 于是这里统一成「映射失效 ⟺ 列表销毁」：凡是要让映射作废的路径都必须释放
+    // 列表，否则必然出现重复条目。销毁顺序同 setIconViewIconSize —— 先把系统
+    // 列表挂回控件的 LVSIL_NORMAL（大图标视图下自建列表就挂在这个槽位），再销毁
+    // 自建列表；调用方随后的 refreshContentView 会按当前设置重建并挂上新列表。
+    if (scaledImageList) {
+        HIMAGELIST himlBig = NULL, himlSmall = NULL;
+        Shell_GetImageLists(&himlBig, &himlSmall);
+        if (hwndContentView && himlBig) {
+            currentImageList = himlBig;
+            ListView_SetImageList(hwndContentView, himlBig, LVSIL_NORMAL);
+        }
+        resetScaledIconList();
+    }
+    else {
+        // 列表不存在时映射也不该留（正常两者同生共死，这里只是兜底）
+        free(scaledIconMap);
+        scaledIconMap = NULL;
+        scaledIconMapCap = 0;
+    }
 }
 
 // 更新表头排序指示箭头。
