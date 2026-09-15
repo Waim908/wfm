@@ -299,6 +299,12 @@ static HIMAGELIST scaledImageList = NULL;
 static int* scaledIconMap = NULL;     // -1 表示尚未转换
 static int scaledIconMapCap = 0;
 
+// setViewStyle 会自己调用 updateIconViewLayout —— 这样即便 refreshContentView 因
+// 「搜索进行中」而提前返回，切换视图也仍会重算格子尺寸。refreshContentView 靠这个
+// 标志跳过它自己那次布局，免得同一次切换把「遍历全表做 GDI 文本测量 + Arrange +
+// 全表失效」原样做两遍（大图标视图下这是 N 次 DrawTextW(DT_CALCRECT)）。
+static bool skipLayoutInRefresh = false;
+
 static struct FileNode** selectedItems = NULL;
 static int numSelectedItems = 0;
 
@@ -2056,12 +2062,22 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     // README 里「图标混淆」的根因。
     clearIconCaches();
     viewStyle = newViewStyle;
+    // 布局统一由下面这次调用负责，让 refreshContentView 跳过它自己那次
+    // （正常情况下两者等价，纯属重复；见 skipLayoutInRefresh 的说明）
+    skipLayoutInRefresh = true;
     refreshContentView();
+    skipLayoutInRefresh = false;
 
     // 图标视图需要重新排列：样式切换时 LISTVIEW_StyleChanged 会按旧的条目数排布。
     // 大图标视图改用 updateIconViewLayout：先按设置定格子尺寸再 Arrange。
     if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
-        if (viewStyle == STYLE_LARGE_ICON) updateIconViewLayout();
+        if (viewStyle == STYLE_LARGE_ICON) {
+            updateIconViewLayout();
+            // Arrange 之后要重设一次 ItemCount 触发 LISTVIEW_UpdateScroll 修正滚动
+            // 范围。原实现里这一步紧跟在 refreshContentView 的那次布局之后，而这次
+            // 布局被 skipLayoutInRefresh 跳过了，所以在这里补上，保持顺序不变。
+            ListView_SetItemCountEx(hwndContentView, numItems, 0);
+        }
         else {
             ListView_Arrange(hwndContentView, LVA_DEFAULT);
             InvalidateRect(hwndContentView, NULL, FALSE);
@@ -4639,8 +4655,12 @@ void refreshContentView() {
     // LISTVIEW_StyleChanged → Arrange 在旧 ItemCount 下写入的错误位置。
     // 同时重设 ItemCount 触发 LISTVIEW_UpdateScroll，修复滚动范围。
     // 大图标视图下先把格子尺寸算好（内部含 Arrange），否则 Arrange 用旧格子排布。
+    // 由 setViewStyle 触发时跳过布局：它自己在 refreshContentView 之后会做一次
+    // 等价的调用（见 skipLayoutInRefresh），这里再做就是纯重复。
     if (viewStyle == STYLE_LARGE_ICON || viewStyle == STYLE_SMALL_ICON) {
-        if (viewStyle == STYLE_LARGE_ICON) updateIconViewLayout();
+        if (viewStyle == STYLE_LARGE_ICON) {
+            if (!skipLayoutInRefresh) updateIconViewLayout();
+        }
         else ListView_Arrange(hwndContentView, LVA_DEFAULT);
         ListView_SetItemCountEx(hwndContentView, numItems, 0);
     }
