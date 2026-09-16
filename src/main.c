@@ -645,6 +645,9 @@ void navigateUp() {
 void navigateRefresh() {
     if (currPathFileNode) {
         buildChildNodes(currPathFileNode, false);
+        // 从这一刻起内容区才第一次有真东西。setViewStyle 用它判断「启动首次应用样式」
+        // （那时 children 还是空的）与「运行期切视图」（必须刷新），见 content_view.c。
+        hasNavigatedContent = true;
 
         // S15：标题栏显示完整路径（原来只有最后一级目录名，用户无从判断所在位置）。
         // 「此电脑」「书签」等虚拟节点没有文件系统路径，退回显示节点名。

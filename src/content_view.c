@@ -3550,6 +3550,17 @@ void searchFor(wchar_t* keyword) {
 
 static void saveViewStyle(void);
 
+// 「内容区已经装过一次真实目录了」——由 main.c 的 navigateRefresh() 置位。
+//
+// 为什么需要它：启动时 setViewStyle 会被调一次（应用保存的视图样式），而那一刻还没导航过。
+// initFileNodes 里那份 buildChildNodes(computerNode, ...) 建的驱动器子项挂在**原节点**上，
+// 随后的 setCurrPathFileNode 只复制名字/类型/父链、不带 children —— 于是
+// currPathFileNode->children 还是空的。setViewStyle 内部那次 refreshContentView 因此是在
+// 空列表上白跑一趟（实测 ~9 ms，其中 ~5 ms 是建图标列表池，那笔开销无论如何都要花，
+// 净省的只是「入口 + 建表」那几毫秒）。运行期切视图必须保留这次刷新，所以用
+// 「是否已经导航过」区分，而不是把这次调用删掉。
+bool hasNavigatedContent = false;
+
 void setViewStyle(enum ViewStyle newViewStyle) {
     LONG_PTR wndstyle = GetWindowLongPtr(hwndContentView, GWL_STYLE);
     wndstyle &= ~LVS_TYPEMASK;
@@ -3582,8 +3593,10 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     viewStyle = newViewStyle;
     // 布局统一由下面这次调用负责，让 refreshContentView 跳过它自己那次
     // （正常情况下两者等价，纯属重复；见 skipLayoutInRefresh 的说明）
+    // 启动首次应用样式时列表还是空的（见 hasNavigatedContent 的说明），这次刷新是纯废工，
+    // 直接跳过；那时 numItems == 0，所以下面两步布局本来也是空转。
     skipLayoutInRefresh = true;
-    refreshContentView();
+    if (hasNavigatedContent) refreshContentView();
     skipLayoutInRefresh = false;
 
     // 图标视图需要重新排列：样式切换时 LISTVIEW_StyleChanged 会按旧的条目数排布。

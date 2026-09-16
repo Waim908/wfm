@@ -55,6 +55,10 @@ static inline void timetToFileTime(time_t t, LPFILETIME result) {
 
 extern HFONT hGuiFont;
 
+// 「内容区已经装过一次真实目录了」。定义在 content_view.c，由下面的 navigateRefresh 置位；
+// setViewStyle 靠它跳过「启动首次应用样式」那一次白跑的刷新（详见 content_view.c 的说明）。
+extern bool hasNavigatedContent;
+
 void updateGuiFont();
 void navigateToFileNode(struct FileNode* node);
 void navigateToPath(wchar_t* path);
