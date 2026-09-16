@@ -267,6 +267,48 @@ static void openNewWindow() {
     }
 }
 
+// 【绝不要在菜单还开着的时候建模态对话框】—— 这就是「关窗后的确认框按钮点不动、回车却能
+// 确认退出」那个远古 bug 的根因。改这里之前请把下面几条读完（都核对过 Wine 源码）。
+//
+// 机制：
+//  · Wine 的菜单跟踪是**嵌套在 NtUserTrackPopupMenuEx / 菜单栏跟踪里的一个循环**。它一开头就
+//    `set_capture_window(capture_win, GUI_INMENUMODE, NULL)`（win32u/menu.c:4134-4135：菜单栏
+//    用属主窗口、弹出菜单用菜单自己的窗口），**把整个线程的捕获钉在那个窗口上**；一直钉到循环
+//    结束之后的 menu.c:4343 才解开。
+//  · 这个循环还**替应用派发消息**：menu.c:4148 用 `NtUserPeekMessage(&msg, 0, 0, 0, ...)` 取
+//    「任何窗口的任何消息」，凡是不属于菜单的就在 menu.c:4330-4331 `NtUserDispatchMessage()`
+//    直接派发出去。所以「点关闭框」触发的 WM_CLOSE 是在**菜单循环内部**进到 MainWndProc 的
+//    （menu.c:4345 的注释写的就是这个场景：dropdown 还在、关闭框被点）。
+//  · 于是 WM_CLOSE 里建对话框 = 在菜单循环内部开一个模态循环，而此刻 win32u/message.c 的
+//    process_mouse_message 开头依然是
+//        if (info.hwndCapture) { hittest = HTCLIENT; msg->hwnd = info.hwndCapture; }
+//    ——捕获钉在菜单/主窗口上，**整个线程的鼠标消息都被改送到那里**，对话框的按钮永远收不到；
+//    键盘路径（process_keyboard_message）不查捕获，所以回车 / Esc 一切正常。
+//  · 应用侧**没法**自救式地解开捕获：server/queue.c:3878-3883 明确拒绝
+//        /* if in menu mode, reject all requests to change focus, except if the menu bit is set */
+//        if (input_shm->menu_owner && !(req->flags & CAPTURE_MENU)) { set_error(STATUS_ACCESS_DENIED); return; }
+//    ReleaseCapture() / SetCapture() 发的都是 flags = 0 → 一律被拒（Windows 也是这个语义：菜单
+//    期间只有菜单能改捕获）。
+//
+// 所以唯一的解法是：**先请菜单循环出去，再隔一次消息派发建对话框**。
+//  · EndMenu()（user32.spec:464 → NtUserEndMenu）在 menu.c:4682-4696 里做的是
+//    `exit_menu = TRUE` + `NtUserPostMessage(top_popup, WM_CANCELMODE, 0, 0)`；而菜单循环在
+//    menu.c:4167 专门盯着 WM_CANCELMODE 收摊 —— 这是官方取消路径，Wine 自己的测试
+//    （dlls/user32/tests/msg.c:20401/20422）就是在窗口过程里这么调的。
+//  · EndMenu() 只是**投递**一条消息，循环必须等我们**从窗口过程返回**之后才能看到它 —— 所以
+//    绝不能在这条路径上同步建对话框。顺序是：先 EndMenu()、再 PostMessage 一条自己的消息、
+//    然后立刻返回。等菜单循环收到 WM_CANCELMODE → 解开捕获（4343）→ 销毁菜单窗口（4359）→
+//    退出，我们那条消息才会被自己的消息循环取到，那时捕获已经是干净的。消息队列是 FIFO，
+//    WM_CANCELMODE 必定排在我们那条消息前面。
+//  · 两个反面教训，别再走一遍：
+//    ① 「只把对话框推迟一次派发」**不**够用 —— 那个循环会把我们推迟的消息也捞出来派发，
+//       所以 EndMenu() 才是关键，推迟只是为了不与当前这次派发抢跑。
+//    ② 菜单项命令（WM_COMMAND）**不**需要这层处理：exec_focused_item 是 PostMessage
+//       （menu.c:3499/3507），且它会让 exit_menu 置真、循环先退出、捕获先解开，然后才轮到
+//       我们的 WM_COMMAND —— 时序本来就是安全的。
+#define MSG_DEFERRED_EXIT_CONFIRM (WM_APP + 0x100)
+static bool exitConfirmPending = false;
+
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
         case ID_EDIT_CUT:
@@ -438,9 +480,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             break;
         }
-        case WM_CLOSE: {
-            if (MessageBox(NULL, lc_str.msg_confirm_exit_app, lc_str.confirm_exit, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        case MSG_DEFERRED_EXIT_CONFIRM: {
+            // 推迟过一次的退出确认：此刻菜单循环已经收摊、线程捕获也解开了（见本文件上方长注释）。
+            // owner 必须给主窗口、不能用 NULL：Wine 的 DIALOG_CreateIndirect 只在 owner 非空时才走
+            // 「禁用 owner + 记下 *modal_owner」这条模态路径（user32/dialog.c:582-601）；owner = NULL
+            // 时这个框就是一个无归属的顶层窗口 —— 主窗口照旧可点（还能点出第二个确认框），
+            // WM_TRANSIENT_FOR 也没有，层级与焦点全靠窗口管理器「尽力而为」。
+            int answer = MessageBox(hwndMain, lc_str.msg_confirm_exit_app, lc_str.confirm_exit,
+                                    MB_YESNO | MB_ICONQUESTION);
+            // 放在 MessageBox 之后才复位：确认框期间的重复 WM_CLOSE 一律被上面的标志位吃掉
+            exitConfirmPending = false;
+            if (answer == IDYES) {
                 PostQuitMessage(0);
+            }
+            return 0;
+        }
+        case WM_CLOSE: {
+            // 这里**绝不能**同步建对话框：菜单循环可能正跑着并持有本线程的捕获（见本文件上方那段
+            // 说明），此时建出来的确认框，按钮会永远收不到点击（键盘却正常）。
+            // 正确做法：先 EndMenu() 把菜单循环请出去，再隔一次消息派发去问。
+            if (!exitConfirmPending) {
+                exitConfirmPending = true;
+                EndMenu();   // 没有菜单在跟踪时是空操作（NtUserEndMenu 里 top_popup 为空就直接返回）
+                PostMessage(hwnd, MSG_DEFERRED_EXIT_CONFIRM, 0, 0);
             }
             return 0;
         }       
