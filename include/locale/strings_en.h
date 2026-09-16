@@ -146,6 +146,9 @@ static inline void loadStrings_en() {
     lc_str.icon_size = L"Icon Size";
     lc_str.label_lines = L"File Name Lines";
     lc_str.label_lines_auto = L"Unlimited (auto fit)";
+    // Details view options (the drive usage display only affects the Size
+    // column, which only exists in the details view)
+    lc_str.details_view = L"Details View";
     lc_str.drive_usage_bar_graph = L"Graphical Usage Bar";
     lc_str.drive_usage_bar_total = L"Total Size Only";
     lc_str.drive_usage_bar_none = L"Hidden";

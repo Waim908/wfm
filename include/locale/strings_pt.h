@@ -144,6 +144,9 @@ static inline void loadStrings_pt() {
     lc_str.icon_size = L"Tamanho dos Ícones";
     lc_str.label_lines = L"Linhas do Nome";
     lc_str.label_lines_auto = L"Ilimitado (auto ajuste)";
+    // Opções da visualização de detalhes (o uso do disco só afeta a coluna
+    // "Tamanho", que só existe nessa visualização)
+    lc_str.details_view = L"Visualização de Detalhes";
     lc_str.drive_usage_bar_graph = L"Barra Gráfica de Uso";
     lc_str.drive_usage_bar_total = L"Apenas Tamanho Total";
     lc_str.drive_usage_bar_none = L"Oculto";

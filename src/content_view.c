@@ -509,6 +509,7 @@ extern HMENU hMenuIconView;
 extern HMENU hMenuIconSize;
 extern HMENU hMenuLines;
 extern HMENU hMenuDriveBar;
+extern HMENU hMenuDetailsView;
 
 HWND hwndContentView = NULL;
 
@@ -1930,6 +1931,17 @@ void updateIconViewMenuCheckmarks(void) {
 }
 
 void updateDriveBarMenuCheckmarks(void) {
+    // 磁盘占用显示只作用于驱动器行的「大小」列 —— formattedSize 上屏只有两处：
+    // 自绘那条长度条（contentViewNotify 的 CDDS_SUBITEM，report 视图才有子项阶段）
+    // 和 LVN_GETDISPINFO 的 COLUMN_SIZE_IDX，两者都只在详细信息视图里发生。
+    // 图标视图/列表视图下这组设置**连生效的地方都没有**，所以整组挂在
+    // 「详细信息视图」父项下，并在非详细信息视图时把这个父项置灰 ——
+    // 做法与「大图标视图」父项一致（灰 popup 项就足以让它弹不开，依据见
+    // updateIconViewMenuCheckmarks 里的注释）。
+    if (hMenuView && hMenuDetailsView) {
+        EnableMenuItem(hMenuView, (UINT)(UINT_PTR)hMenuDetailsView,
+                       MF_BYCOMMAND | (viewStyle == STYLE_DETAILS ? MF_ENABLED : MF_GRAYED));
+    }
     if (!hMenuDriveBar) return;
     UINT check;
     switch (driveBarMode) {
@@ -3596,6 +3608,8 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     // 「大图标视图」父项的可用/置灰状态，切换视图必须补这一次刷新。
     updateViewMenuCheckmarks();
     updateIconViewMenuCheckmarks();
+    // 同理：「详细信息视图」父项（磁盘占用显示）也要按新视图刷新可用状态。
+    updateDriveBarMenuCheckmarks();
 }
 
 static void saveViewStyle(void) {

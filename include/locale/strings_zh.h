@@ -144,6 +144,8 @@ static inline void loadStrings_zh() {
     lc_str.icon_size = L"图标大小";
     lc_str.label_lines = L"文件名行数";
     lc_str.label_lines_auto = L"无限（自动适配）";
+    // 详细信息视图选项（磁盘占用只作用于「大小」列，而这一列只有详细信息视图才有）
+    lc_str.details_view = L"详细信息视图";
     lc_str.drive_usage_bar_graph = L"图形化占用条";
     lc_str.drive_usage_bar_total = L"仅总容量";
     lc_str.drive_usage_bar_none = L"不显示";

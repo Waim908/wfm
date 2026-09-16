@@ -25,6 +25,10 @@ HMENU hMenuIconView = NULL;
 HMENU hMenuIconSize = NULL;
 HMENU hMenuLines = NULL;
 HMENU hMenuDriveBar = NULL;
+// 「查看 → 详细信息视图」子菜单。磁盘占用显示只作用于「大小」列，而这一列只有
+// 详细信息视图才有 —— 所以归到这个明确点明范围的父项下（与「大图标视图」同一做法），
+// 非详细信息视图下整个父项置灰（content_view.c 的 updateDriveBarMenuCheckmarks 负责）。
+HMENU hMenuDetailsView = NULL;
 static wchar_t currentLocale[16] = {0};
 
 bool g_showHiddenFiles = false;
@@ -684,14 +688,6 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
     AppendMenu(hmView, MF_STRING, ID_VIEW_SHOW_HIDDEN, lc_str.show_hidden_files);
 
-    // 驱动器"大小"列的磁盘占用显示模式（图形条 / 仅总容量 / 不显示）
-    HMENU hmDriveBar = CreatePopupMenu();
-    hMenuDriveBar = hmDriveBar;
-    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR, lc_str.drive_usage_bar_graph);
-    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_TOTAL, lc_str.drive_usage_bar_total);
-    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_NONE, lc_str.drive_usage_bar_none);
-    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmDriveBar, lc_str.drive_usage_bar);
-
     HMENU hmFolderSort = CreatePopupMenu();
     hMenuFolderSort = hmFolderSort;
     AppendMenu(hmFolderSort, MF_STRING, ID_VIEW_FOLDER_CLASSIC, lc_str.folder_pos_classic);
@@ -725,6 +721,21 @@ static void createMainMenu() {
     AppendMenu(hmIconView, MF_POPUP, (UINT_PTR)hmLines, lc_str.label_lines);
 
     AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmIconView, lc_str.icon_view);
+
+    // 详细信息视图设置：磁盘占用显示（图形条 / 仅总容量 / 不显示）只作用于「大小」
+    // 列，而这一列只有详细信息视图才有；图标视图/列表视图下它连显示的地方都没有，
+    // 所以整组挂在这个点明范围的父项下，非详细信息视图时父项置灰。
+    HMENU hmDetailsView = CreatePopupMenu();
+    hMenuDetailsView = hmDetailsView;
+
+    HMENU hmDriveBar = CreatePopupMenu();
+    hMenuDriveBar = hmDriveBar;
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR, lc_str.drive_usage_bar_graph);
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_TOTAL, lc_str.drive_usage_bar_total);
+    AppendMenu(hmDriveBar, MF_STRING, ID_VIEW_DRIVE_BAR_NONE, lc_str.drive_usage_bar_none);
+    AppendMenu(hmDetailsView, MF_POPUP, (UINT_PTR)hmDriveBar, lc_str.drive_usage_bar);
+
+    AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmDetailsView, lc_str.details_view);
 
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
 #ifdef USE_LIBCDIO

@@ -273,6 +273,7 @@ struct LC_STR {
     wchar_t* icon_size;
     wchar_t* label_lines;
     wchar_t* label_lines_auto;
+    wchar_t* details_view;
     wchar_t* drive_usage_bar;
     wchar_t* drive_usage_bar_graph;
     wchar_t* drive_usage_bar_total;
