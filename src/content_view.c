@@ -3987,13 +3987,20 @@ static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW,
         }
     }
 
-    // If no alpha (common Wine bug for multi-icon EXEs), use AND mask
+    // If no alpha (common Wine bug for multi-icon EXEs), use AND mask.
+    //
+    // 掩码不是一段独立数据，它就是**同一个 DIB 的后半幅**：行序与 XOR 位图完全一致
+    // （biHeight 为正 = 自下而上，文件第 0 行是图像最下面一行）。以前这里漏了翻转
+    // —— XOR 翻了、掩码没翻 —— 于是「本该透明的背景」按镜像行去查：查不到的那些
+    // 格子保持不透明，露出 XOR 里的背景色（调色板 0 = 黑），这就是「exe 图标带黑边」
+    // 的根因（AkelPad 的 48x48 帧最明显：左侧一整块黑三角 + 上下两排黑齿）。
+    // Wine 侧同样把掩码当普通 DIB 直接交给 StretchDIBits（user32/cursoricon.c 的
+    // create_icon_frame 只是 `bmi_copy->biHeight /= 2` 后原样拷掩码位），与 XOR 同序。
     if (!hasAlpha) {
         for (int y = 0; y < height; y++) {
+            const BYTE* andRow = andData + (size_t)(height - 1 - y) * andRowSize;
             for (int x = 0; x < width; x++) {
-                int andByteIdx = y * (int)andRowSize + (x / 8);
-                int andBitIdx = 7 - (x % 8);
-                BOOL transparent = (andData[andByteIdx] >> andBitIdx) & 1;
+                BOOL transparent = (andRow[x / 8] >> (7 - (x % 8))) & 1;
 
                 int px = (y * width + x) * 4;
                 if (transparent) {
