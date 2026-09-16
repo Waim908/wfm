@@ -2645,11 +2645,6 @@ static void loadItemData(struct ListItem* item) {
 
     if (node->type == TYPE_FILE) {
         formatFileSize(item->size, item->formattedSize);
-        SYSTEMTIME systemTime = {0};
-        FILETIME localFiletime;
-        if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
-            formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
-        }
     }
     else if (node->type == TYPE_DRIVE) {
         wchar_t path[MAX_PATH] = {0};
@@ -2661,6 +2656,18 @@ static void loadItemData(struct ListItem* item) {
             item->driveTotalBytes = totalBytes.QuadPart;
             item->driveFreeBytes = freeBytesAvail.QuadPart;
             formatDriveSizeText(item);
+        }
+    }
+
+    // 修改日期：文件与**文件夹**都显示。目录的 ftLastWriteTime 在枚举时就已经拿到
+    // （FindNextFile 一并填好，见 file_node.c），所以这里对文件夹做的事与对文件完全一样 ——
+    // 两次时间转换 + 一次格式化，不多调任何 API，代价与「可见行数」成正比而不是目录规模。
+    // 固定节点（驱动器 / 桌面 / 文档 / 用户 / 计算机 / 书签）没有真实的修改时间，不显示。
+    if ((node->type == TYPE_FILE || node->type == TYPE_DIR) && !isZeroFileTime(&item->modifiedTime)) {
+        SYSTEMTIME systemTime = {0};
+        FILETIME localFiletime;
+        if (FileTimeToLocalFileTime(&item->modifiedTime, &localFiletime) && FileTimeToSystemTime(&localFiletime, &systemTime)) {
+            formatModifiedDate(systemTime.wMonth, systemTime.wDay, systemTime.wYear, systemTime.wHour, systemTime.wMinute, item->formattedDate, 32);
         }
     }
 
@@ -2901,8 +2908,12 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     case COLUMN_SIZE_IDX:
                         nmlvdi->item.pszText = (item->node->type == TYPE_FILE || item->node->type == TYPE_DRIVE) ? item->formattedSize : L"";
                         break;
+                    // 日期：文件与**文件夹**都显示 —— 目录的 ftLastWriteTime 枚举时就已拿到（见
+                    // file_node.c），代价与文件完全相同。固定节点（驱动器 / 桌面 / 文档 / 用户 /
+                    // 计算机 / 书签）没有真实修改时间，保持空白（formattedDate 空串）。
                     case COLUMN_DATE_IDX:
-                        nmlvdi->item.pszText = item->node->type == TYPE_FILE ? item->formattedDate : L"";
+                        nmlvdi->item.pszText = (item->node->type == TYPE_FILE || item->node->type == TYPE_DIR)
+                                               ? item->formattedDate : L"";
                         break;
                     case COLUMN_PATH_IDX: {
                         if (!item->path) {
@@ -3037,8 +3048,9 @@ static struct FileNode* enumChildrenForSearch(struct SearchNodePool* pool, struc
             filesize.LowPart = wfd.nFileSizeLow;
             filesize.HighPart = wfd.nFileSizeHigh;
             child->size = filesize.QuadPart;
-            memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
         }
+        // 与 file_node.c 的 buildChildNodes 保持一致：日期对目录也取（FindNextFile 已经填好）。
+        memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
 
         if (!first) first = child;
         if (last) last->sibling = child;

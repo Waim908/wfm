@@ -136,6 +136,13 @@ static inline void formatModifiedDate(int month, int day, int year, int hour, in
     swprintf_s(result, size, L"%02d/%02d/%04d %02d:%02d", month, day, year, hour, minute);
 }
 
+// FILETIME 是否为空值（即 1601-01-01）。只有真的枚举过的文件系统条目才有 modifiedTime，
+// 固定节点（驱动器 / 桌面 / 文档 / 用户 / 计算机 / 书签）是 0；空值走时间转换会算出 1601 年
+// 那种荒谬日期，所以显示前先挡一下 —— 两次比较，免费。
+static inline bool isZeroFileTime(const FILETIME* ft) {
+    return ft->dwLowDateTime == 0 && ft->dwHighDateTime == 0;
+}
+
 static inline wchar_t* getFileExtension(wchar_t* path) {
     wchar_t* ext = wcsrchr(path, L'.');
     return ext && *ext++ != L'\0' ? ext : NULL;

@@ -131,8 +131,12 @@ void buildChildNodes(struct FileNode* parent, bool onlyDirs) {
                 filesize.LowPart = wfd.nFileSizeLow;
                 filesize.HighPart = wfd.nFileSizeHigh;
                 child->size = filesize.QuadPart;
-                memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
             }
+
+            // 修改日期对**目录同样成立**：FindNextFile 已经连同 ftLastWriteTime 一起填好了
+            // WIN32_FIND_DATA，取它不需要多调任何 API（与上面的大小不同，那只有文件有）。
+            // 所以这一步对文件和文件夹都做，代价只是每个目录项多一次 8 字节拷贝。
+            memcpy(&child->modifiedTime, &wfd.ftLastWriteTime, sizeof(FILETIME));
             
             if (!firstChild) firstChild = child;
             if (lastChild) lastChild->sibling = child;
