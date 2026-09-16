@@ -198,10 +198,18 @@ void preloadIcons() {
             globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
             IMAGE_ICON, 16, 16, 0);
     }
-    // 系统图标只在启动时各提取一次，之后运行期直接用缓存
-    uiIcons[ICON_CMD] = loadIconFromSystemExe(L"cmd.exe", FALSE);
-    uiIcons[ICON_EXPLORER] = loadIconFromSystemExe(L"explorer.exe", TRUE);
     startupMark("  icons: LoadImage x12");
+}
+
+// 工具栏最右两个按钮（CMD / Explorer）要取系统 exe 的真实图标：走自有 PE 解析器读
+// cmd.exe / explorer.exe 一次，取不到再退 shell 关联图标。这是原先 preloadIcons 里
+// 最贵的一段（一次 PE 解析），而它只影响那两个按钮的图案 —— 所以从 preloadIcons 拆出来，
+// 交给 toolbar.c 的 appendShellExeToolIcons() 在首帧之后补，不占「等窗口」的时间。
+// 用 uiIcons 的现值判空，重复调用不会重复提取（appendShellExeToolIcons 可能被多次触发）。
+void loadShellExeIcons(void) {
+    if (!uiIcons[ICON_CMD])      uiIcons[ICON_CMD]      = loadIconFromSystemExe(L"cmd.exe", FALSE);
+    if (!uiIcons[ICON_EXPLORER]) uiIcons[ICON_EXPLORER] = loadIconFromSystemExe(L"explorer.exe", TRUE);
+    startupMark("  icons: cmd + explorer");
 }
 
 void freeUIcons() {
@@ -978,6 +986,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     startupMark("ShowWindow");
     UpdateWindow(hwndMain);
     startupMark("UpdateWindow (first paint)");
+
+    // 工具栏 CMD / Explorer 的真实图标留到这里才提取：preloadIcons 里那一步是启动路径上
+    // 最贵的一段（一次 PE 解析），而它只影响最右两个按钮的图案，晚几十毫秒出现完全无感。
+    // 放在 UpdateWindow 之后，它就不再计入「敲完命令到窗口出现」的等待。
+    appendShellExeToolIcons();
+    startupMark("deferred shell exe icons");
 
     // 启动时对齐一次剪贴板相关 UI：菜单里的「粘贴 / 粘贴快捷方式 / 清空剪贴板」、
     // 工具栏粘贴按钮、状态栏来源指示，全部由 CF_HDROP 是否可用来决定。

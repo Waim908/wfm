@@ -122,6 +122,9 @@ extern HICON uiIcons[NUM_UI_ICONS];
 
 void preloadIcons();
 void freeUIcons();
+// CMD / Explorer 两个工具栏按钮的真实图标（要走一次 PE 解析），从 preloadIcons 拆出来
+// 由 toolbar.c 的 appendShellExeToolIcons() 在首帧之后补 —— 见 main.c 里的说明。
+void loadShellExeIcons(void);
 
 // 启动计时打点（实现见 main.c）。只有 WFM_STARTUP_TRACE 环境变量非空时才写 stderr，
 // 未设时每次调用就是一次 bool 判断，零开销。label 必须是短字面量（<= 24 字符）。
