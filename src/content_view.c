@@ -26,6 +26,11 @@ static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize);
 static HICON createIconFromPixels(const BYTE* pixels, int width, int height);
 static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize);
 static bool stampShortcutOverlay(BYTE* dst, int outSize);
+static void initGdiplus(void);                  // 后台解码 PNG 帧要用；起线程前必须已在主线程调过
+static void iconQueueRender(int id, int size);  // 排一条来源给后台渲染（主线程）
+static void iconRenderPump(void);               // 接管后台渲好的图标（主线程）
+static void iconRenderInvalidate(void);         // 清缓存：作废在途任务与已完成结果
+
 
 // 图标补齐 / 预取（实现见文件末尾同名一节）。绘制路径发现有待补的图标时调它，
 // 因此滚动、键盘翻页、改窗口大小都自动触发，不需要单独接滚动消息。
@@ -116,6 +121,16 @@ static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工�
 #define ICON_SCROLL_FINAL_MS       80    // 松手 / 翻页这类一次性滚动的预渲染预算
 #define ICON_SCROLL_RETRY_MS       15    // 押后期间的重试间隔（走 WM_TIMER，优先级最低）
 
+// ---- 后台图标渲染（见文件末尾「后台图标渲染」一节）----
+// 图标解码的成本大头是**文件 I/O 与 PE 加载**（LoadLibraryExW 映射 + 枚举 RT_GROUP_ICON），
+// 不是像素多少。留在 UI 线程上就只能靠「一帧渲几条」的额度去摊 —— 一帧要渲的独占来源一多，
+// 超出的格子那一帧必然空（「滚动时随机几个图标消失又立马显示」）。搬到独立线程后：绘制帧
+// 只查池、永不等待解码；解码在后台连续跑、吞吐随核数上升；渲好的经完成队列回主线程入池。
+#define ICON_RENDER_QUEUE_MAX      192   // 待渲染请求上限（满了这一轮不排，下一轮再来）
+#define ICON_RENDER_DONE_MAX       64    // 待接管结果上限（满了渲染线程会等，**不丢结果**）
+#define ICON_RENDER_IDLE_MS        30    // 没活干时的等待时长（有活会被 SetEvent 立刻唤醒）
+
+
 // IID_IImageList 不在 mingw 的 libuuid 里，按 wine include/commoncontrols.idl
 // 的 uuid 本地定义
 static const IID wfm_IID_IImageList =
@@ -134,7 +149,10 @@ enum Msg {
     MSG_ADD_ITEMS_BATCH = WM_APP,
     MSG_SEARCH_DONE,
     MSG_NAVIGATE_TO_PATH,
-    MSG_ICON_FILL
+    MSG_ICON_FILL,
+    // 后台渲染线程交回一个图标（见末尾「后台图标渲染」一节）。用 PostMessage 而不是让渲染
+    // 线程直接碰池：ImageList 只能在创建它的线程（也就是 UI 线程）上操作。
+    MSG_ICON_RENDER_DONE
 };
 
 enum ContextMenuType {
@@ -411,6 +429,9 @@ struct IconSource {
     int shellIndex;      // 兜底用的 shell 系统列表索引（ICON_SHELL_UNKNOWN = 还没查过，见 renderShellFallback）
     unsigned kind;
     unsigned flags;
+    // 这条来源已排给后台渲染、结果还没回来。**只由主线程读写**：渲染线程拿的是入队时
+    // 复制进任务结构的快照，所以它与 iconStoreGrow 的 realloc 之间没有任何竞态。
+    volatile LONG renderPending;
 };
 
 static struct IconSource* iconSources = NULL;
@@ -853,10 +874,13 @@ static int poolSlotLookup(struct IconPool* p, int id) {
     return slot;
 }
 
-// 取某条来源在池里的槽位。不在池内就渲染 + 分配槽，池满时 LRU 淘汰独占槽。
-static int poolSlotFor(struct IconPool* p, int id) {
-    if (!p || !iconIdTypeNameValid(id)) return -1;
+// 把**已经渲染好的** HICON 放进池：分配槽位、维护双向映射、池满时 LRU 淘汰。
+// 只做簿记、不渲染 —— 渲染归调用方（同步的 renderIconSource，或后台线程）。
+// 单独拆出来的原因：后台渲好的图标也要走同一套簿记（见 iconRenderPump）。
+static int poolStoreIcon(struct IconPool* p, int id, HICON hicon) {
+    if (!p || !hicon || !iconIdTypeNameValid(id)) return -1;
 
+    // 反向映射数组要覆盖到这个 id（后台路径不经过 poolSlotFor，不能指望它扩过容）
     if (p->idSlotCap < iconSourceCount) {
         int newCap = iconSourceCount + 64;
         int* tmp = realloc(p->idSlot, (size_t)newCap * sizeof(int));
@@ -865,11 +889,6 @@ static int poolSlotFor(struct IconPool* p, int id) {
         p->idSlot = tmp;
         p->idSlotCap = newCap;
     }
-    int ready = poolSlotLookup(p, id);
-    if (ready >= 0) return ready;
-
-    HICON hicon = renderIconSource(id, p->size);
-    if (!hicon) return -1;
 
     int slot;
     if (p->filled < p->slotCount) {
@@ -898,13 +917,15 @@ static int poolSlotFor(struct IconPool* p, int id) {
                 if (victim < 0 || p->slotTick[i] < p->slotTick[victim]) victim = i;
             }
         }
-        if (victim < 0) { DestroyIcon(hicon); return -1; }
-        // 被顶掉的图标要同时作废它的反向映射，否则它会一直命中一个装了别人图案的槽位
+        if (victim < 0) return -1;
+        // 被顶掉的图标要同时作废它的反向映射，否则它会一直命中一个装了别人图案的槽位；
+        // 它的在途标记也要清掉，这样下次被绘制时才会重新排给后台渲染。
         int oldOwner = p->slotId[victim];
         if (oldOwner > 0 && oldOwner <= p->idSlotCap) p->idSlot[oldOwner - 1] = -1;
+        if (oldOwner > 0 && oldOwner <= iconSourceCount && iconSources)
+            iconSources[oldOwner - 1].renderPending = 0;
         slot = ImageList_ReplaceIcon(p->himl, victim, hicon);
     }
-    DestroyIcon(hicon);
     // 槽位必须落在池内。ImageList_AddIcon 理论上只返回有效索引，但下面两行是**裸数组写**，
     // 簿记一旦出错就是堆越界写 —— 宁可这次不画，也不要写坏池。
     if (slot < 0 || slot >= p->slotCount) return -1;
@@ -913,6 +934,290 @@ static int poolSlotFor(struct IconPool* p, int id) {
     p->slotTick[slot] = ++p->tick;
     p->idSlot[id - 1] = slot;
     return slot;
+}
+
+// 取某条来源在池里的槽位。
+//   allowSync = true  → 查不到就**当场渲染**（绘制路径额度内的分支用，保住那一帧不留空格）
+//   allowSync = false → 查不到就**排给后台渲染**并返回 -1（补齐 / 预取用，不占 UI 线程）
+static int poolSlotFor(struct IconPool* p, int id, bool allowSync) {
+    if (!p || !iconIdTypeNameValid(id)) return -1;
+
+    int ready = poolSlotLookup(p, id);
+    if (ready >= 0) return ready;
+
+    // 异步：解码交给后台线程，这一帧先空着。渲好后 iconRenderPump() 会建 HICON、分配槽位、
+    // 把缺过图标的区间重画一次 —— 于是补齐/预取不再占用 UI 线程的任何时间。
+    if (!allowSync) { iconQueueRender(id, p->size); return -1; }
+
+    HICON hicon = renderIconSource(id, p->size);
+    if (!hicon) return -1;
+    int slot = poolStoreIcon(p, id, hicon);
+    DestroyIcon(hicon);
+    return slot;
+}
+
+
+// ===== 后台图标渲染 =====
+//
+// 为什么要有它：图标解码是毫秒级的**同步**操作，而它的成本大头是文件 I/O 与 PE 加载，不是像素
+// 多少。留在 UI 线程上时，一帧能渲几条只能靠额度摊 —— 超出的格子那一帧必然空，等补齐渲好再
+// 重画一次，用户看到的就是「滚动时随机几个图标消失又立马显示」。搬到独立线程后：
+//   · 绘制帧只查池、永不等待解码 → 拖动不再被解码拖住；
+//   · 解码在后台连续跑、吞吐随核数上升（原来是与绘制严格串行的单线程）；
+//   · 渲好的经完成队列回主线程入池，再由既有的「补到就重画缺过的区间」画上屏。
+//
+// 线程边界（本节最重要的约束）：
+//   · 后台**只做纯解码**：解 PE/ICO 的帧 → 缩放到目标尺寸 → 叠角标。读文件、分配内存、算像素。
+//   · 后台**绝不**碰这三样：shell 图标 API、ImageList、iconSources。前两者只能在 UI 线程；
+//     来源表则可能被 iconStoreGrow 的 realloc 搬走 —— 所以入队时把字段**快照**进任务结构，
+//     渲染线程只认这份快照，与来源表彻底解耦。
+//   · 主线程负责：建 HICON、分配槽位、维护 LRU、重画。
+// 代价（如实说）：图标可能晚几十毫秒才出现 —— 换掉了原来「被截掉就一帧空白」的行为。
+struct IconRenderJob {
+    int id;
+    int size;
+    unsigned generation;    // 与当前代次不符的结果一律丢弃（中途清过缓存）
+    unsigned kind;
+    unsigned flags;
+    int iconIndex;
+    wchar_t iconFile[MAX_PATH];
+};
+
+struct IconRenderDone {
+    int id;
+    int size;
+    unsigned generation;
+    unsigned flags;
+    BYTE* pixels;           // 已缩放到 size 的 32bpp 方形像素；NULL = 后台拿不到（需主线程兜底）
+};
+
+static struct IconRenderJob  iconRenderJobs[ICON_RENDER_QUEUE_MAX];
+static int iconRenderJobHead, iconRenderJobTail, iconRenderJobCount;
+static struct IconRenderDone iconRenderDone[ICON_RENDER_DONE_MAX];
+static int iconRenderDoneHead, iconRenderDoneTail, iconRenderDoneCount;
+static CRITICAL_SECTION iconRenderLock;
+static bool iconRenderLockReady = false;
+static unsigned iconRenderGeneration = 1;   // 清缓存时 ++：作废所有在途任务
+static HANDLE iconRenderThread = NULL;
+static HANDLE iconRenderWake = NULL;
+static volatile LONG iconRenderStop = 0;
+
+// 后台的纯解码：与 renderIconSource 的 PE/ICO 分支同源，只是不碰 shell、不建 HICON。
+// 返回**已缩放到目标尺寸**的像素缓冲（调用方负责 free）；NULL = 这条来源后台解不出来。
+static BYTE* renderIconPixelsOffThread(const struct IconRenderJob* job) {
+    if (!job || job->size <= 0 || !job->iconFile[0]) return NULL;
+
+    int srcSize = 0;
+    BYTE* src = NULL;
+    if (job->kind == ICONSRC_ICO) {
+        src = extractIcoIconPixels(job->iconFile, job->size, &srcSize);
+    }
+    else {
+        src = extractPeIconPixels(job->iconFile, job->iconIndex, job->size, &srcSize);
+        // 图标组序号越界（注册表里的坐标常带一个文件里并不存在的序号）：退回主图标
+        if (!src && job->iconIndex != 0)
+            src = extractPeIconPixels(job->iconFile, 0, job->size, &srcSize);
+    }
+    if (!src) return NULL;
+
+    // 原生尺寸就是目标尺寸时 scalePixelsOwned 直接把缓冲交回（省一次整幅 memcpy）
+    BYTE* scaled = scalePixelsOwned(src, srcSize, job->size);
+    if (!scaled) return NULL;
+
+    // 角标叠在最终尺寸上；合成失败不影响主图标，只是少个箭头
+    if (job->flags & ICONSRC_OVERLAY) stampShortcutOverlay(scaled, job->size);
+    return scaled;
+}
+
+static DWORD WINAPI iconRenderTask(LPVOID param) {
+    (void)param;
+    for (;;) {
+        if (InterlockedCompareExchange(&iconRenderStop, 0, 0)) break;
+
+        struct IconRenderJob job;
+        bool have = false;
+        EnterCriticalSection(&iconRenderLock);
+        if (iconRenderJobCount > 0) {
+            job = iconRenderJobs[iconRenderJobHead];
+            iconRenderJobHead = (iconRenderJobHead + 1) % ICON_RENDER_QUEUE_MAX;
+            iconRenderJobCount--;
+            have = true;
+        }
+        LeaveCriticalSection(&iconRenderLock);
+
+        if (!have) {
+            // 没活干就睡；有活会被 SetEvent 立刻叫醒。睡醒再验一次退出标志。
+            WaitForSingleObject(iconRenderWake, ICON_RENDER_IDLE_MS);
+            continue;
+        }
+
+        BYTE* pixels = renderIconPixelsOffThread(&job);
+
+        // 结果入队。**满了就等着，绝不丢弃** —— 丢掉的那条对应的 renderPending 就再也清不掉，
+        // 那条来源从此不会被排进来（变成永久缺图标）。
+        for (;;) {
+            EnterCriticalSection(&iconRenderLock);
+            if (iconRenderDoneCount < ICON_RENDER_DONE_MAX) {
+                struct IconRenderDone* d = &iconRenderDone[iconRenderDoneTail];
+                d->id = job.id;
+                d->size = job.size;
+                d->generation = job.generation;
+                d->flags = job.flags;
+                d->pixels = pixels;
+                iconRenderDoneTail = (iconRenderDoneTail + 1) % ICON_RENDER_DONE_MAX;
+                iconRenderDoneCount++;
+                LeaveCriticalSection(&iconRenderLock);
+                break;
+            }
+            LeaveCriticalSection(&iconRenderLock);
+            if (InterlockedCompareExchange(&iconRenderStop, 0, 0)) { free(pixels); return 0; }
+            Sleep(2);
+        }
+
+        HWND hwnd = hwndContentView;
+        if (hwnd && IsWindow(hwnd)) PostMessage(hwnd, MSG_ICON_RENDER_DONE, 0, 0);
+    }
+    return 0;
+}
+
+// 惰性创建渲染线程。必须在**主线程**调用：它顺带保证 GDI+ 已初始化（PNG 压缩帧的解码要走
+// GDI+，而 GdiplusStartup 只应由单一线程初始化一次）。
+static void iconRenderStart(void) {
+    if (iconRenderThread) return;
+
+    if (!iconRenderLockReady) {
+        InitializeCriticalSection(&iconRenderLock);
+        iconRenderLockReady = true;
+    }
+    initGdiplus();
+
+    if (!iconRenderWake) iconRenderWake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!iconRenderWake) return;
+
+    iconRenderStop = 0;
+    iconRenderThread = CreateThread(NULL, 0, iconRenderTask, NULL, 0, NULL);
+    if (!iconRenderThread) {
+        CloseHandle(iconRenderWake);
+        iconRenderWake = NULL;
+    }
+}
+
+// 排一条来源给后台渲染。**只由主线程调用**；已在途的（renderPending）不重复排。
+// 没有 iconFile 的来源（ICONSRC_SHELL）后台做不了，直接返回让调用方走同步路径。
+static void iconQueueRender(int id, int size) {
+    if (id <= 0 || size <= 0 || id > iconSourceCount || !iconSources) return;
+
+    struct IconSource* s = &iconSources[id - 1];
+    if (s->renderPending) return;
+    if (!s->iconFile || !s->iconFile[0]) return;
+    if (s->kind != ICONSRC_FILE && s->kind != ICONSRC_ICO) return;
+
+    iconRenderStart();
+    if (!iconRenderThread) return;
+
+    EnterCriticalSection(&iconRenderLock);
+    if (iconRenderJobCount >= ICON_RENDER_QUEUE_MAX) { LeaveCriticalSection(&iconRenderLock); return; }
+    struct IconRenderJob* j = &iconRenderJobs[iconRenderJobTail];
+    memset(j, 0, sizeof(*j));
+    j->id = id;
+    j->size = size;
+    j->generation = iconRenderGeneration;
+    j->kind = s->kind;
+    j->flags = s->flags;
+    j->iconIndex = s->iconIndex;
+    // 路径必须在这里**复制**进任务：iconSources 会被 iconStoreGrow 的 realloc 搬走，
+    // 而且 clearIconCaches 会整个释放来源表 —— 渲染线程只认这份快照。
+    wcsncpy(j->iconFile, s->iconFile, MAX_PATH - 1);
+    j->iconFile[MAX_PATH - 1] = L'\0';
+    iconRenderJobTail = (iconRenderJobTail + 1) % ICON_RENDER_QUEUE_MAX;
+    iconRenderJobCount++;
+    // 在途标记与入队放在同一个临界区里：两者必须原子，否则渲染线程可能在标记盖上之前
+    // 就完成并被主线程接管（清掉的标记随后又被盖上 → 这条来源再也不排队 = 永久缺图标）。
+    s->renderPending = 1;
+    LeaveCriticalSection(&iconRenderLock);
+
+    SetEvent(iconRenderWake);
+}
+
+// 接管后台渲好的图标：建 HICON → 入池 → 把缺过图标的区间重画一次。
+// **只由主线程调用**（ImageList 与来源表都只有主线程能碰）。
+static void iconRenderPump(void) {
+    if (!iconRenderThread || !iconRenderLockReady) return;
+
+    bool adopted = false;
+    for (;;) {
+        struct IconRenderDone done;
+        EnterCriticalSection(&iconRenderLock);
+        if (iconRenderDoneCount <= 0) { LeaveCriticalSection(&iconRenderLock); break; }
+        done = iconRenderDone[iconRenderDoneHead];
+        iconRenderDone[iconRenderDoneHead].pixels = NULL;
+        iconRenderDoneHead = (iconRenderDoneHead + 1) % ICON_RENDER_DONE_MAX;
+        iconRenderDoneCount--;
+        LeaveCriticalSection(&iconRenderLock);
+
+        // 代次不符（中途清过缓存）：这条结果的 id 可能已被新来源复用，直接丢
+        if (done.generation != iconRenderGeneration) { free(done.pixels); continue; }
+
+        // 尺寸不符（用户切了图标尺寸）：这条结果对不上任何在用池，丢掉
+        struct IconPool* p = currentIconPool();
+        if (!p || p->himl != currentImageList || p->size != done.size) {
+            free(done.pixels);
+            if (done.id > 0 && done.id <= iconSourceCount && iconSources)
+                iconSources[done.id - 1].renderPending = 0;
+            continue;
+        }
+
+        if (done.id > 0 && done.id <= iconSourceCount && iconSources)
+            iconSources[done.id - 1].renderPending = 0;
+
+        if (!done.pixels) {
+            // 后台解不出来（PE/ICO 里没有可用帧、或那个文件本 prefix 里根本不存在）。这条来源
+            // 还有一条出路：shell 系统列表兜底 —— 那是主线程才能碰的 API，且只在失败路径上
+            // 发生一次（结果缓存在 s->shellIndex），不会成为热点。
+            HICON hFb = renderIconSource(done.id, done.size);
+            if (hFb) {
+                if (poolStoreIcon(p, done.id, hFb) >= 0) adopted = true;
+                DestroyIcon(hFb);
+            }
+            continue;
+        }
+
+        HICON h = createIconFromPixels(done.pixels, done.size, done.size);
+        free(done.pixels);
+        if (!h) continue;
+        if (poolStoreIcon(p, done.id, h) >= 0) adopted = true;
+        DestroyIcon(h);
+    }
+
+    // 与 iconFillRange 里那处重画同一个套路：RedrawItems **不擦背景**（所以不闪），
+    // 限流 40ms 免得把消息队列塞满重绘。
+    if (adopted && hwndContentView) {
+        DWORD now = GetTickCount();
+        if (now - lastIconRepaintTick >= ICON_REPAINT_MIN_MS) {
+            lastIconRepaintTick = now;
+            int first = iconMissFirst, last = iconMissLast;
+            if (first < 0) first = 0;
+            if (last >= numItems) last = numItems - 1;
+            if (last >= first && numItems > 0) ListView_RedrawItems(hwndContentView, first, last);
+        }
+    }
+}
+
+// 清缓存：作废在途任务与已完成结果。来源表马上要被整个释放，旧结果的 id 会指向新来源，
+// 那会让一个文件显示成别人的图标 —— 所以要在 resetIconStore() 之前调。
+static void iconRenderInvalidate(void) {
+    if (!iconRenderLockReady) return;
+    EnterCriticalSection(&iconRenderLock);
+    iconRenderGeneration++;
+    iconRenderJobCount = 0;
+    iconRenderJobHead = iconRenderJobTail = 0;
+    while (iconRenderDoneCount > 0) {
+        free(iconRenderDone[iconRenderDoneHead].pixels);
+        iconRenderDone[iconRenderDoneHead].pixels = NULL;
+        iconRenderDoneHead = (iconRenderDoneHead + 1) % ICON_RENDER_DONE_MAX;
+        iconRenderDoneCount--;
+    }
+    LeaveCriticalSection(&iconRenderLock);
 }
 
 // 解析并登记条目对应的图标来源，返回图标 id（0 = 失败）。
@@ -1128,7 +1433,7 @@ static int resolveIconId(struct ListItem* item) {
 }
 
 // 条目在当前显示列表里的槽位（-1 = 这次画不出图标）
-static int getIconSlot(struct ListItem* item) {
+static int getIconSlot(struct ListItem* item, bool allowSync) {
     if (!item) return -1;
     int id = resolveIconId(item);
     if (id <= 0) return -1;
@@ -1137,7 +1442,7 @@ static int getIconSlot(struct ListItem* item) {
     // 只在这个池确实挂在控件上时才给出索引：池创建失败时 refreshContentView 会
     // 退回系统列表，那时的 iImage 语义与池内的槽位不对应。
     if (p->himl != currentImageList) return -1;
-    return poolSlotFor(p, id);
+    return poolSlotFor(p, id, allowSync);
 }
 
 // 绘制路径专用的槽位查询：默认**只查已渲染好的槽**，不在这里渲染。唯一的例外是
@@ -1194,7 +1499,7 @@ static int getIconSlotForPaint(struct ListItem* item) {
     if (iconPaintRenderBudget > 0 &&
         (inScrollMessage || nowTick - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS) &&
         nowTick < iconPaintRenderDeadline) {
-        int slot = getIconSlot(item);     // 解析 + 渲染（渲染进入绘制路径的唯一入口）
+        int slot = getIconSlot(item, true);   // 额度内允许当场渲染：保住这一帧不留空格
         if (slot >= 0) {
             iconPaintRenderBudget--;
             return slot;
@@ -1816,7 +2121,13 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             // 缺图标就会再安排一次，所以这里必须允许重新挂号。
             iconFillPosted = false;
             iconFillDispatchTick = GetTickCount();
+            iconRenderPump();   // 兜底：万一某次完成通知没投到，这条路径也能接管结果
             if (iconFillStep()) scheduleIconFill();
+            break;
+        }
+        case MSG_ICON_RENDER_DONE: {
+            // 后台渲好了一批：建 HICON、入池、把缺过图标的区间重画一次。
+            iconRenderPump();
             break;
         }
         case MSG_SEARCH_DONE: {
@@ -5364,6 +5675,8 @@ void clearIconCaches() {
     }
     currentImageList = himlBig;
 
+    // 在途任务与已完成结果一律作废：来源表马上要被整个释放，旧结果的 id 会指向新来源。
+    iconRenderInvalidate();
     resetIconStore();
     for (int i = 0; i < numItems; i++) {
         items[i].icon = 0;
@@ -5490,7 +5803,7 @@ static bool itemIconPainted(struct IconPool* p, struct ListItem* item) {
 // 让第 i 项「该有图标就有图标」。返回 false = 还没就位（这一轮挑不出槽 / 解析还没成功）。
 // 失败只做**退避**（iconTries），不写任何「永久失败」标记：哪几项恰好没就位取决于渲染顺序
 // 与池的状态，写死一次就是那个文件在本目录内永远没有图标。
-static bool itemIconReady(struct IconPool* p, int i) {
+static bool itemIconReady(struct IconPool* p, int i, bool allowSync) {
     struct ListItem* item = &items[i];
     if (!item->node) return true;      // 空占位项：本来就不画图标
     if (!item->loaded) loadItemData(item);
@@ -5503,7 +5816,7 @@ static bool itemIconReady(struct IconPool* p, int i) {
     // 判据是「池里有没有槽」，**不是**「有没有解析出 id」。
     // loadItemData() 早就把 id 解析好了，但槽位只有下面的 getIconSlot() → poolSlotFor()
     // 才会真正去建；拿 id 判断等于把全部待渲染项都跳过 → 池永远是空的，图标一个都不显示。
-    if (getIconSlot(item) < 0) {
+    if (getIconSlot(item, allowSync) < 0) {
         item->iconTries = ICON_RETRY_BACKOFF_ROUNDS;
         return false;
     }
@@ -5617,7 +5930,7 @@ static bool iconPrepareWindow(int top, int budgetMs) {
         if (it->iconTries > 0) continue;  // 退避中：当它已定，别阻塞
         if (itemIconPainted(p, it)) continue;
         if ((int)(GetTickCount() - deadline) >= 0) { ready = false; break; }
-        itemIconReady(p, i);              // 解析 + 渲染；失败会记退避，下一轮被上面跳过
+        itemIconReady(p, i, true);        // 必须同步：这就是「先渲好再滚」的全部意义
         if (!itemIconPainted(p, it) && it->iconTries == 0) ready = false;
     }
     return ready;
@@ -5804,7 +6117,7 @@ static void prewarmSharedIcons(void) {
         if (id <= 0) continue;
         if (poolSlotLookup(p, id) >= 0) continue;      // 这条来源已经在池里了
 
-        if (poolSlotFor(p, id) >= 0) added++;
+        if (poolSlotFor(p, id, true) >= 0) added++;
         if (added >= budgetShared) break;
         if (GetTickCount() >= deadline) break;
     }
@@ -5818,7 +6131,7 @@ static int iconFillIdsCap = 0;
 
 // 补一轮可见区（含绘制上报的项），deadline = 时间预算到点时刻。
 // 返回 true = 范围内还有没就位的（本屏这一帧还画不出来）。
-static bool iconFillRangeInner(DWORD deadline) {
+static bool iconFillRangeInner(DWORD deadline, bool allowSync) {
     struct IconPool* p = currentIconPool();
     if (!p || p->himl != currentImageList) return false;
 
@@ -5883,7 +6196,7 @@ static bool iconFillRangeInner(DWORD deadline) {
         if (lastScrollTick != scrollTickAtEntry) break;       // 用户又在滚了：让位
         if (GetTickCount() >= deadline) break;
         if (poolSlotLookup(p, iconFillIds[k]) >= 0) continue; // 池里已有槽：不必重渲染
-        poolSlotFor(p, iconFillIds[k]);                       // 渲染 + 占一个槽
+        poolSlotFor(p, iconFillIds[k], allowSync);            // 渲染（或排给后台）+ 占一个槽
     }
 
     // ---- 第二步：逐项兜底 ----
@@ -5893,7 +6206,7 @@ static bool iconFillRangeInner(DWORD deadline) {
     // 否则就成了「0 进展却不停投递」的空转。
     bool ready = true;
     for (int i = first; i < last; i++) {
-        if (!itemIconReady(p, i)) ready = false;
+        if (!itemIconReady(p, i, allowSync)) ready = false;
         // 用户又在滚了：让位。滚动期间的画面应当是「池里已有的照常画、少数格子先空着」，
         // 停手后（滚动静默）的绘制会重新安排补齐。
         if (lastScrollTick != scrollTickAtEntry) return true;
@@ -5935,10 +6248,10 @@ static bool iconFillRangeInner(DWORD deadline) {
 // 补齐循环的重入闸：iconFillIds 是静态复用缓冲，重入会让内层覆盖外层正在用的那份
 // （外层那轮就会漏渲几条来源 —— 表现正是「随机几项缺图标」）。重入时让内层直接退出，
 // 外层那轮结束后按正常节奏还会再投递。
-static bool iconFillRange(DWORD deadline) {
+static bool iconFillRange(DWORD deadline, bool allowSync) {
     if (inIconFillRange) return false;
     inIconFillRange = true;
-    bool more = iconFillRangeInner(deadline);
+    bool more = iconFillRangeInner(deadline, allowSync);
     inIconFillRange = false;
     return more;
 }
@@ -5954,7 +6267,7 @@ static bool iconFillStep(void) {
     // 但补齐每轮都刷一次，等于把「一半项还没有图标」的中间状态反复亮出来 —— 滚动时看到的
     // 图标闪，有一半来自这里。画面交给控件自己调度：补进来的图标由 iconFillRange 的
     // 「有进展就重画缺过的区间」（不擦背景）负责呈现。
-    if (iconFillRange(GetTickCount() + ICON_FILL_BUDGET_MS)) return true;
+    if (iconFillRange(GetTickCount() + ICON_FILL_BUDGET_MS, false)) return true;
 
     // 本屏补完（或这几轮实在渲染不出来）：把绘制报告过「缺图标」的区间再重画一次
     // （**不擦背景**，不闪）。补齐过程中每有进展已经重画过一次，这里只是收口，
@@ -5977,7 +6290,7 @@ static void iconFillVisibleSync(int budgetMs) {
     struct IconPool* p = currentIconPool();
     if (!p || p->himl != currentImageList) return;
 
-    if (iconFillRange(GetTickCount() + (DWORD)budgetMs)) {
+    if (iconFillRange(GetTickCount() + (DWORD)budgetMs, true)) {
         scheduleIconFill();     // 没补完：交给异步循环接着补
         return;
     }
@@ -6057,7 +6370,7 @@ static bool iconPrefetchStep(void) {
                 if (p->filled == filledAtEntry) iconPrefetchDoneSize = p->size;
                 return p->filled != filledAtEntry;
             }
-            itemIconReady(p, i);   // 失败也不管：预取不需要「全部就位」的语义
+            itemIconReady(p, i, false);   // 失败也不管：预取不需要「全部就位」的语义
         }
     }
     iconPrefetchDoneSize = p->size;   // 目录两端都走到了：彻底收工
