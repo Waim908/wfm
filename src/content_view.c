@@ -3908,8 +3908,19 @@ static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW,
 
     const BITMAPINFOHEADER* bih = (const BITMAPINFOHEADER*)data;
     int width = bih->biWidth;
+    // biHeight 是「XOR + AND 两幅」的合计高度，每幅各占一半。负数 = 自顶向下 DIB，
+    // 这里不做特判：除 2 后仍是负数，下面的 height <= 0 会把它挡掉，交给 GDI+/Wine
+    // 那条 HICON 路径（它们本来就按 biHeight 的符号选行序）。
     int height = bih->biHeight ? bih->biHeight / 2 : 0;
     int bpp = bih->biBitCount;
+
+    // 只认标准 BITMAPINFOHEADER + BI_RGB，别的形态一律拒绝、交给兜底路径 —— 拒绝是
+    // 安全的（后面还有 GDI+/Wine 的 HICON 路径），硬解才是危险的：
+    //  · biSize 是 PNG 签名（0x474E5089）= Vista+ 的 PNG 压缩帧，后面根本没有调色板；
+    //  · BITMAPCOREHEADER(12) / V4(108) / V5(124) 的字段布局与行步长规则都不同；
+    //  · BI_BITFIELDS(3) 在头部后面多挂 3 个 DWORD 通道掩码，不认它就会把掩码当成
+    //    像素读 —— 整幅颜色错位三个像素，正是「错误图标」的经典长相。
+    if (bih->biSize != sizeof(BITMAPINFOHEADER) || bih->biCompression != BI_RGB) return NULL;
 
     // 尺寸上限：宽高直接来自被解析文件，必须限制，否则下面的乘法会溢出
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096) return NULL;
@@ -3917,6 +3928,7 @@ static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW,
     const BYTE* xorData = data + sizeof(BITMAPINFOHEADER);
     size_t xorRowSize;
 
+    // 行步长一律 DWORD 对齐（1/4/8bpp 是「位行」，每行补到 32 位）
     if (bpp == 32) {
         xorRowSize = (size_t)width * 4;
     } else if (bpp == 24) {
@@ -3925,22 +3937,38 @@ static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW,
         xorRowSize = ((size_t)width + 3) / 4 * 4;
     } else if (bpp == 4) {
         xorRowSize = (((size_t)width + 1) / 2 + 3) / 4 * 4;
+    } else if (bpp == 1) {
+        xorRowSize = ((size_t)width + 31) / 32 * 4;
     } else {
         return NULL;
     }
 
-    // For palettized formats, skip the palette
-    size_t paletteEntries = 0;
-    if (bpp == 8) paletteEntries = 256;
-    else if (bpp == 4) paletteEntries = 16;
-    size_t paletteSize = paletteEntries * 4;
     size_t xorTotalSize = xorRowSize * (size_t)height;
     size_t andRowSize = ((size_t)width + 31) / 32 * 4;
+    size_t andTotalSize = andRowSize * (size_t)height;
 
-    // 边界检查全部用 size_t 计算：旧实现用 int，宽高过大时 xorTotalSize 溢出为小值，
-    // 于是这里检查通过，随后按巨大尺寸越界读取像素
-    size_t requiredSize = sizeof(BITMAPINFOHEADER) + paletteSize + xorTotalSize + andRowSize * (size_t)height;
-    if (requiredSize > dataSize) return NULL;
+    // 色表长度：biClrUsed 优先（上限 256），为 0 才用 2^bpp；>8bpp 没有色表。
+    // 但 biClrUsed 有写错的文件（声明值小于实际写入的项数），所以再用「色表 + XOR +
+    // 掩码必须整体落在资源内」反查一次：按声明值算不下就退回满色表。两个候选都不成立
+    // 才放弃（边界检查全部用 size_t：旧实现用 int，宽高过大时 xorTotalSize 溢出为小值，
+    // 检查通过后按巨大尺寸越界读像素）。
+    size_t paletteSize = 0;
+    {
+        size_t declared = bih->biClrUsed
+            ? (bih->biClrUsed > 256 ? 256 : (size_t)bih->biClrUsed)
+            : (bpp > 8 ? 0 : (size_t)1 << bpp);
+        size_t full = (bpp > 8) ? 0 : (size_t)1 << bpp;
+        size_t candidates[2] = { declared, full };
+        int candidateCount = (declared == full) ? 1 : 2;
+        BOOL found = FALSE;
+        for (int i = 0; i < candidateCount && !found; i++) {
+            if (sizeof(BITMAPINFOHEADER) + candidates[i] * 4 + xorTotalSize + andTotalSize <= dataSize) {
+                paletteSize = candidates[i] * 4;
+                found = TRUE;
+            }
+        }
+        if (!found) return NULL;
+    }
 
     const BYTE* xorPixels = xorData + paletteSize;
     const BYTE* andData = xorPixels + xorTotalSize;
@@ -3982,6 +4010,20 @@ static BYTE* decodeIconDataToPixels(const BYTE* data, DWORD dataSize, int* outW,
                 dstRow[x * 4 + 0] = palette[idx * 4 + 0];
                 dstRow[x * 4 + 1] = palette[idx * 4 + 1];
                 dstRow[x * 4 + 2] = palette[idx * 4 + 2];
+                dstRow[x * 4 + 3] = 255;
+            }
+        } else if (bpp == 1) {
+            // 单色图标：色表恒为「黑, 白」，索引就是它的颜色（XOR 位 1 = 白）。
+            // 必须自己解：这种帧在 Wine 里走 is_dib_monochrome 分支
+            // （user32/cursoricon.c:156，bpp==1 且色表是黑+白），只建 2×高度的掩码位图、
+            // **不建颜色位图** → GetIconInfo 的 hbmColor 为 NULL，我们的 HICON 兜底路径
+            // 连尺寸都拿不到，最后只能退回通用图标。拒绝它 = 系统里所有单色图标全错。
+            const BYTE* palette = xorData;
+            for (int x = 0; x < width; x++) {
+                BYTE bit = (srcRow[x / 8] >> (7 - (x % 8))) & 1;
+                dstRow[x * 4 + 0] = palette[bit * 4 + 0];
+                dstRow[x * 4 + 1] = palette[bit * 4 + 1];
+                dstRow[x * 4 + 2] = palette[bit * 4 + 2];
                 dstRow[x * 4 + 3] = 255;
             }
         }
@@ -4199,7 +4241,13 @@ static HMODULE peOpenIconResource(const wchar_t* pePath, int groupIndex, int des
         const GRPICONDIRENTRY* entry = &grpDir->idEntries[i];
         int w = entry->bWidth ? entry->bWidth : 256;
         int h = entry->bHeight ? entry->bHeight : 256;
-        int side = (w > h) ? w : h;
+        // 非方形帧直接跳过：解码器（要求 w == h）和 HICON 兜底（getIconPixelsSquare）
+        // 都用不了它 —— 选中它这次渲染必然失败、最后退到通用图标。语料里这类帧都是
+        // 「只有 76×24」的工具栏条（跳过前后结局都是退回兜底），但侧边若继续用
+        // max(w,h) 参与比较，它还会在 desired 落进 (32, 76] 时**挤掉**真正可用的
+        // 32×32 方形帧（isBetterIconEntry 优先「不小于目标」），所以要显式排除。
+        if (w != h) continue;
+        int side = w;
         if (bestIndex < 0 ||
             isBetterIconEntry(side, entry->wBitCount, bestSide, bestDepth, desired)) {
             bestIndex = i;
@@ -4353,7 +4401,10 @@ static BYTE* extractIcoIconPixels(const wchar_t* icoPath, int desired, int* outS
             for (WORD i = 0; i < dir->idCount; i++) {
                 int w = entries[i].bWidth ? entries[i].bWidth : 256;
                 int h = entries[i].bHeight ? entries[i].bHeight : 256;
-                int side = (w > h) ? w : h;
+                // 非方形帧跳过（理由同 peOpenIconResource 里的同名判断）：.ico 里
+                // 常混着 76×24 这类工具栏条，而索引图标的文件往往同时带方形帧
+                if (w != h) continue;
+                int side = w;
                 if (bestIndex < 0 ||
                     isBetterIconEntry(side, entries[i].wBitCount, bestSide, bestDepth, desired)) {
                     bestIndex = i;
