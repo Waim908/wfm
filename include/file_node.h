@@ -3,6 +3,10 @@
 
 #include "file_utils.h"
 
+// 文件夹条目数的「还没数过」哨兵。只有真的枚举过那个目录才可能有值（没有「只查数量」的
+// API），所以显示路径见到它就留空、并由后台计数线程按需填充（见 content_view.c）。
+#define CHILD_ITEM_COUNT_UNKNOWN (-1)
+
 struct FileNode {
     wchar_t* name;
     enum FileType type;
@@ -13,6 +17,7 @@ struct FileNode {
     bool isHidden;      // 枚举时记录，供列表灰显隐藏文件（避免在重绘里反复查属性）
     uint64_t size;
     FILETIME modifiedTime;
+    int childItemCount; // 仅目录有意义：该目录里的条目数，CHILD_ITEM_COUNT_UNKNOWN = 未知
 };
 
 void initFileNodes();

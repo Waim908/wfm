@@ -152,7 +152,10 @@ enum Msg {
     MSG_ICON_FILL,
     // 后台渲染线程交回一个图标（见末尾「后台图标渲染」一节）。用 PostMessage 而不是让渲染
     // 线程直接碰池：ImageList 只能在创建它的线程（也就是 UI 线程）上操作。
-    MSG_ICON_RENDER_DONE
+    MSG_ICON_RENDER_DONE,
+    // 后台计数线程交回一个目录的条目数（见「后台文件夹条目数计数」一节）。同样只能 PostMessage：
+    // 结果要写回 FileNode 并让 ListView 重画，两者都只有 UI 线程能做。
+    MSG_FOLDER_COUNT_DONE
 };
 
 enum ContextMenuType {
@@ -182,6 +185,10 @@ struct ListItem {
     FILETIME modifiedTime;
     uint64_t driveTotalBytes;
     uint64_t driveFreeBytes;
+    // 这一格有没有一条**在途**的「文件夹条目数」计数请求（0 = 没有）。
+    // 它同时是结果回主线程时的认领凭据：只有 items[idx].countRequestId 与后台交回来的
+    // requestId 相等，才说明这一格还是当初发出去的那一格（见「后台文件夹条目数计数」一节）。
+    unsigned countRequestId;
 };
 
 // 搜索线程持有的只读节点池。
@@ -242,6 +249,8 @@ static struct FileNode* allocSearchNode(struct SearchNodePool* pool, const wchar
     node->name = wcsdup(name);
     if (!node->name) { free(node); return NULL; }
     node->type = type;
+    // calloc 出来的 0 会被当成「目录里有 0 项」，必须显式改成「未知」
+    node->childItemCount = CHILD_ITEM_COUNT_UNKNOWN;
 
     if (pool->count >= pool->capacity) {
         int newCap = pool->capacity ? pool->capacity * 2 : 64;
@@ -1220,6 +1229,233 @@ static void iconRenderInvalidate(void) {
     LeaveCriticalSection(&iconRenderLock);
 }
 
+// ---------------------------------------------------------------------------
+// 后台「文件夹条目数」计数
+// ---------------------------------------------------------------------------
+//
+// 「大小」列对文件夹显示条目数（如「12 项」）。这件事**不白给**：
+//   · Windows / Wine **没有「只查数量」的 API** —— 要知道一个目录里有几项，只能把它枚举一遍
+//     （FindFirstFile + FindNextFile）。这和「修改日期」那种从 WIN32_FIND_DATA 顺手拷 8 字节
+//     完全不是一个量级，它是真的一次目录读取。
+//   · 所以**绝不能**在 loadItemData 里同步做：它的调用点里有两个（itemIconReady /
+//     iconFillRangeInner）就落在**绘制帧**上，而「绘制路径只查缓存、绝不现算」是图标子系统
+//     那几轮教训换来的规矩。
+// 结构照抄「后台图标渲染」：请求 / 完成两个环形队列 + 事件唤醒 + PostMessage 通知主线程。
+//
+// 结果怎样安全地认回「是哪一行」：任务只带 {requestId, idx}，而 requestId 被**记在
+// items[idx] 这一格上**（ListItem.countRequestId）。回主线程时三条一起验：idx 仍在范围内、
+// items[idx].countRequestId 等于发出去的那个、且该 node 还是目录。中途换目录 / 重排 / 刷新都会
+// 重建 items[]（memset 成 0）→ 验证必然失败 → 结果丢弃。这是**自愈**的：新的一格
+// countRequestId 是 0，下一次 loadItemData 会重新排队。所以既不需要「代次」全局变量，也不会有
+// 图标那边「在途标记清不掉 → 永久缺图标」的隐患。
+#define FOLDER_COUNT_QUEUE_MAX  64   // 在途请求上限（只有可见行会进来，够用）
+#define FOLDER_COUNT_DONE_MAX  128
+#define FOLDER_COUNT_IDLE_MS   500
+// 数到这个数就停，显示「9999+ 项」：十万项的目录不该为了一个数字把后台线程占住。
+#define FOLDER_COUNT_CAP      9999
+// 查过了但枚举失败（权限 / 路径过长）：记成这个值，别再反复排队
+#define CHILD_ITEM_COUNT_FAILED (-2)
+
+struct FolderCountJob {
+    unsigned requestId;
+    int idx;
+    wchar_t path[MAX_PATH];
+};
+
+struct FolderCountDone {
+    unsigned requestId;
+    int idx;
+    int count;          // < 0 = 枚举失败
+};
+
+static struct FolderCountJob  folderCountJobs[FOLDER_COUNT_QUEUE_MAX];
+static int folderCountJobHead, folderCountJobTail, folderCountJobCount;
+static struct FolderCountDone folderCountDone[FOLDER_COUNT_DONE_MAX];
+static int folderCountDoneHead, folderCountDoneTail, folderCountDoneCount;
+static CRITICAL_SECTION folderCountLock;
+static bool folderCountLockReady = false;
+static HANDLE folderCountThread = NULL;
+static HANDLE folderCountWake = NULL;
+static volatile LONG folderCountStop = 0;
+// 只增不减；0 保留给「本格没有在途请求」。用无符号是为了让回绕有定义（int 自增溢出是 UB），
+// 回绕本身无害 —— 认领只看相等，而 0 已被显式跳过。
+static unsigned folderCountRequestSeq = 0;
+
+// 数一个目录里的条目数（后台线程唯一做的事）。**只读**，不递归。
+// 过滤规则必须与 buildChildNodes 一致（跳过 . / ..，按 g_showHiddenFiles 决定是否含隐藏项），
+// 否则这一格显示的项数会和列表里的行数对不上。
+static int countItemsInFolder(const wchar_t* dir) {
+    if (!dir || !dir[0]) return -1;
+
+    size_t len = wcslen(dir);
+    // 与 buildChildNodes 同一套 MAX_PATH 守卫：先判长度再拼接
+    if (len + 2 >= MAX_PATH) return -1;
+
+    wchar_t pattern[MAX_PATH] = {0};
+    wcscpy_s(pattern, MAX_PATH, dir);
+    wcscat_s(pattern, MAX_PATH, dir[len - 1] == L'\\' ? L"*" : L"\\*");
+
+    WIN32_FIND_DATA wfd;
+    HANDLE handle = FindFirstFile(pattern, &wfd);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+
+    int count = 0;
+    do {
+        if (wfd.cFileName[0] == L'.' && (wfd.cFileName[1] == L'\0' ||
+            (wfd.cFileName[1] == L'.' && wfd.cFileName[2] == L'\0'))) continue;
+        if (!g_showHiddenFiles && (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
+        count++;
+        if (count >= FOLDER_COUNT_CAP) break;    // 到顶就不再往下数
+    }
+    while (FindNextFile(handle, &wfd));
+    FindClose(handle);
+    return count;
+}
+
+static DWORD WINAPI folderCountTask(LPVOID param) {
+    (void)param;
+    for (;;) {
+        if (InterlockedCompareExchange(&folderCountStop, 0, 0)) break;
+
+        struct FolderCountJob job;
+        bool have = false;
+        EnterCriticalSection(&folderCountLock);
+        if (folderCountJobCount > 0) {
+            job = folderCountJobs[folderCountJobHead];
+            folderCountJobHead = (folderCountJobHead + 1) % FOLDER_COUNT_QUEUE_MAX;
+            folderCountJobCount--;
+            have = true;
+        }
+        LeaveCriticalSection(&folderCountLock);
+
+        if (!have) {
+            // 没活就睡；有活会被 SetEvent 立刻叫醒。睡醒再验一次退出标志。
+            WaitForSingleObject(folderCountWake, FOLDER_COUNT_IDLE_MS);
+            continue;
+        }
+
+        int count = countItemsInFolder(job.path);
+
+        // 结果入队。**满了就等，绝不丢弃** —— 丢掉的那条对应的 countRequestId 就再也清不掉，
+        // 那一格从此不会再排队（永久空白）。同 iconRenderTask 的规则。
+        for (;;) {
+            EnterCriticalSection(&folderCountLock);
+            if (folderCountDoneCount < FOLDER_COUNT_DONE_MAX) {
+                struct FolderCountDone* d = &folderCountDone[folderCountDoneTail];
+                d->requestId = job.requestId;
+                d->idx = job.idx;
+                d->count = count;
+                folderCountDoneTail = (folderCountDoneTail + 1) % FOLDER_COUNT_DONE_MAX;
+                folderCountDoneCount++;
+                LeaveCriticalSection(&folderCountLock);
+                break;
+            }
+            LeaveCriticalSection(&folderCountLock);
+            if (InterlockedCompareExchange(&folderCountStop, 0, 0)) return 0;
+            Sleep(2);
+        }
+
+        HWND hwnd = hwndContentView;
+        if (hwnd && IsWindow(hwnd)) PostMessage(hwnd, MSG_FOLDER_COUNT_DONE, 0, 0);
+    }
+    return 0;
+}
+
+// 惰性起线程。**只在主线程调用**。
+static void folderCountStart(void) {
+    if (folderCountThread) return;
+
+    if (!folderCountLockReady) {
+        InitializeCriticalSection(&folderCountLock);
+        folderCountLockReady = true;
+    }
+    if (!folderCountWake) folderCountWake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!folderCountWake) return;
+
+    folderCountStop = 0;
+    folderCountThread = CreateThread(NULL, 0, folderCountTask, NULL, 0, NULL);
+    if (!folderCountThread) {
+        CloseHandle(folderCountWake);
+        folderCountWake = NULL;
+    }
+}
+
+// 给第 idx 项（目录）排一次计数。**只由主线程调用**（要写 items[idx].countRequestId）。
+// 已经有结果 / 已有在途请求 / 队列满 → 什么都不做，下一次 loadItemData 会再来（自愈）。
+static void folderCountRequest(int idx) {
+    if (!items || idx < 0 || idx >= numItems) return;
+    struct ListItem* item = &items[idx];
+    struct FileNode* node = item->node;
+    if (!node || node->type != TYPE_DIR) return;
+    if (node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN || item->countRequestId != 0) return;
+
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(node, path);
+    if (path[0] == L'\0') return;
+
+    folderCountStart();
+    if (!folderCountThread) return;
+
+    unsigned requestId = ++folderCountRequestSeq;
+    if (requestId == 0) requestId = ++folderCountRequestSeq;    // 跳过保留值 0
+
+    EnterCriticalSection(&folderCountLock);
+    if (folderCountJobCount >= FOLDER_COUNT_QUEUE_MAX) { LeaveCriticalSection(&folderCountLock); return; }
+    struct FolderCountJob* j = &folderCountJobs[folderCountJobTail];
+    memset(j, 0, sizeof(*j));
+    j->requestId = requestId;
+    j->idx = idx;
+    // 路径必须在这里**复制**进任务：FileNode 树会在换目录时整个释放，后台线程只认这份快照。
+    wcsncpy(j->path, path, MAX_PATH - 1);
+    j->path[MAX_PATH - 1] = L'\0';
+    folderCountJobTail = (folderCountJobTail + 1) % FOLDER_COUNT_QUEUE_MAX;
+    folderCountJobCount++;
+    // 「本格有在途请求」的标记必须与入队放在同一临界区：否则后台可能在标记盖上之前就完成，
+    // 主线程随即把结果吃掉 —— 而标记随后才盖上，那一格就再也不会排队了。
+    item->countRequestId = requestId;
+    LeaveCriticalSection(&folderCountLock);
+
+    SetEvent(folderCountWake);
+}
+
+// 接管后台数好的结果：写回 FileNode → 让那一行重新格式化 → 重画。**只由主线程调用**。
+static void folderCountPump(void) {
+    if (!folderCountThread || !folderCountLockReady) return;
+
+    int firstRedraw = -1, lastRedraw = -1;
+    for (;;) {
+        struct FolderCountDone done;
+        EnterCriticalSection(&folderCountLock);
+        if (folderCountDoneCount <= 0) { LeaveCriticalSection(&folderCountLock); break; }
+        done = folderCountDone[folderCountDoneHead];
+        folderCountDoneHead = (folderCountDoneHead + 1) % FOLDER_COUNT_DONE_MAX;
+        folderCountDoneCount--;
+        LeaveCriticalSection(&folderCountLock);
+
+        // 三条一起验：换过目录 / 重排过 / 刷新过 → 这一格已经不是当初那一格，直接丢掉
+        if (!items || done.idx < 0 || done.idx >= numItems) continue;
+        if (items[done.idx].countRequestId != done.requestId) continue;
+        struct FileNode* node = items[done.idx].node;
+        if (!node || node->type != TYPE_DIR) continue;
+
+        items[done.idx].countRequestId = 0;
+        if (done.count < 0) {
+            node->childItemCount = CHILD_ITEM_COUNT_FAILED;   // 查过了、没结果，不再重试
+            continue;
+        }
+        node->childItemCount = done.count;
+        // 让这一行下次取显示信息时重新格式化（loadItemData 会读到刚写回的 childItemCount）。
+        // 代价只是一行的重算：图标是缓存命中，时间/大小都是纯计算。
+        items[done.idx].loaded = false;
+        if (firstRedraw < 0) firstRedraw = done.idx;
+        lastRedraw = done.idx;
+    }
+
+    // RedrawItems 不擦背景（所以不闪），一次 pump 只重画一条连续区间，不需要再限流。
+    if (firstRedraw >= 0 && hwndContentView)
+        ListView_RedrawItems(hwndContentView, firstRedraw, lastRedraw);
+}
+
 // 解析并登记条目对应的图标来源，返回图标 id（0 = 失败）。
 //
 // 这是全局唯一碰「shell 图标 API」的地方：
@@ -2122,12 +2358,18 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             iconFillPosted = false;
             iconFillDispatchTick = GetTickCount();
             iconRenderPump();   // 兜底：万一某次完成通知没投到，这条路径也能接管结果
+            folderCountPump();  // 同上，给文件夹条目数也留一条兜底路径
             if (iconFillStep()) scheduleIconFill();
             break;
         }
         case MSG_ICON_RENDER_DONE: {
             // 后台渲好了一批：建 HICON、入池、把缺过图标的区间重画一次。
             iconRenderPump();
+            break;
+        }
+        case MSG_FOLDER_COUNT_DONE: {
+            // 后台数好了一批文件夹的条目数：写回节点、让那几行重新格式化并重画。
+            folderCountPump();
             break;
         }
         case MSG_SEARCH_DONE: {
@@ -2633,7 +2875,7 @@ static HBRUSH getUiBrush(HBRUSH* slot, COLORREF color) {
 // 按需加载单个条目的图标 / 类型名 / 大小 / 日期。
 // 只在 LVN_GETDISPINFO（即可见行）里调用 —— 排序阶段绝不能调用它，
 // 否则虚拟列表会被物化，排序时就把整个目录的图标都解析一遍。
-static void loadItemData(struct ListItem* item) {
+static void loadItemData(struct ListItem* item, int idx) {
     if (!item || !item->node || item->loaded) return;
     struct FileNode* node = item->node;
 
@@ -2645,6 +2887,22 @@ static void loadItemData(struct ListItem* item) {
 
     if (node->type == TYPE_FILE) {
         formatFileSize(item->size, item->formattedSize);
+    }
+    else if (node->type == TYPE_DIR) {
+        // 「大小」列对文件夹显示**条目数**。
+        // 有缓存值就直接格式化（纯计算）；没有则排队给后台线程数，这一帧先留空 ——
+        // 绝不能在这里同步枚举目录：本函数的调用点有两个在绘制帧上（itemIconReady /
+        // iconFillRangeInner），详见「后台文件夹条目数计数」一节。
+        // 只有详细信息视图有「大小」这一列，图标/列表视图不必白白去枚举目录。
+        if (node->childItemCount >= 0) {
+            if (node->childItemCount >= FOLDER_COUNT_CAP)
+                swprintfTrunc(item->formattedSize, 64, L"%d+ %ls", node->childItemCount, lc_str.items);
+            else
+                swprintfTrunc(item->formattedSize, 64, L"%d %ls", node->childItemCount, lc_str.items);
+        }
+        else if (viewStyle == STYLE_DETAILS) {
+            folderCountRequest(idx);
+        }
     }
     else if (node->type == TYPE_DRIVE) {
         wchar_t path[MAX_PATH] = {0};
@@ -2787,7 +3045,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     // 大图标视图：完全自绘条目（Wine 默认对非选中项只画一行文件名）
                     if (viewStyle == STYLE_LARGE_ICON) {
                         if (idx >= 0 && idx < numItems && items[idx].node) {
-                            if (!items[idx].loaded) loadItemData(&items[idx]);
+                            if (!items[idx].loaded) loadItemData(&items[idx], idx);
                             drawLargeIconItem(&lvcd->nmcd, &items[idx]);
                             return CDRF_SKIPDEFAULT;
                         }
@@ -2882,7 +3140,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
             if (!items || nmlvdi->item.iItem < 0 || nmlvdi->item.iItem >= numItems) break;
             struct ListItem* item = &items[nmlvdi->item.iItem];
             
-            if (!item->loaded) loadItemData(item);
+            if (!item->loaded) loadItemData(item, nmlvdi->item.iItem);
             if (!item->node) break;
 
             // 不回应 LVIF_STATE：owner-data 模式下选中/焦点状态由控件自行维护。
@@ -2905,8 +3163,13 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     case COLUMN_TYPE_IDX:
                         nmlvdi->item.pszText = item->type;
                         break;
+                    // 这一格的三元判断是**显示层的门**，与 loadItemData 里的格式化门是两回事 ——
+                    // 格式化过的东西在这里被换成 L""，屏幕上就是空白（改 loadItemData 必须同步改这里）。
+                    // 大小：文件＝容量、驱动器＝容量条（自绘时这里只当文本兜底）、文件夹＝条目数
+                    // （后台数完才填，没数出来时 formattedSize 是空串，显示空白）。
                     case COLUMN_SIZE_IDX:
-                        nmlvdi->item.pszText = (item->node->type == TYPE_FILE || item->node->type == TYPE_DRIVE) ? item->formattedSize : L"";
+                        nmlvdi->item.pszText = (item->node->type == TYPE_FILE || item->node->type == TYPE_DRIVE
+                                                || item->node->type == TYPE_DIR) ? item->formattedSize : L"";
                         break;
                     // 日期：文件与**文件夹**都显示 —— 目录的 ftLastWriteTime 枚举时就已拿到（见
                     // file_node.c），代价与文件完全相同。固定节点（驱动器 / 桌面 / 文档 / 用户 /
@@ -5909,7 +6172,7 @@ static bool itemIconPainted(struct IconPool* p, struct ListItem* item) {
 static bool itemIconReady(struct IconPool* p, int i, bool allowSync) {
     struct ListItem* item = &items[i];
     if (!item->node) return true;      // 空占位项：本来就不画图标
-    if (!item->loaded) loadItemData(item);
+    if (!item->loaded) loadItemData(item, i);
 
     // 退避中：这一轮不试。否则来源表暂时满、或这一刻挑不出可淘汰的槽的那几项，会把每轮
     // 8ms 预算全吃掉 —— 而同屏其它「本来能补上」的项就永远轮不到。
@@ -6276,7 +6539,7 @@ static bool iconFillRangeInner(DWORD deadline, bool allowSync) {
     for (int i = visFirst; i < visLast; i++) {
         struct ListItem* it = &items[i];
         if (!it->node) continue;
-        if (!it->loaded) loadItemData(it);          // 便宜：来源命中表时连 shell 都不碰
+        if (!it->loaded) loadItemData(it, i);          // 便宜：来源命中表时连 shell 都不碰
         if (!iconIdTypeNameValid(it->icon)) continue;
         bool dup = false;
         for (int k = 0; k < nIds; k++) if (iconFillIds[k] == it->icon) { dup = true; break; }

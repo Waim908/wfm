@@ -23,6 +23,9 @@ static struct FileNode* allocFileNode(wchar_t* name, enum FileType type) {
     node->hasChildDirs = false;
     node->isHidden = false;
     node->size = 0;
+    // 未知：文件夹的条目数只能靠枚举目录得到（没有「只查数量」的 API），
+    // 所以交给 content_view.c 的后台计数线程按需填充，显示路径只读这个字段。
+    node->childItemCount = CHILD_ITEM_COUNT_UNKNOWN;
     memset(&node->modifiedTime, 0, sizeof(FILETIME));
     return node;
 }
