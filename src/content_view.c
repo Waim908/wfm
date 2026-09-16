@@ -21,7 +21,6 @@ static HIMAGELIST currentImageList = NULL;
 static HICON createShellIconBest(int sysIcon, int desired, int* outNativeSize);
 static BYTE* extractIcoIconPixels(const wchar_t* icoPath, int desired, int* outSize);
 static BYTE* extractPeIconPixels(const wchar_t* pePath, int groupIndex, int desired, int* outSize);
-static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired);
 static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize);
 static HICON createIconFromPixels(const BYTE* pixels, int width, int height);
 static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize);
@@ -4672,27 +4671,6 @@ static BYTE* extractPeIconPixels(const wchar_t* pePath, int groupIndex, int desi
     }
 
     return pixels;
-}
-
-static HICON extractIconFromPeIndexed(const wchar_t* pePath, int groupIndex, int cxDesired, int cyDesired) {
-    if (!pePath || cxDesired <= 0 || cyDesired <= 0) return NULL;
-
-    // 本文件所有调用点都是方形；非方形取宽（旧实现把它当拉伸目标，这里只做等比缩放）
-    int size = 0;
-    BYTE* pixels = extractPeIconPixels(pePath, groupIndex, cxDesired, &size);
-    if (!pixels) return NULL;
-
-    BYTE* scaled = scalePixelsOwned(pixels, size, cxDesired);
-    if (!scaled) return NULL;
-
-    HICON h = createIconFromPixels(scaled, cxDesired, cxDesired);
-    free(scaled);
-    return h;
-}
-
-// 兼容入口：主图标 = 枚举到的第一个图标组（工具栏 CMD/Explorer 按钮用）
-HICON extractIconFromExe(const wchar_t* exePath, int cxDesired, int cyDesired) {
-    return extractIconFromPeIndexed(exePath, 0, cxDesired, cyDesired);
 }
 
 #pragma pack(push, 1)
