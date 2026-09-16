@@ -2807,35 +2807,56 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         
                         // Margin inside the cell
                         InflateRect(&rc, -2, -1);
-                        
-                        // Background bar: light gray for free space
-                        FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
-                        
-                        // Used space bar
-                        double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
-                                       / (double)item->driveTotalBytes;
-                        if (usedPct < 0.0) usedPct = 0.0;
-                        if (usedPct > 1.0) usedPct = 1.0;
-                        int usedWidth = (int)((rc.right - rc.left) * usedPct);
-                        
-                        if (usedWidth > 0) {
-                            RECT usedRc = rc;
-                            usedRc.right = rc.left + usedWidth;
-                            
-                            // Color: blue (<80%), yellow (80-90%), red (>90%)
-                            COLORREF barColor;
-                            if (usedPct < 0.8) barColor = RGB(100, 181, 246);
-                            else if (usedPct < 0.9) barColor = RGB(255, 213, 79);
-                            else barColor = RGB(239, 154, 154);
-                            
-                            HBRUSH* slot = (barColor == RGB(100, 181, 246)) ? &brushDriveLow :
-                                           (barColor == RGB(255, 213, 79))  ? &brushDriveMid : &brushDriveHigh;
-                            FillRect(hdc, &usedRc, getUiBrush(slot, barColor));
+
+                        // 选中态：整行高亮是控件铺的底，而这一格被我们 SKIPDEFAULT 接管，
+                        // 必须自己跟着铺高亮色 —— 否则整行的蓝底会正好在这一格断开
+                        // （长度条所在的是"大小"列，位于行的中段，最显眼）。
+                        // 判定同 drawLargeIconItem：先看通知里的 uItemState，缺席时补问控件；
+                        // 子项阶段 Wine 不会再刷 uItemState（listview.c 的子项循环只更新
+                        // nmcd.rc 与 iSubItem），所以拿到的仍是条目级状态，含 CDIS_SELECTED。
+                        bool sel = (lvcd->nmcd.uItemState & CDIS_SELECTED) != 0;
+                        if (!sel) {
+                            sel = (ListView_GetItemState(hwndContentView, idx, LVIS_SELECTED)
+                                   & LVIS_SELECTED) != 0;
                         }
-                        
+
+                        // 选中时这一格不画长度条，整行铺同一片高亮色：长度条的浅蓝/黄/红
+                        // 与高亮蓝撞色后边界根本看不出来，而压在条上的那段文字在深色浅色
+                        // 两头都不好读。取消选中后长度条自动回来（总量/剩余仍在类型与
+                        // 大小列里）。这样选中一行就是一条连续的蓝底，不再断在中间。
+                        if (sel) {
+                            FillRect(hdc, &rc, getUiBrush(&brushIconSelLabel, GetSysColor(COLOR_HIGHLIGHT)));
+                        }
+                        else {
+                            // Background bar: light gray for free space
+                            FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
+
+                            // Used space bar
+                            double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
+                                           / (double)item->driveTotalBytes;
+                            if (usedPct < 0.0) usedPct = 0.0;
+                            if (usedPct > 1.0) usedPct = 1.0;
+                            int usedWidth = (int)((rc.right - rc.left) * usedPct);
+
+                            if (usedWidth > 0) {
+                                RECT usedRc = rc;
+                                usedRc.right = rc.left + usedWidth;
+
+                                // Color: blue (<80%), yellow (80-90%), red (>90%)
+                                COLORREF barColor;
+                                if (usedPct < 0.8) barColor = RGB(100, 181, 246);
+                                else if (usedPct < 0.9) barColor = RGB(255, 213, 79);
+                                else barColor = RGB(239, 154, 154);
+
+                                HBRUSH* slot = (barColor == RGB(100, 181, 246)) ? &brushDriveLow :
+                                               (barColor == RGB(255, 213, 79))  ? &brushDriveMid : &brushDriveHigh;
+                                FillRect(hdc, &usedRc, getUiBrush(slot, barColor));
+                            }
+                        }
+
                         // Text overlay
                         SetBkMode(hdc, TRANSPARENT);
-                        SetTextColor(hdc, RGB(50, 50, 50));
+                        SetTextColor(hdc, sel ? GetSysColor(COLOR_HIGHLIGHTTEXT) : RGB(50, 50, 50));
                         HFONT hOldFont = SelectObject(hdc, hGuiFont);
                         DrawTextW(hdc, item->formattedSize, -1, &rc,
                                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
@@ -3418,7 +3439,19 @@ void createContentView() {
 
     // 不启用 LVS_EX_DOUBLEBUFFER：它会把 Wine 的列表绘制切到"拦截 WM_ERASEBKGND +
     // 内存 DC"路径，在 Winlator 的 GL 合成环境下出现列表内容（含图标）不显示/不刷新。
-    // 恢复原版绘制路径；LVS_EX_FULLROWSELECT 也一并去掉，保持与原版渲染行为一致。
+    // 恢复原版绘制路径；但 LVS_EX_FULLROWSELECT 要留着（它跟 DOUBLEBUFFER 无关，
+    // 不碰内存 DC，见下）。
+    //
+    // LVS_EX_FULLROWSELECT：详细视图里选中一行时整行连成一片高亮底色，与 Windows
+    // 资源管理器一致。Wine 在**没有**该扩展样式时是按「单元格内容的宽度」画选中底色的
+    // —— comctl32/listview.c 的 LISTVIEW_DrawItemPart：
+    //     background = &rcSelect;                    // 选中 且 非 FULLROWSELECT
+    //     rcSelect.right = min(Label.left + labelSize.cx, Label.right);
+    // 也就是蓝色只铺到该格文字的末尾。于是名称列只蓝到文件名尾巴、后面的类型/大小/日期
+    // 各自只蓝出自己那一小段文字 —— 看上去正是「蓝底中间断开、一格一截」。
+    // 加上 FULLROWSELECT 后 Wine 改画 rcLabel（名称列 = 整列宽、其余列 = 列右边界，
+    // 见 LISTVIEW_GetItemMetrics 里 `labelSize.cx = nItemWidth` 那条分支），各列连成整行。
+    ListView_SetExtendedListViewStyle(hwndContentView, LVS_EX_FULLROWSELECT);
 
     cmiOpen.text = lc_str.open;
     cmiEdit.text = lc_str.edit;
