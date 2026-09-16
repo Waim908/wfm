@@ -8,6 +8,10 @@ extern HWND hwndMain;
 
 HWND hwndTreeview = NULL;
 
+// 本次 updateTreeItems 插入了多少个子节点。只服务于启动打点的 n= 计数：
+// 节点数直接决定树视图那一段要发起多少次 shell 调用（每个节点一次 SHGetFileInfo）。
+static int treeInsertCount = 0;
+
 static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNode) {
     HTREEITEM child = TreeView_GetChild(hwndTreeview, parentItem);
 
@@ -53,6 +57,7 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
             tvis.itemex.lParam = (LPARAM)node;
 
             TreeView_InsertItem(hwndTreeview, &tvis);
+            treeInsertCount++;
         }
         while ((node = node->sibling) != NULL);
     }
@@ -60,6 +65,7 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
 
 static void updateTreeItems() {
     TreeView_DeleteAllItems(hwndTreeview);
+    treeInsertCount = 0;
 
     TVINSERTSTRUCT tvis;
     tvis.hParent = NULL;
@@ -75,6 +81,7 @@ static void updateTreeItems() {
         if (himl) TreeView_SetImageList(hwndTreeview, himl, TVSIL_NORMAL);
         CoTaskMemFree(pidlComputer);
     }
+    startupMark("    tv: shell imagelist");
 
     struct FileNode* node = treeFileNode;
     do {
@@ -128,8 +135,11 @@ static void updateTreeItems() {
     }
     while ((node = node->sibling) != NULL);
     
+    startupMarkN("    tv: insert nodes", treeInsertCount);
+
     // Add bookmarks section
     buildBookmarkTree();
+    startupMark("    tv: bookmark tree");
 }
 
 static void treeItemExpand(HTREEITEM treeItem, struct FileNode* node) {
@@ -354,10 +364,14 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
 }
 
 void createTreeview() {
+    startupMark("  tv: entry");
     hwndTreeview = CreateWindowEx(0, WC_TREEVIEW, NULL, WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwndMain, (HMENU)NULL, globalHInstance, NULL);
+    startupMark("  tv: CreateWindowEx");
 
     // 初始化私有图像列表（替代共享系统列表，避免图标污染问题）
 
     updateTreeItems();
+    startupMark("  tv: updateTreeItems");
     UpdateWindow(hwndTreeview);
+    startupMark("  tv: UpdateWindow paint");
 }

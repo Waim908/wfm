@@ -58,6 +58,57 @@ void updateGuiFont() {
         SendMessage(hwndNavbar, WM_SIZE, 0, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 启动计时打点（诊断用，默认关闭）
+//
+// 「启动变慢了」这句话在代码里对应的是一串同步调用：建窗口 → 枚举目录 → 渲染首屏
+// 图标。光看总时长分不清是哪一段，这里把它切成逐段的增量。
+//
+// 只有 WFM_STARTUP_TRACE 环境变量非空时才写 stderr；未设时每次调用只剩一次
+// bool 判断，正常启动一行都不输出、不多花一次 GetTickCount。
+//
+// 用法：WFM_STARTUP_TRACE=1 wine wfm 2>&1 | grep WFM-STARTUP
+//       +N ms  = 距上一个打点的增量（就是这一段自己花的时间）
+//       t=N ms = 距 WinMain 开头的累计值
+// ---------------------------------------------------------------------------
+static DWORD startupTraceT0 = 0;
+static DWORD startupTracePrev = 0;
+static bool  startupTraceOn = false;
+
+void startupMark(const char* label) {
+    startupMarkN(label, -1);
+}
+
+void startupMarkN(const char* label, long value) {
+    if (!startupTraceOn || !label) return;
+
+    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    if (hErr == NULL || hErr == INVALID_HANDLE_VALUE) return;
+
+    DWORD now = GetTickCount();
+    char buf[192];
+    // label 全是本文件/同项目里的短字面量，192 字节足够，不需要截断逻辑。
+    // value < 0 表示不打计数值（多数打点不需要）。
+    if (value < 0) {
+        sprintf(buf, "[WFM-STARTUP] %-26s +%5lu ms   (t=%lu ms)\n",
+                label,
+                (unsigned long)(now - startupTracePrev),
+                (unsigned long)(now - startupTraceT0));
+    }
+    else {
+        sprintf(buf, "[WFM-STARTUP] %-26s +%5lu ms   (t=%lu ms)  n=%ld\n",
+                label,
+                (unsigned long)(now - startupTracePrev),
+                (unsigned long)(now - startupTraceT0),
+                value);
+    }
+    startupTracePrev = now;
+
+    DWORD written = 0;
+    WriteFile(hErr, buf, (DWORD)strlen(buf), &written, NULL);
+}
+
 HICON uiIcons[NUM_UI_ICONS] = {0};
 
 struct IconMapping {
@@ -124,6 +175,7 @@ void preloadIcons() {
     // 系统图标只在启动时各提取一次，之后运行期直接用缓存
     uiIcons[ICON_CMD] = loadIconFromSystemExe(L"cmd.exe", FALSE);
     uiIcons[ICON_EXPLORER] = loadIconFromSystemExe(L"explorer.exe", TRUE);
+    startupMark("  icons: LoadImage x12");
 }
 
 void freeUIcons() {
@@ -772,11 +824,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     (void)hPrevInstance;   // Win32 下恒为 NULL
     (void)lpCmdLine;       // 改用 GetCommandLineW()/CommandLineToArgvW 解析
     (void)nCmdShow;
+    // 启动计时：环境变量非空才启用（见 startupMark）。放在最前面，这样
+    // SetProcessDPIAware 自己的耗时也能被量到。
+    startupTraceOn = (GetEnvironmentVariableA("WFM_STARTUP_TRACE", NULL, 0) != 0);
+    startupTraceT0 = startupTracePrev = GetTickCount();
+    startupMark("WinMain entry");
     SetProcessDPIAware();
+    startupMark("SetProcessDPIAware");
     // COM 初始化：lnk 图标解析（IShellLink，content_view.c）与创建快捷方式
     // （IShellLink，file_actions.c）都依赖它。真 Windows 上未初始化 apartment
     // 的 CoCreateInstance 会直接失败（Wine 容忍裸用），这里统一补上。
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    startupMark("CoInitializeEx (lazy)");
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);
 
@@ -798,14 +857,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     
     globalHInstance = hInstance;
     preloadIcons();
+    startupMark("preloadIcons");
     
     loadBookmarks();
     loadAutoOpenBookmark();
+    startupMark("bookmarks + settings");
 
     NONCLIENTMETRICS ncm = {0};
     ncm.cbSize = sizeof(ncm);
     SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
     hGuiFont = CreateFontIndirect(&ncm.lfMessageFont);
+    startupMark("gui font");
 
     WNDCLASSEX wcx = {0};
     wcx.cbSize = sizeof(wcx);
@@ -823,6 +885,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     if (!RegisterClassEx(&wcx)) return 0;
     
     initFileNodes();
+    startupMark("initFileNodes");
 
     HWND hwndDesktop = GetDesktopWindow();
     RECT desktopRect;
@@ -833,20 +896,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     hwndMain = CreateWindowEx(0, mainWndClass, L"", WS_CLIPCHILDREN | WS_OVERLAPPEDWINDOW, 
                               0, 0, hwndWidth, hwndHeight, NULL, NULL, hInstance, NULL);
     if (!hwndMain) return 0;
+    startupMark("CreateWindowEx(main)");
     
     createMainMenu();
     updateLangMenuCheckmarks();
+    startupMark("  createMainMenu");
     createToolbar();
+    startupMark("  createToolbar");
     createNavbar();
+    startupMark("  createNavbar");
     createTreeview();
+    startupMark("  createTreeview");
     createSizebar();
+    startupMark("  createSizebar");
     createContentView();
+    startupMark("  createContentView");
     createStatusbar();
+    startupMark("child controls");
 
     SendMessage(hwndToolbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SendMessage(hwndTreeview, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SendMessage(hwndContentView, WM_SETFONT, (WPARAM)hGuiFont, 0);
     SendMessage(hwndStatusbar, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    startupMark("WM_SETFONT x4");
     
     // 视图设置要在 setViewStyle 之前读好：大图标视图首次布局就要用到
     loadIconViewSettings();
@@ -864,6 +936,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     updateDriveBarMenuCheckmarks();
     int treeviewWidth = hwndWidth * 0.2f;
     SetWindowPos(hwndTreeview, NULL, 0, 0, treeviewWidth, 0, SWP_NOZORDER | SWP_NOMOVE);    
+    startupMark("view settings");
     
     if (navigatePath) {
         navigateToPath(navigatePath);
@@ -874,9 +947,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         // 传进来的路径是用户的明确意图，不该被收藏覆盖掉
         openAutoOpenBookmark();
     }
+    startupMark("navigate: enum + icons");
 
     ShowWindow(hwndMain, SW_SHOW);
+    startupMark("ShowWindow");
     UpdateWindow(hwndMain);
+    startupMark("UpdateWindow (first paint)");
 
     // 启动时对齐一次剪贴板相关 UI：菜单里的「粘贴 / 粘贴快捷方式 / 清空剪贴板」、
     // 工具栏粘贴按钮、状态栏来源指示，全部由 CF_HDROP 是否可用来决定。

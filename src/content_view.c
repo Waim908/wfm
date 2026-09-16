@@ -6851,6 +6851,10 @@ static void scheduleIconFill(void) {
 }
 
 void refreshContentView() {
+    // 启动计时打点（默认关闭，见 main.c 的 startupMark）。这一段的耗时才是「进目录
+    // 要等多久」的主体，所以拆成 入口 / 建表 / 预热共享图标 / 补齐首屏 四段。
+    startupMark("  refresh: entry");
+
     if (searchData != NULL) {
         if (searchData->active) {
             searchData->active = false;
@@ -6936,6 +6940,7 @@ void refreshContentView() {
             fillFileInfo(node, item);
         }
     }
+    startupMarkN("  refresh: fill items", numItems);
 
     // 图标缓存保留（不清空），以加速相邻导航
     // 更新图像列表：挂上当前显示尺寸对应的自建列表池。
@@ -6992,7 +6997,9 @@ void refreshContentView() {
     // 共享来源先单独渲染掉（见 prewarmSharedIcons）：本目录几十个 .dll 共用同一个来源 id，
     // 预热一次就点亮整屏，且不受后面 150ms 首屏预算被 exe 吃干的影响。
     prewarmSharedIcons();
+    startupMark("  refresh: prewarm shared");
     iconFillVisibleSync(ICON_SYNC_BUDGET_MS);
+    startupMark("  refresh: fill first screen");
 
     // 整表失效重绘，恢复原版绘制路径。不用 LVSICF_NOINVALIDATEALL 做增量刷新：
     // Wine/Winlator 上增量路径会让旧行不重画（图标、文字残缺或滞留旧内容），
@@ -7004,4 +7011,5 @@ void refreshContentView() {
     updateSortIndicator();
 
     updateStatusbar();
+    startupMark("  refresh: done");
 }

@@ -123,6 +123,12 @@ extern HICON uiIcons[NUM_UI_ICONS];
 void preloadIcons();
 void freeUIcons();
 
+// 启动计时打点（实现见 main.c）。只有 WFM_STARTUP_TRACE 环境变量非空时才写 stderr，
+// 未设时每次调用就是一次 bool 判断，零开销。label 必须是短字面量（<= 24 字符）。
+// startupMarkN 额外带一个计数值，用来判断「这一段是不是在空列表上白跑」。
+void startupMark(const char* label);
+void startupMarkN(const char* label, long value);
+
 #ifndef IDC_STATIC
 #define IDC_STATIC -1
 #endif
