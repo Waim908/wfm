@@ -29,27 +29,59 @@ static bool stampShortcutOverlay(BYTE* dst, int outSize);
 
 // 图标补齐 / 预取（实现见文件末尾同名一节）。绘制路径发现有待补的图标时调它，
 // 因此滚动、键盘翻页、改窗口大小都自动触发，不需要单独接滚动消息。
+//
+// **不再做「整屏一起出现」了**。曾经的做法是：可见区里只要还剩一项没渲染好，就把整屏
+// 图标一律画成空位，等本屏补齐后再整体重画一次。那个做法在**一屏项数多**的视图里是灾难：
+// 大图标一屏二十来项尚可，详细视图一屏五六十到上百项，而补齐每轮只有 8ms 预算、滚动一到
+// 就被打断 —— 于是「只要还有几项没补上，整屏连文件夹图标都没有」。现在的语义是
+// **有就画、缺就补、补到就把缺过的区间重画一次**。
 static bool iconFillPosted;       // 同一时刻只挂一条补齐消息，见 scheduleIconFill
 static void scheduleIconFill(void);
 static bool iconFillStep(void);   // 补一轮可见区图标；返回 true = 还没补完
 static void iconFillVisibleSync(int budgetMs);   // 在绘制之前同步补本屏
-static void updateIconPaneGate(void);            // 绘制入口决定「这一帧画不画图标」
+static void prewarmSharedIcons(void);            // 目录加载时把「共享来源」一次性渲染进池
+static void requestIconFillForVisible(void);     // 绘制入口：可见区有缺图标就安排补齐
 static void scheduleIconPrefetch(void);
 static bool iconPrefetchStep(void);   // 预取可见区两侧的邻域；返回 true = 还有可预取的
+static int visibleIconSpan(void);     // 一屏可见项数；池容量按它定（见 getIconPool）
+static void visibleItemRange(int* outFirst, int* outLast);   // 一屏对应的项范围（唯一权威）
+static bool preScrollHandleVScroll(UINT code);   // 滚动前先渲好目标窗口（见文件末尾同名一节）
+static void preScrollCancelRetry(void);          // 撤销「押后期间重试」的定时器
 
-// 「本屏还没齐」闸：可见区里还有「本来画得出来、却还没渲染」的项时置位，绘制路径据此
-// **整屏一律不画图标**。这是「图标一起出现」的关键 —— 少了它，先画到的格子已经把图标画
-// 出来了，后面的格子后补，看上去就是「有的一格一格冒出来」。补齐一轮把本屏补完时放掉，
-// 那一次整屏重画让所有图标同时出现。
-static bool iconPanePend;
-// 本屏连续多少轮没能补齐。到 ICON_PANE_GIVEUP_ROUNDS 就认输（见 iconFillRange 的说明）。
+// 本屏连续多少轮毫无进展（剩下的项这几轮渲染不出来）。到 ICON_FILL_STALL_ROUNDS 就
+// **停止自续投递**省 CPU —— 不标记任何项、也不影响绘制，下一次绘制/滚动会重新安排补齐。
 static int iconFillStall;
+// 上一次「因为补进了新图标而重画缺图标区间」的时刻。重画限流用：补齐每轮都重画会吃掉
+// 大半个 8ms 预算，反而让补齐更慢。
+static DWORD lastIconRepaintTick;
+// 上一次真正「把补齐排上队」（挂定时器或投消息）的时刻。给调度闸做看门狗用，
+// 见 scheduleIconFill 开头。
+static DWORD iconFillDispatchTick;
 
 // 绘制路径上报的「这里缺图标」见证（见 getIconSlotForPaint / iconFillStep）。
 // 哨兵：iconMissLast < iconMissFirst 表示本趟还没人上报。
 static bool iconPaintMissed;   // 屏幕上确实存在「本来画得出来、现在却还是空格子」的位置
 static int iconMissFirst;
 static int iconMissLast = -1;
+
+// 滚动期「就地渲染」的额度，每次 WM_PAINT 重开口子（见 getIconSlotForPaint）：
+// 只有滚动驱动的绘制才允许在绘制路径里渲染，额度按本屏跨度给 —— 要够把本屏渲完。
+static int iconPaintRenderBudget;
+static DWORD iconPaintRenderDeadline;
+
+// 「正在处理滚动消息」。滚动消息内部会同步重画（listview.c 的 scroll_list → UpdateWindow），
+// 那次绘制会重入进本窗口过程；绘制路径据此认出「这一帧是滚动驱动的」。比「距 lastScrollTick
+// 多少毫秒」准：异步凑上来的绘制不会被误判成滚动驱动。
+static bool inScrollMessage;
+
+// 补齐循环的重入闸：iconFillIds 是静态去重缓冲，重入会让两层互相覆盖（外层那轮就会漏渲/渲错来源）。
+static bool inIconFillRange;
+
+// 「先渲好目标窗口、再让控件滚」的押后状态（见文件末尾的 preScrollHandleVScroll）：
+static int pendingScrollTop = -1;    // 已经准备好、但还没落地的目标顶项（-1 = 没有押后）
+static DWORD pendingScrollSince;     // 本次押后的起点（超过 ICON_SCROLL_HOLD_MAX_MS 就放弃押后）
+static bool iconScrollTimerPending;  // 已经挂了一个「押后期间重试」的定时器
+static bool inPreScroll;             // 我们自己在把滚动交给控件（别再拦，否则会自锁）
 
 // 滚动静默：滚动类消息（拖滚动条 / 滚轮 / 翻页键 / 改窗口大小）刚发生过的时间戳。
 // 补齐必须据此让位 —— 见 scheduleIconFill 里为什么这事关「拖动滚动条卡住」。
@@ -61,12 +93,24 @@ static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工�
 // 见 comctl32/listview.c:4079，它的 id 是 (UINT_PTR)infoPtr），号段留开更省心。
 #define TIMER_ICON_FILL            0x7FFF
 #define TIMER_ICON_PREFETCH        0x7FFE
+#define TIMER_ICON_SCROLL          0x7FFD
 #define ICON_FILL_SCROLL_QUIET_MS  180   // 滚动停多久之后才继续补图标
 #define ICON_FILL_BUDGET_MS        8     // 一趟补齐/预取最多占用多少毫秒
-#define ICON_PREFETCH_INTERVAL_MS  25    // 预取两趟之间歇多久（走定时器，最低优先级）
+#define ICON_PREFETCH_INTERVAL_MS  40    // 预取两趟之间歇多久（走定时器，最低优先级）
 #define ICON_SYNC_BUDGET_MS        150   // 导航/换尺寸时**同步**补首屏的时间预算
 #define ICON_SCROLL_SYNC_BUDGET_MS 8     // 离散滚动一步之后同步补新露出区域的预算
-#define ICON_PANE_GIVEUP_ROUNDS    4     // 本屏连续这么多轮补不齐就认输，见 iconFillRange
+#define ICON_PREWARM_BUDGET_MS     80    // 目录加载时预热「共享来源」的时间预算
+#define ICON_PREWARM_MAX           64    // 一次预热最多新增多少共享槽（另受「最多占半个池」约束）
+#define ICON_PAINT_RENDER_MIN      24    // 一次绘制「就地渲染」的额度下限；上限按本屏跨度给（见 WM_PAINT）
+#define ICON_PAINT_RENDER_MS       100   // 一次绘制的就地渲染累计时间上限（要够把本屏每一条来源都渲出来）
+#define ICON_SCROLL_PAINT_WINDOW_MS 60   // 绘制距最近一次滚动消息多久之内算「滚动驱动的绘制」
+#define ICON_FILL_STALL_ROUNDS     4     // 本屏连续这么多轮毫无进展就停止自续投递，见 iconFillRange
+#define ICON_REPAINT_MIN_MS        40    // 两趟「补进新图标后重画」之间至少隔这么久
+#define ICON_RETRY_BACKOFF_ROUNDS  3     // 某项渲染/登记失败后退避几轮再试（见 itemIconReady）
+#define ICON_SCROLL_PREPARE_MS     12    // 一次「滚动前预渲染」的时间片（见 preScrollHandleVScroll）
+#define ICON_SCROLL_HOLD_MAX_MS    120   // 拖动时最多把内容押后多久；超过就照滚（宁可闪，不能粘住）
+#define ICON_SCROLL_FINAL_MS       80    // 松手 / 翻页这类一次性滚动的预渲染预算
+#define ICON_SCROLL_RETRY_MS       15    // 押后期间的重试间隔（走 WM_TIMER，优先级最低）
 
 // IID_IImageList 不在 mingw 的 libuuid 里，按 wine include/commoncontrols.idl
 // 的 uuid 本地定义
@@ -103,8 +147,14 @@ struct ListItem {
     wchar_t formattedDate[32];
     bool loaded;
     bool isHidden;
-    bool iconFailed;   // 图标确定出不来（来源表满/无坐标/渲染反复失败）：永久放弃
-    unsigned char iconTries;  // 渲染尝试次数：池满这类**瞬态**失败要给几次机会（见 iconFillStep）
+    // 渲染 / 登记的退避计数（见 itemIconReady）：
+    //   >0 = 这一项最近失败过（来源表暂时满、这一刻挑不出可淘汰的槽、shell 碰巧没成），
+    //        接下来这么多轮不再尝试渲染，每轮递减。
+    //   ==0 = 正常状态，可以尝试。
+    // **只用来节流「要不要去补」**，绝不参与「这一格画不画」：池里有槽就一定画得出来。
+    // 曾经这里还有一个 iconGaveUp，被绘制路径当成「直接画空」的判据 —— 而它只在滚动消息里
+    // 被清零，表现出来就是「滚动时随机几个图标先消失、紧接着又出现」。已彻底删除。
+    unsigned char iconTries;
     uint64_t size;
     wchar_t* path;
     FILETIME modifiedTime;
@@ -310,23 +360,29 @@ static void formatDriveSizeText(struct ListItem* item) {
 //      位图（每张 size²×4）才是有可能吃掉几十 MB 的东西，这里给它设死上限。
 //   ③ item->icon = ①的 id（0 = 尚未解析）。重绘时经 ② 换成当前尺寸的槽位索引。
 //
-// 槽位数取「字节预算 / 每张字节」，所以各尺寸下的槽数自动与「一屏可见项数」同步缩放
-// （可见项数 ∝ 面积/格子面积，与每张字节同阶）：16px≈2k、32px≈512、48px≈227、
-// 64px≈128、96/128px 落到下限 64。
+// 槽位数取「字节预算 / 每张字节」，再按**当前一屏可见项数 × 2** 抬一次，最后用
+// ICON_SLOT_MAX_BYTES 封顶。
+// 为什么必须显式按一屏抬：字节预算与可见项数虽然同阶（都 ∝ 1/size²），比例常数却
+// 差得多 —— 128px 下预算只算得出 32 槽（被下限抬到 64），而 1080p 大图标视图一屏
+// 就有 70~80 项（span 还按 (cols+1)×(rows+2) 算了溢出余量）。池装不下一屏时，
+// 「渲染一个、顶掉一个」是数学必然：本屏永远凑不齐 → 认输阀 → 随机格子缺图标。
+// ×2 的含义是「一屏在池里 + 一屏留给预取跟随」，这也是「在屏图标不可能被顶掉」的前提。
+//
 // 之所以只要「槽数 ≥ 一屏可见项数」就够：Wine 每帧重绘都会为**每个可见项**重新回调
 // LVN_GETDISPINFO 取 iImage（listview.c 的 LISTVIEW_DrawItem → LISTVIEW_GetItemW），
 // 被回收的槽位下次绘制会自然重新申请；此时 LRU 选中的受害者必然是已滚出视野的那个。
 //
 // 预算取 2 MB（原 8 MB）：手机上大图标视图一帧就 64 KB（128px），128 个槽 = 8 MB，
 // 「看 128 个不同的 exe 就能摸到顶」——这是用户实际感知到的主要增长源。降到 2 MB 后
-// 16px 详细视图仍能放 2k 张（够几屏滚动 + 来回浏览），128px 靠下限 64 槽 = 4 MB。
-// 下限 64 是「一屏可见项数的两倍」（手机 128px 下一屏约 24~30 项），保证 LRU 不会
-// 淘汰掉仍在视野里的图标而抖动。
+// 16px 详细视图仍能放 2k 张（够几屏滚动 + 来回浏览）。
+// 硬顶 48 MB 是「一屏 ×2」这条正确性的代价上限：4K + 128px 大图标下 span×2 能到
+// 700 余槽（≈46 MB），到这里就不再涨；普通 1080p 大图标约 160 槽 = 10 MB。
 #define ICON_SLOT_BUDGET_BYTES (2u * 1024u * 1024u)
 #define ICON_SLOT_MIN_COUNT    64
-#define ICON_SOURCE_MAX        8192
-#define ICON_KEYMAP_SIZE       16384   // 2 的幂；来源表的去重索引
-#define ICON_KEYMAP_MASK       (ICON_KEYMAP_SIZE - 1)
+#define ICON_SLOT_MAX_BYTES    (48u * 1024u * 1024u)
+#define ICON_SOURCE_INIT       8192    // 来源表初始容量
+#define ICON_SOURCE_MAX        65536   // 来源表扩容上限（去重键可寻址的独占项上限）
+#define ICON_KEYMAP_INIT       16384   // 2 的幂；= 2 × ICON_SOURCE_INIT，半装载率
 #define ICON_POOL_MAX          8
 #define ICON_SHELL_UNKNOWN     (-1000)  // shellIndex 的「还没查过」哨兵（0 是合法的列表索引）
 
@@ -355,7 +411,10 @@ struct IconSource {
 
 static struct IconSource* iconSources = NULL;
 static int iconSourceCount = 0;
+static int iconSourceCap = ICON_SOURCE_INIT;   // iconSources 已分配容量（可扩到 ICON_SOURCE_MAX）
 static int* iconKeyMap = NULL;       // 键哈希 → id（0 = 空槽）
+static int iconKeyMapSize = ICON_KEYMAP_INIT;  // 去重索引槽数：必须始终 ≥ 2 × 来源数
+static int iconKeyMapMask = ICON_KEYMAP_INIT - 1;
 
 struct IconPool {
     int size;                 // 边长
@@ -459,28 +518,73 @@ static wchar_t* lowerDup(const wchar_t* s) {
 // 按去重键查 id（0 = 未登记）。开放寻址线性探测；表只增不删，所以不必处理墓碑。
 static int iconKeyLookup(const wchar_t* key) {
     if (!iconKeyMap || !key || !key[0]) return 0;
-    unsigned i = iconKeyHash(key) & ICON_KEYMAP_MASK;
-    for (int probe = 0; probe < ICON_KEYMAP_SIZE; probe++) {
+    unsigned i = iconKeyHash(key) & (unsigned)iconKeyMapMask;
+    for (int probe = 0; probe < iconKeyMapSize; probe++) {
         int id = iconKeyMap[i];
         if (id == 0) return 0;
         if (iconSources && wcsicmp(iconSources[id - 1].key, key) == 0) return id;
-        i = (i + 1) & ICON_KEYMAP_MASK;
+        i = (i + 1) & (unsigned)iconKeyMapMask;
     }
     return 0;
 }
 
+// 扩容来源表，连带把去重索引一起翻倍并重哈希。
+//
+// 为什么必须有：来源表是**进程级**的，每浏览到一个新的 exe/lnk/ico 就按完整路径登记
+// 一条独占项，而且没有任何回收路径（池只回收槽位，不回收来源）。表满之后
+// iconSourceAdd 返回 0 → 新出现的文件再也登记不进去 → 那个文件没有图标。这正是
+// 「文件一多就随机缺图标」的另一半成因（另一半是认输阀写永久标记，见 iconFillRange）。
+//
+// 不做「按引用计数回收独占项」的原因：一条来源的 id 同时被 item->icon 与池的 idSlot
+// 引用，收回它就要同时作废这两处，而开放寻址的哈希表又不支持删除（会打断探测链）。
+// 收益（极限容量）远小于引入新 bug 的风险 —— 扩容到 ICON_SOURCE_MAX 就够了。
+static bool iconStoreGrow(void) {
+    if (iconSourceCap >= ICON_SOURCE_MAX) return false;
+
+    int newCap = iconSourceCap * 2;
+    if (newCap > ICON_SOURCE_MAX) newCap = ICON_SOURCE_MAX;
+
+    // 去重索引必须始终 ≥ 2 × 来源数：探测是开放寻址，索引一旦填满，插入时的
+    // `while (iconKeyMap[i] != 0) i = (i + 1) & mask;` 会变成**死循环**。
+    int newMapSize = iconKeyMapSize * 2;
+    int* newMap = calloc((size_t)newMapSize, sizeof(int));
+    if (!newMap) return false;
+
+    struct IconSource* grown = realloc(iconSources, (size_t)newCap * sizeof(struct IconSource));
+    if (!grown) { free(newMap); return false; }
+
+    iconSources = grown;
+    iconSourceCap = newCap;
+
+    // 重哈希：键的哈希与表大小无关，按新掩码重新落位即可（id 保持不变，
+    // 所以 items[].icon 与池里的 idSlot 都不会失效）。
+    for (int id = 1; id <= iconSourceCount; id++) {
+        unsigned i = iconKeyHash(iconSources[id - 1].key) & (unsigned)(newMapSize - 1);
+        while (newMap[i] != 0) i = (i + 1) & (unsigned)(newMapSize - 1);
+        newMap[i] = id;
+    }
+    free(iconKeyMap);
+    iconKeyMap = newMap;
+    iconKeyMapSize = newMapSize;
+    iconKeyMapMask = newMapSize - 1;
+    return true;
+}
+
 // 登记一条来源，返回 id（>0）。iconFile 按原样保存（不能转小写：Wine 侧
 // 解析路径时可能大小写敏感），只有去重键统一小写。
+// 返回 0 = 登记失败（键无效 / 表已到 ICON_SOURCE_MAX / 分配失败）——调用方必须把它
+// 当作**瞬态**失败处理：表满之后清一次图标缓存就能恢复，绝不能标成永久无图标。
 static int iconSourceAdd(const wchar_t* key, unsigned kind, unsigned flags,
                          const wchar_t* iconFile, int iconIndex,
                          const wchar_t* typeName) {
-    if (!key || !key[0] || iconSourceCount >= ICON_SOURCE_MAX) return 0;
+    if (!key || !key[0]) return 0;
+    if (iconSourceCount >= iconSourceCap && !iconStoreGrow()) return 0;
     if (!iconKeyMap) {
-        iconKeyMap = calloc(ICON_KEYMAP_SIZE, sizeof(int));
+        iconKeyMap = calloc((size_t)iconKeyMapSize, sizeof(int));
         if (!iconKeyMap) return 0;
     }
     if (!iconSources) {
-        iconSources = calloc(ICON_SOURCE_MAX, sizeof(struct IconSource));
+        iconSources = calloc((size_t)iconSourceCap, sizeof(struct IconSource));
         if (!iconSources) return 0;
     }
 
@@ -499,8 +603,8 @@ static int iconSourceAdd(const wchar_t* key, unsigned kind, unsigned flags,
     s->flags = flags;
 
     int id = ++iconSourceCount;
-    unsigned i = iconKeyHash(s->key) & ICON_KEYMAP_MASK;
-    while (iconKeyMap[i] != 0) i = (i + 1) & ICON_KEYMAP_MASK;
+    unsigned i = iconKeyHash(s->key) & (unsigned)iconKeyMapMask;
+    while (iconKeyMap[i] != 0) i = (i + 1) & (unsigned)iconKeyMapMask;
     iconKeyMap[i] = id;
     return id;
 }
@@ -529,6 +633,17 @@ static struct IconPool* getIconPool(int size) {
     unsigned frameBytes = (unsigned)size * (unsigned)size * 4u;
     int slots = (int)(ICON_SLOT_BUDGET_BYTES / frameBytes);
     if (slots < ICON_SLOT_MIN_COUNT) slots = ICON_SLOT_MIN_COUNT;
+
+    // 再按「一屏跨度 × 2」抬一次（见 ICON_SLOT_* 处的说明）。控件还没建好时
+    // visibleIconSpan() 返回 0，那就只按字节预算算 —— 之后导航重建池时会按真实跨度算。
+    int span = visibleIconSpan();
+    if (span > 0 && slots < span * 2) slots = span * 2;
+
+    // 硬顶：槽数上界。它是「在屏图标不可能被顶掉」这条正确性的代价上限，
+    // 超大窗口 + 大图标下 span×2 可能比字节预算大一个数量级。
+    int maxSlots = (int)(ICON_SLOT_MAX_BYTES / frameBytes);
+    if (maxSlots < ICON_SLOT_MIN_COUNT) maxSlots = ICON_SLOT_MIN_COUNT;
+    if (slots > maxSlots) slots = maxSlots;
 
     // grow 的语义（Wine comctl32/imagelist.c 的 IMAGELIST_InternalExpandBitmaps）：
     // 新建时 cMaxImage = cInitial + 1，位图**立刻**按这个容量分配；之后每次扩容
@@ -599,16 +714,28 @@ static void resetIconStore(void) {
         iconSources = NULL;
     }
     iconSourceCount = 0;
+    iconSourceCap = ICON_SOURCE_INIT;
     free(iconKeyMap);
     iconKeyMap = NULL;
+    iconKeyMapSize = ICON_KEYMAP_INIT;
+    iconKeyMapMask = ICON_KEYMAP_INIT - 1;
 
     // 池都没了，补齐/预取的状态一并作废
     iconPrefetchDoneSize = 0;
     iconPaintMissed = false;
     iconMissFirst = 0;
     iconMissLast = -1;
-    iconPanePend = false;
     iconFillStall = 0;
+    lastIconRepaintTick = 0;
+    iconFillDispatchTick = 0;
+
+    // 押后滚动也一并作废（连同它的重试定时器）：池都没了，「目标窗口已就位」这个判据
+    // 已经没有意义，留着只会让下一次拖动一上来就撞上押后上限。
+    pendingScrollTop = -1;
+    if (iconScrollTimerPending) {
+        if (hwndContentView) KillTimer(hwndContentView, TIMER_ICON_SCROLL);
+        iconScrollTimerPending = false;
+    }
 }
 
 // 主路径渲染失败时的最后手段：按**来源文件**查一次 shell 的系统列表索引并缓存。
@@ -715,6 +842,9 @@ static int poolSlotLookup(struct IconPool* p, int id) {
     if (id - 1 >= p->idSlotCap) return -1;   // 容量没覆盖到 = 肯定没登记过
     if (p->idSlot[id - 1] < 0) return -1;
     int slot = p->idSlot[id - 1];
+    // slotId / slotTick 是裸数组，slot 只能来自我们自己的登记 —— 这里再兜一道：
+    // 簿记一旦出错（池被换掉、槽数缩过），宁可当「这条来源没有槽」，也不要越界写。
+    if (slot >= p->slotCount) return -1;
     p->slotTick[slot] = ++p->tick;           // 命中即刷新 LRU 时间戳
     return slot;
 }
@@ -740,7 +870,7 @@ static int poolSlotFor(struct IconPool* p, int id) {
     int slot;
     if (p->filled < p->slotCount) {
         slot = ImageList_AddIcon(p->himl, hicon);
-        if (slot >= p->filled) p->filled = slot + 1;
+        if (slot >= 0 && slot < p->slotCount && slot >= p->filled) p->filled = slot + 1;
     }
     else {
         // 池满：在**非共享**槽里挑最久没用过的原地替换。ReplaceIcon 索引不变，
@@ -771,7 +901,9 @@ static int poolSlotFor(struct IconPool* p, int id) {
         slot = ImageList_ReplaceIcon(p->himl, victim, hicon);
     }
     DestroyIcon(hicon);
-    if (slot < 0) return -1;
+    // 槽位必须落在池内。ImageList_AddIcon 理论上只返回有效索引，但下面两行是**裸数组写**，
+    // 簿记一旦出错就是堆越界写 —— 宁可这次不画，也不要写坏池。
+    if (slot < 0 || slot >= p->slotCount) return -1;
 
     p->slotId[slot] = id;
     p->slotTick[slot] = ++p->tick;
@@ -791,7 +923,10 @@ static int resolveIconId(struct ListItem* item) {
     if (!item || !item->node) return 0;
     struct FileNode* node = item->node;
     if (iconIdTypeNameValid(item->icon)) return item->icon;
-    if (item->iconFailed) return 0;
+    // 退避中：这一项上一轮解析 / 登记失败过，这一轮直接放弃。那两个 shell 调用
+    // （ICONLOCATION、系统列表索引）是毫秒级的，退避期内每帧重试会把绘制和补齐预算一起拖垮。
+    // 退避计数由补齐循环递减，绘制路径只读、不会走到这条分支。
+    if (item->iconTries > 0) return 0;
 
     wchar_t key[MAX_PATH] = {0};
     bool shared = true;
@@ -979,9 +1114,12 @@ static int resolveIconId(struct ListItem* item) {
     }
 
     item->icon = id;
-    // 登记失败（来源表已满、或坐标与索引都拿不到）：打个标记，别让每次重绘都重来
-    // 一遍 ICONLOCATION —— 那种情况下重试既不会成功，还会把 shell 调用变成热点。
-    if (id <= 0) item->iconFailed = true;
+    // 登记失败（来源表到顶 / 分配失败 / 坐标与 shell 索引都没拿到）一律按**瞬态**处理：
+    // 只做退避计数，不写任何永久标记。那两个 shell 调用完全可能只是**这一次**没成
+    // （Wine 的 shell 正忙、内存紧张、注册表项临时读不到），写死一次就是那个文件在本目录内
+    // 永远没有图标 —— 那正是「随机文件缺图标」最直接的来源。
+    // 退避也**不影响绘制**：只要池里有这条来源的槽，getIconSlotForPaint 照样画出来。
+    if (id <= 0 && item->iconTries == 0) item->iconTries = ICON_RETRY_BACKOFF_ROUNDS;
     return id;
 }
 
@@ -998,18 +1136,19 @@ static int getIconSlot(struct ListItem* item) {
     return poolSlotFor(p, id);
 }
 
-// 绘制路径专用的槽位查询：**只查已渲染好的槽，绝不在这里渲染**。
+// 绘制路径专用的槽位查询：默认**只查已渲染好的槽**，不在这里渲染。唯一的例外是
+// 「紧跟着滚动消息的那几次绘制」—— 那时允许就地渲染有界的几个（见函数体内说明），因为
+// Wine 的 scroll_list() 在 ScrollWindowEx 之后会同步 UpdateWindow，那一帧必须当场就是
+// 完整的，否则新露出的那一条一定带着空格子结束。
 //
-// 为什么：渲染一个图标要解 PE / 缩放，是毫秒级的活。它一旦落在 WM_PAINT 里，
-// 首帧就得等整屏图标提完 —— 而 Wine 是先 WM_ERASEBKGND 把客户区擦成窗口底色再
-// 发 WM_PAINT，用户看到的就是「点进去先闪一下白」。所以绘制只管画，缺图标的项先
-// 画成空位；渲染由 iconFillStep() 在绘制之外补，**补齐期间不重画任何一格**，等可见项
-// 全部就位才整屏重画一次（这样图标是一起出现的，而不是按渲染快慢一格一格冒出来）。
-// 代价只是「图标比文字晚一两帧到位」，换来的是首帧恒定只有布局 + 描画的开销。
+// 为什么不能在这里渲染：渲染一个图标要解 PE / 缩放（或查 shell），是毫秒级的活。它一旦
+// 落在 WM_PAINT 里，首帧就得等整屏图标提完 —— 而 Wine 是先 WM_ERASEBKGND 把客户区擦成
+// 窗口底色再发 WM_PAINT，用户看到的就是「点进去先闪一下白」。所以绘制只管画，缺图标的项
+// 先空着；渲染由 iconFillStep() 在绘制之外补，补进来的由 iconFillRange 重画缺过的区间。
 //
-// 走这条路还有个好处：这个函数是绘制路径唯一知道「哪些项还没有图标」的地方，
-// 所以补齐的调度就从这里发——滚动/翻页/改窗口大小之后自然会有绘制，也就自然
-// 会重新安排补齐，不必再去接 WM_VSCROLL / WM_MOUSEWHEEL / WM_SIZE。
+// 这个函数同时是绘制路径唯一知道「哪些项还没有图标」的地方，所以补齐的调度也从这里发 ——
+// 滚动/翻页/改窗口大小之后自然会有绘制，也就自然会重新安排补齐，不必再去接
+// WM_VSCROLL / WM_MOUSEWHEEL / WM_SIZE。
 static int getIconSlotForPaint(struct ListItem* item) {
     if (!item) return -1;
     struct IconPool* p = currentIconPool();
@@ -1017,37 +1156,57 @@ static int getIconSlotForPaint(struct ListItem* item) {
     // 退回系统列表，那时的 iImage 语义与池内的槽位不对应。
     if (!p || p->himl != currentImageList) return -1;
 
-    // 已判定补不出来的项提前退出。注意判据要放在 id 有效性**之前**：渲染失败的项
-    // 仍留着有效的 id（resolveIconId 已经把 id 记在 item->icon 上了），只按
-    // 「id 有效但池里没槽」判断的话，每次绘制都会安排一次补齐，而补齐循环里
-    // `if (item->iconFailed) continue;` 会把它跳过 —— 一进一出就变成消息空转。
-    if (item->iconFailed) return -1;
+    // **有就画**：池里已经有这一项的槽就直接画出来。
+    //
+    // 这条判据里**不掺任何**「本轮要不要去补」的状态。退避计数（iconTries）只决定补齐要不要
+    // 再试一次，绝不能决定这一格画不画 —— 曾经这里有一行
+    // `if (item->iconFailed || item->iconGaveUp) return -1;`，把补齐的调度标记当成了绘制
+    // 判据：于是池里明明有槽（文件夹、普通文件的共享槽几乎总在池里）也被画成空位，而那个
+    // 标记**只在滚动消息到达时**被清零，两者的时间差就表现为「滚动时随机几个图标先消失、
+    // 紧接着又出现」。判据改成「池里有没有槽」之后，有槽的图标在任何一帧都画得出来。
+    if (iconIdTypeNameValid(item->icon)) {
+        int slot = poolSlotLookup(p, item->icon);
+        if (slot >= 0) return slot;
+    }
 
-    // 上报「这里缺图标」的见证：补齐循环据此把本轮范围扩到绘制真正看到过的项上。
-    // 只对**还可能补出来**的项上报 —— 已经判失败的项必须在上面就返回，否则补齐会
-    // 永远等一个补不出来的格子（判定永远不到「全部就位」，整屏重画就永远不来）。
+    // 池里确实没有。**滚动驱动的绘制是唯一的例外**：就地渲染出来，这一帧直接画全。
+    //
+    // 为什么必须破这个例：Wine 的 comctl32/listview.c 里 scroll_list() 是
+    //     ScrollWindowEx(..., SW_ERASE | SW_INVALIDATE);
+    //     UpdateWindow(infoPtr->hwndSelf);        ← 同步 WM_PAINT
+    // —— 新露出的那一条**在控件自己处理滚动消息的过程中就被画掉了**。把它留到滚动之后的
+    // iconFillVisibleSync 去补，那一帧必然已经带着空格子结束，补上后再重画一次，用户看到的
+    // 就是「图标消失一下又立刻出现」。
+    //
+    // 为什么在这里渲染不会把「先擦白」的老毛病带回来：那一帧脏的只是新露出的**一条**（它
+    // 刚被 SW_ERASE 擦过，本来就得等这一次绘制），渲染这几毫秒不会让任何已有内容消失。
+    // 导航时那种「整屏被 InvalidateRect(TRUE) 擦白」的情形则由额度挡住 —— 只有紧跟着滚动
+    // 消息的绘制才有额度（iconPaintRenderBudget 在 WM_PAINT 里按 lastScrollTick 判定）。
+    //
+    // 额度按**本屏跨度**给（见 WM_PAINT），不是一个小常数：拖滑块时每条 WM_VSCROLL 都会把整屏
+    // 重画一次，额度必须够把这一帧真正要画的来源渲完，否则被截掉的那几条就是空格子。
+    // 额度用尽只会发生在「一屏全是各不相同的独占来源」这种极端情形，那时走下面的异步补齐。
+    DWORD nowTick = GetTickCount();
+    if (iconPaintRenderBudget > 0 &&
+        (inScrollMessage || nowTick - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS) &&
+        nowTick < iconPaintRenderDeadline) {
+        int slot = getIconSlot(item);     // 解析 + 渲染（渲染进入绘制路径的唯一入口）
+        if (slot >= 0) {
+            iconPaintRenderBudget--;
+            return slot;
+        }
+    }
+
+    // 池里确实没有、额度也用尽（或不在滚动期）：上报「这里缺图标」的见证（补齐据此把本轮
+    // 范围扩到绘制真正看到过的项上），并安排一轮补齐。
     if (items && item >= items && item < items + numItems) {
         int idx = (int)(item - items);
         if (idx < iconMissFirst) iconMissFirst = idx;
         if (idx > iconMissLast) iconMissLast = idx;
         iconPaintMissed = true;
     }
-
-    // 本屏还没补齐：**整屏一律画空位**。哪怕这一格池里已经有槽也不画 —— 否则先画到的
-    // 格子有图标、后画的没有，就是「有的有、有的空，一格一格冒出来」。本屏补齐后
-    // （iconPanePend 被 iconFillRange 放掉）会整屏重画一次，那时一起出现。
-    if (iconPanePend) {
-        scheduleIconFill();
-        return -1;
-    }
-
-    if (!iconIdTypeNameValid(item->icon)) {
-        scheduleIconFill();   // 还没解析出 id：交给补齐循环去解析 + 渲染
-        return -1;
-    }
-    int slot = poolSlotLookup(p, item->icon);
-    if (slot < 0) scheduleIconFill();
-    return slot;
+    scheduleIconFill();
+    return -1;
 }
 
 // 计算并应用大图标视图的格子尺寸（LVM_SETICONSPACING）。
@@ -1501,30 +1660,106 @@ static void execCommandLine(wchar_t* command) {
 LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // 滚动类消息一律记时间戳：图标补齐据此让位，避免和拖动抢消息队列
     // （`switch` 下面不动它们，继续交给列表控件的默认处理）。
+    // LVM_SCROLL 也算：外部（手势 / 外壳 / 应用自身）可以直接给控件发这条消息让它滚动，
+    // 走的是同一条 scroll_list → 同步重画的路子；不记的话那一帧就没人当场补图标。
+    // —— 滚动之前先把这个目标窗口的图标渲好，再让控件滚 ——
+    // Wine 的 scroll_list() 是 ScrollWindowEx(整块 rcList) + 同步 UpdateWindow：滚动消息一进
+    // 控件，新露出的一屏**当场**就被画掉了。等它画完再去补图标，那一帧必然已经带着空格子结束
+    // —— 这正是「快拖时随机几个图标先消失、紧接着又出现」。顺序必须反过来（见
+    // preScrollHandleVScroll）。它返回 true = 这条消息已经处理完（已经滚过，或者正押着）。
+    bool preScrolled = false;
+    if (msg == WM_VSCROLL && !inPreScroll && items && numItems > 0)
+        preScrolled = preScrollHandleVScroll((UINT)LOWORD(wParam));
+
     bool scrollMsg = (msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_MOUSEWHEEL ||
-                      msg == WM_MOUSEHWHEEL || msg == WM_KEYDOWN || msg == WM_SIZE);
-    if (scrollMsg) lastScrollTick = GetTickCount();
+                      msg == WM_MOUSEHWHEEL || msg == WM_KEYDOWN || msg == WM_SIZE ||
+                      msg == LVM_SCROLL);
+    if (scrollMsg) {
+        lastScrollTick = GetTickCount();
+        // 滚动 = 时机重来的机会。这里只碰**可见区**（O(可见项数)，与目录规模无关）：
+        //   ① 把可见项的退避计数清零，让停手后的补齐立刻再试一次；
+        //   ② 对可见项各查一次池 —— 命中会刷新槽的 LRU 时间戳，从而**保护在屏图标不被淘汰**。
+        // ② 必须由我们主动做：控件在快速滚动时只重绘脏区，某些可见项这一帧压根没被绘制过，
+        // 它们的槽时间戳就显得「很久没用」，池满时被挑作 LRU 受害者顶掉 —— 下一帧那一格就是
+        // 空白，补齐再渲染回来，看上去正是「闪一下」。
+        struct IconPool* p = currentIconPool();
+        if (p && p->himl == currentImageList && items && numItems > 0) {
+            int first, last;
+            visibleItemRange(&first, &last);
+            for (int i = first; i < last; i++) {
+                struct ListItem* it = &items[i];
+                it->iconTries = 0;
+                if (iconIdTypeNameValid(it->icon)) poolSlotLookup(p, it->icon);
+            }
+        }
+    }
 
     // 连续拖动（按住滚动条滑块）事后不做同步补齐：拖动期间每个鼠标移动都来一条
     // WM_VSCROLL，每条都付一次渲染代价的话，拖动本身就卡了。它交给「滚动静默 + 异步
-    // 补齐」，而闸（iconPanePend）保证拖动期间不会出现「一半有图标一半空白」。
+    // 补齐」；拖动期间绘制照常画池里已有的图标，缺的先空着。
     // 离散滚动（滚轮 / 翻页键 / 行滚动 / 改尺寸）只有一步，趁机把新露出来的补齐。
     bool syncFillAfter = scrollMsg && !(msg == WM_VSCROLL && LOWORD(wParam) == SB_THUMBTRACK);
 
-    // 绘制入口：这一帧画不画图标，必须在**任何一格被画出来之前**定下来（见 updateIconPaneGate）。
-    if (msg == WM_PAINT) updateIconPaneGate();
+    // 绘制入口：发现可见区还有缺图标的项就安排一轮补齐（见 requestIconFillForVisible）。
+    // 注意它**不**决定「这一帧画不画图标」—— 绘制一律「有就画」，缺的先空着，
+    // 补齐每有进展就把缺过的区间重画一次。
+    if (msg == WM_PAINT) {
+        // 本次绘制重开「就地渲染」额度（见 getIconSlotForPaint）。
+        //
+        // 额度按**本屏跨度**给，不再是一个写死的小数目。绘制路径唯一必须保证的事是
+        // 「这一帧里，本屏每一条来源都已经在池里」：一屏有几十项，但去重后通常只有个位数
+        // 到十几个来源（.dll 这类共享项一个 id 就点亮整屏），所以「本屏有多少项」就是
+        // 「最多要渲多少条来源」的天然上界。
+        //
+        // 曾经这里是 10 个 / 15ms，那正是「拖动滚动条过快必然随机几个图标缺失」的直接原因：
+        // Wine 的 scroll_list() 是 ScrollWindowEx(整块 rcList) + UpdateWindow()，拖滑块每走
+        // 一步就把**整屏**同步重画一次。一屏要渲的来源超过 10 条、或几条加起来超过 15ms
+        // （解一次 PE 就 3~5ms）时，排在后面的那几条被额度截掉、那一帧就是空格子；而哪几条
+        // 被截取决于绘制顺序与各自的解码耗时，看上去正是「随机几个」。
+        // Wine 的 explorer 用的是 shell 的系统图标表，那一帧永远查得到图，所以它不掉图标
+        // （代价是快拖时它更重）—— 这里走同一条路子：宁可这一帧多花几毫秒，也不留空格子。
+        DWORD now = GetTickCount();
+        bool scrollDriven = inScrollMessage || (now - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS);
+        if (scrollDriven) {
+            int quota = visibleIconSpan();
+            if (quota < ICON_PAINT_RENDER_MIN) quota = ICON_PAINT_RENDER_MIN;
+            iconPaintRenderBudget = quota;
+            iconPaintRenderDeadline = now + ICON_PAINT_RENDER_MS;
+        }
+        else {
+            // 导航 / 改尺寸那种整屏脏的绘制：不在绘制路径里渲染，交给首屏同步补齐
+            // （prewarmSharedIcons + iconFillVisibleSync）—— 保住「点进去立刻出列表」。
+            iconPaintRenderBudget = 0;
+            iconPaintRenderDeadline = now;
+        }
+        requestIconFillForVisible();
+    }
     // 两个一次性定时器：TIMER_ICON_FILL 是「等滚动静默」之后重新安排补齐（此时
     // lastScrollTick 已经过期，scheduleIconFill 会真的把消息投出去）；TIMER_ICON_PREFETCH
     // 是邻域预取的下一趟。定时器 id 不匹配就原样落给列表控件处理。
-    if (msg == WM_TIMER && (wParam == TIMER_ICON_FILL || wParam == TIMER_ICON_PREFETCH)) {
+    if (msg == WM_TIMER && (wParam == TIMER_ICON_FILL || wParam == TIMER_ICON_PREFETCH ||
+                            wParam == TIMER_ICON_SCROLL)) {
         KillTimer(hwnd, (UINT_PTR)wParam);
         if (wParam == TIMER_ICON_FILL) {
             iconFillTimerPending = false;
+            iconFillDispatchTick = GetTickCount();
             scheduleIconFill();
+        }
+        else if (wParam == TIMER_ICON_SCROLL) {
+            // 押后拖动的重试：鼠标停在原地时不会有新的 WM_VSCROLL 进来（滑块不动，滚动条就
+            // 不发消息），那条目标窗口就永远等不到「就位」。这一趟走 WM_TIMER 而不是
+            // PostMessage —— PostMessage 的优先级高于输入消息，自续环会把鼠标消息压在后面，
+            // 那正是「拖动粘住」的成因（见 scheduleIconFill 里的同类说明）。
+            iconScrollTimerPending = false;
+            if (pendingScrollTop >= 0 && !inPreScroll)
+                preScrollHandleVScroll((UINT)SB_THUMBTRACK);
         }
         else {
             iconPrefetchTimerPending = false;
-            if (iconPrefetchStep()) scheduleIconPrefetch();
+            // 押后拖动期间不预取：这一刻预取的目标（可见区两侧邻域）下一帧就过时了，
+            // 只会和「渲染目标窗口」抢时间。
+            if (pendingScrollTop >= 0) scheduleIconPrefetch();
+            else if (iconPrefetchStep()) scheduleIconPrefetch();
         }
         return 0;
     }
@@ -1546,10 +1781,10 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 
                 for (int i = 0; i < batch->count; i++) {
                     struct ListItem* item = &items[numItems + i];
-                    // realloc 出来的新区是未初始化的，icon / iconFailed / iconTries 必须清零：
-                    // iconFailed 的垃圾值非 0 会让这个文件直接「没有图标」（resolveIconId 与
-                    // 补齐循环都会把它当成已知失败跳过），而 icon 的垃圾值若恰好落在已登记的
-                    // 来源范围内，还会让它显示成**别的文件**的图标。这正好是随机、小概率的。
+                    // realloc 出来的新区是未初始化的，icon / iconTries 必须清零：iconTries 的
+                    // 垃圾值非 0 会让这一项一进来就处于退避状态（白白拖几轮不补），而 icon 的
+                    // 垃圾值若恰好落在已登记的来源范围内，还会让它显示成**别的文件**的图标。
+                    // 这正好是随机、小概率的。
                     memset(item, 0, sizeof(struct ListItem));
                     item->node = batch->nodes[i];
                     item->loaded = false;
@@ -1569,9 +1804,10 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             break;
         }
         case MSG_ICON_FILL: {
-            // 先清闸再补：iconFillStep 开头的 UpdateWindow 会触发绘制，绘制发现仍有
+            // 先清调度闸再补：iconFillStep 开头的 UpdateWindow 会触发绘制，绘制发现仍有
             // 缺图标就会再安排一次，所以这里必须允许重新挂号。
             iconFillPosted = false;
+            iconFillDispatchTick = GetTickCount();
             if (iconFillStep()) scheduleIconFill();
             break;
         }
@@ -1659,11 +1895,33 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             break;
         }
     }
-    LRESULT result = OrigWndProc(hwnd, msg, wParam, lParam);
+    // 滚动消息全程插旗：scroll_list() 处理过程中就会同步 UpdateWindow，那次绘制会重入进来，
+    // 必须能被认出是「滚动驱动的绘制」（见 getIconSlotForPaint 与 WM_PAINT 处的额度）。
+    if (scrollMsg) inScrollMessage = true;
+    // preScrolled：这条滚动已经在 preScrollHandleVScroll 里处理过了（它自己发过滚动消息：
+    // 渲染好目标窗口之后才把滚动交给控件）。
+    LRESULT result = preScrolled ? 0 : OrigWndProc(hwnd, msg, wParam, lParam);
+    if (scrollMsg) inScrollMessage = false;
+
+    // 滚完之后对**新的**可见区再做一遍上面那件事。滚动前那一次扫的是旧范围，而快速拖动时
+    // 新滚进来的项可能根本没被这一帧画到（控件只重绘脏区），它的槽时间戳就显得很旧 ——
+    // 池满时被挑作 LRU 受害者顶掉，下一帧那一格就是空白、补齐再渲回来 = 「闪一下」。
+    if (scrollMsg) {
+        struct IconPool* p = currentIconPool();
+        if (p && p->himl == currentImageList && items && numItems > 0) {
+            int first, last;
+            visibleItemRange(&first, &last);
+            for (int i = first; i < last; i++) {
+                struct ListItem* it = &items[i];
+                it->iconTries = 0;
+                if (iconIdTypeNameValid(it->icon)) poolSlotLookup(p, it->icon);
+            }
+        }
+    }
 
     // 滚动/改尺寸之后，控件已经把新露出来的那一条失效掉了，但重绘还没发生。趁这个空档
     // 把新露出来的那一屏补齐 —— 重绘到来时就是完整的，不会「滚过去一半有图标一半空白」。
-    if (syncFillAfter) iconFillVisibleSync(ICON_SCROLL_SYNC_BUDGET_MS);
+    if (syncFillAfter && !preScrolled) iconFillVisibleSync(ICON_SCROLL_SYNC_BUDGET_MS);
 
     return result;
 }
@@ -5101,7 +5359,6 @@ void clearIconCaches() {
     resetIconStore();
     for (int i = 0; i < numItems; i++) {
         items[i].icon = 0;
-        items[i].iconFailed = false;
         items[i].iconTries = 0;
     }
 }
@@ -5160,11 +5417,13 @@ void sortItems() {
 // 底色再发 WM_PAINT，用户看到的就是「点进去闪一下白/空」。所以先画（布局 + 文字 +
 // 已有图标的格子），后补。
 //
-// **一次成型**：补齐期间不重画任何一格，只有可见项**全部**就位之后才整屏重画一次。
-// 以前是每轮重画「刚补好的那几项」（LVM_REDRAWITEMS），看着更「渐进」，观感恰恰相反：
-// 同屏的目录 / 常见扩展名图标早在池里、当场就画得出来，而 exe / lnk 要现查 shell、
-// 慢得多 —— 两类项交错落在不同的轮次里，屏幕上就出现「一部分有图标、一部分空白」，
-// 而哪几个空白取决于池里恰好缓存了什么，看上去毫无规律。等齐了一次换一帧才是同时。
+// **补到就画**：绘制一律「有就画」（池里有槽就画出来），缺的先空着；补齐每有进展
+// （本屏就位的项数变多）就把绘制报告过缺图标的区间重画一次，重画限流。
+//
+// 绝不等「可见项全部就位」才画。曾经的「一次成型」是为了消除「一部分有图标、一部分空白」
+// 的参差观感，但它的代价是一屏项数越多、空得越久：详细视图一屏五六十到上百项，而补齐每轮
+// 只有 8ms 预算、滚动一到就被打断 —— 结果是「只要还剩几项没补上，整屏图标（含文件夹）
+// 全都不显示」。渐进填充远好于整屏空白。
 //
 // 这套循环是**无状态**的：每一趟都重新按当前可见区算范围、重新找还没补的项，因此
 // 导航/换尺寸后残留的旧消息只会白跑一趟，不需要代次号。
@@ -5184,12 +5443,19 @@ static int visibleIconSpan(void) {
 
     int cols = clientW / cellW; if (cols < 1) cols = 1;
     int rows = clientH / cellH; if (rows < 1) rows = 1;
+
+    // 详细视图一行一项（列不重复）。这里必须单独算：Wine 的 LVM_GETITEMSPACING 在 report
+    // 视图下返回的是 (表头总宽, 字体行高)（comctl32/listview.c 的 LISTVIEW_GetItemSpacing，
+    // uView != LV_VIEW_ICON 走 nItemWidth/nItemHeight 分支），照网格乘出来会得到
+    // 「2×(行数+2)」这种两倍于真实的跨度，而跨度直接决定每轮补齐要扫多少项 —— 一屏几十行
+    // 就够，多算的那部分纯属白扫（滚动时尤其明显，每趟都在白扫上百项）。
+    if (viewStyle == STYLE_DETAILS) return rows + 4;
     return (cols + 1) * (rows + 2);
 }
 
 // 当前可见区对应的项范围 [first, last)。「本屏要补哪些项」只允许用这一个函数算：
-// 补齐循环拿它定范围，绘制入口拿它判「本屏齐没齐」。两边若各算各的，就会出现
-// 「补齐说齐了、绘制说还缺」的往复，整屏重画一轮接一轮。
+// 补齐循环拿它定范围，绘制入口（requestIconFillForVisible）拿它判「这一屏还有没有缺的」。
+// 两边若各算各的，就会出现「补齐说齐了、绘制说还缺」的往复，重画一轮接一轮。
 static void visibleItemRange(int* outFirst, int* outLast) {
     int first = (int)ListView_GetTopIndex(hwndContentView);
     if (first < 0) first = 0;
@@ -5204,124 +5470,436 @@ static void visibleItemRange(int* outFirst, int* outLast) {
     *outLast = last;
 }
 
-// 纯查询：这一项现在画得出来吗？（**不做任何渲染**）
-// 只有「能画出来」的项才允许拦住整屏 —— 补不出来的项（iconFailed）必须算就位，
-// 否则整屏永远等不到「全部就位」，图标就再也不显示了。
+// 纯查询：这一项**这一刻**在池里有没有可直接绘制的槽？（**不做任何渲染**）
+// 用来判断「这一段还有没有缺图标」（见 requestIconFillForVisible / iconFillRange）。
+// 判据只有一条：池里有它的槽 = 就位。退避计数**不算**就位 —— 否则补齐会误判「本屏齐了」
+// 而停止投递，退避计数也就再没人递减，那几项会一直空着。
 static bool itemIconPainted(struct IconPool* p, struct ListItem* item) {
     if (!item->node) return true;      // 空占位项：本来就不画图标
-    if (item->iconFailed) return true; // 已判定补不出来：不再等它
     return iconIdTypeNameValid(item->icon) && poolSlotLookup(p, item->icon) >= 0;
 }
 
 // 让第 i 项「该有图标就有图标」。返回 false = 还没就位（这一轮挑不出槽 / 解析还没成功）。
+// 失败只做**退避**（iconTries），不写任何「永久失败」标记：哪几项恰好没就位取决于渲染顺序
+// 与池的状态，写死一次就是那个文件在本目录内永远没有图标。
 static bool itemIconReady(struct IconPool* p, int i) {
     struct ListItem* item = &items[i];
     if (!item->node) return true;      // 空占位项：本来就不画图标
     if (!item->loaded) loadItemData(item);
-    if (item->iconFailed) return true; // 已判定补不出来：不再等它，否则整屏永远等不到「全部就位」
+
+    // 退避中：这一轮不试。否则来源表暂时满、或这一刻挑不出可淘汰的槽的那几项，会把每轮
+    // 8ms 预算全吃掉 —— 而同屏其它「本来能补上」的项就永远轮不到。
+    if (item->iconTries > 0) { item->iconTries--; return true; }
     if (itemIconPainted(p, item)) return true;
 
     // 判据是「池里有没有槽」，**不是**「有没有解析出 id」。
     // loadItemData() 早就把 id 解析好了，但槽位只有下面的 getIconSlot() → poolSlotFor()
     // 才会真正去建；拿 id 判断等于把全部待渲染项都跳过 → 池永远是空的，图标一个都不显示。
     if (getIconSlot(item) < 0) {
-        // 解析层失败（拿不到坐标 / 来源表满）是确定性的，重试多少次都一样：直接放弃。
-        // 渲染层失败大多数是**瞬态**的（池满且这一刻挑不出可淘汰的槽），给几次机会
-        // 再放弃 —— 否则偶发一次失败就让这个文件在这次浏览里彻底没有图标。
-        if (!iconIdTypeNameValid(item->icon) || ++item->iconTries >= 3) item->iconFailed = true;
+        item->iconTries = ICON_RETRY_BACKOFF_ROUNDS;
         return false;
     }
-    item->iconTries = 0;
     return true;
 }
 
+// 这个名字的图标是否必须「按文件」单独取？纯名字判断，不碰文件系统、不碰 shell。
+// 判据与 resolveIconId 里的 exclusive 分支一致：exe 可能自带图案（要解 PE）、
+// lnk 要读自己的 ICONLOCATION、ico 要解自己的图案。
+static bool nodeIconIsPerFile(const struct FileNode* node) {
+    if (!node || node->type != TYPE_FILE) return false;
+    const wchar_t* ext = wcsrchr(node->name, L'.');
+    if (!ext) return false;
+    return wcsicmp(ext, L".exe") == 0 || wcsicmp(ext, L".lnk") == 0 || wcsicmp(ext, L".ico") == 0;
+}
+
+// ================= 滚动前「预渲染 + 就位再滚」 =================
+//
+// 为什么需要它：Wine 的 comctl32/listview.c 里 scroll_list() 是
+//     ScrollWindowEx(infoPtr->hwndSelf, ..., SW_ERASE | SW_INVALIDATE);
+//     UpdateWindow(infoPtr->hwndSelf);        ← 同步 WM_PAINT
+// —— 滚动消息**处理的过程中**，新露出的一屏就被画掉了。任何「先滚、再补图标」的做法都只能
+// 事后重画那一帧，用户看到的就是「图标先消失、紧接着又出现」。唯一能根治的顺序是反过来：
+// **先把目标窗口的图标渲进池，再让控件滚**。
+//
+// 三种滚动分开对待：
+//   · 拖滑块（SB_THUMBTRACK）：连续几十上百条消息。渲完了就滚；没渲完就先押着不滚 ——
+//     押着同时也省掉了这一次整屏重画。押后上限 ICON_SCROLL_HOLD_MAX_MS，超了就照滚：
+//     宁可闪一下，也不能让内容粘在滑块后面不动。押后期间滑块本身照旧跟手 ——
+//     它的位置由 win32u/scroll.c 的 g_tracking_info 直接画，与我们滚没滚无关。
+//   · 松手（SB_THUMBPOSITION）：最后一次一定要画全，可以多花点时间（ICON_SCROLL_FINAL_MS）。
+//   · 翻页 / 行滚 / 顶底（离散一次）：用户没在连着拖，多等几十毫秒看不出来，一次渲完再滚。
+//
+// 目标窗口的顶项怎么来：**详细视图里滚动条位置就是项号**（listview.c 的 LISTVIEW_GetTopIndex
+// 在 LV_VIEW_DETAILS 下直接返回 scrollInfo.nPos），映射精确 —— 只有这种情形才押后。
+// 图标 / 列表视图的位置单位是像素（nItem = GetCountPerRow × (nPos / nItemHeight)），只能估算，
+// 那里只做「尽力预渲染」不押后：估错了押后就永远等不到「就位」，内容会一直滞后。
+// 无论哪种视图，「滚」这个动作都是把原消息交回控件、由 Wine 自己算增量，所以窗口估错最多是
+// 白渲染几次，不会滚错位置。
+static bool preScrollVertInfo(SCROLLINFO* si) {
+    si->cbSize = sizeof(*si);
+    si->fMask = SIF_ALL;
+    return GetScrollInfo(hwndContentView, SB_VERT, si) != FALSE;
+}
+
+// 这条滚动码的「目标顶项」。返回 -1 = 不认识，别拦。*exact = 映射是否精确。
+static int preScrollTargetTop(UINT code, const SCROLLINFO* si, bool* exact) {
+    *exact = (viewStyle == STYLE_DETAILS);
+
+    if (*exact) {
+        long top;
+        switch (code) {
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: top = (long)si->nTrackPos; break;
+        case SB_LINEUP:        top = (long)si->nPos - 1; break;
+        case SB_LINEDOWN:      top = (long)si->nPos + 1; break;
+        case SB_PAGEUP:        top = (long)si->nPos - (long)si->nPage; break;
+        case SB_PAGEDOWN:      top = (long)si->nPos + (long)si->nPage; break;
+        case SB_TOP:           top = 0; break;
+        case SB_BOTTOM:        top = (long)si->nMax; break;
+        default: return -1;
+        }
+        if (top < 0) top = 0;
+        if (top > numItems - 1) top = numItems - 1;
+        return (int)top;
+    }
+
+    // 图标 / 列表视图：位置单位是像素（列表视图是「列」），按「格高 × 每行项数」换算。
+    if (code != SB_THUMBTRACK && code != SB_THUMBPOSITION) return -1;
+
+    RECT rc;
+    if (!GetClientRect(hwndContentView, &rc)) return -1;
+    int clientW = rc.right - rc.left, clientH = rc.bottom - rc.top;
+    if (clientW <= 0 || clientH <= 0) return -1;
+    DWORD spacing = (DWORD)ListView_GetItemSpacing(hwndContentView, viewStyle != STYLE_LARGE_ICON);
+    int cellW = (int)LOWORD(spacing), cellH = (int)HIWORD(spacing);
+    if (cellW <= 0 || cellH <= 0) return -1;
+    int cols = clientW / cellW; if (cols < 1) cols = 1;
+    int rows = clientH / cellH; if (rows < 1) rows = 1;
+
+    long d = (long)si->nTrackPos - (long)si->nPos;      // 位置单位的增量
+    long top = (long)ListView_GetTopIndex(hwndContentView);
+    if (viewStyle == STYLE_LIST) top += d * rows;       // 列表视图：1 个单位 = 一列
+    else                         top += (d / cellH) * cols;
+    if (top < 0) top = 0;
+    if (top > numItems - 1) top = numItems - 1;
+    return (int)top;
+}
+
+// 把 [top, top + 一屏) 这一段的来源渲进池，最多花 budgetMs。返回 true = 这一段已经全就位
+// （「渲染失败、已记退避」的项也算就位 —— 它们永远不会就位，当阻塞项会让押后永远等不到头）。
+static bool iconPrepareWindow(int top, int budgetMs) {
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) return true;   // 池没挂上控件：这里管不了，交给原路
+    if (!items || numItems <= 0) return true;
+
+    int span = visibleIconSpan();
+    if (span <= 0) span = 64;
+    if (top < 0) top = 0;
+    int last = top + span;
+    if (last > numItems) last = numItems;
+
+    DWORD deadline = GetTickCount() + (DWORD)(budgetMs > 0 ? budgetMs : 0);
+    bool ready = true;
+    for (int i = top; i < last; i++) {
+        struct ListItem* it = &items[i];
+        if (!it->node) continue;          // 空占位项：本来就不画图标
+        if (it->iconTries > 0) continue;  // 退避中：当它已定，别阻塞
+        if (itemIconPainted(p, it)) continue;
+        if ((int)(GetTickCount() - deadline) >= 0) { ready = false; break; }
+        itemIconReady(p, i);              // 解析 + 渲染；失败会记退避，下一轮被上面跳过
+        if (!itemIconPainted(p, it) && it->iconTries == 0) ready = false;
+    }
+    return ready;
+}
+
+static void preScrollCancelRetry(void) {
+    if (!iconScrollTimerPending) return;
+    if (hwndContentView) KillTimer(hwndContentView, TIMER_ICON_SCROLL);
+    iconScrollTimerPending = false;
+}
+
+// 把滚动交给控件。只允许在「目标窗口已经渲好」之后调 —— 它内部会同步重画这一屏。
+static void preScrollApply(UINT code) {
+    pendingScrollTop = -1;
+    preScrollCancelRetry();
+    inPreScroll = true;
+    inScrollMessage = true;      // 这次绘制算「滚动驱动」：准许绘制路径就地渲染兜底
+    OrigWndProc(hwndContentView, WM_VSCROLL, MAKEWPARAM(code, 0), 0);
+    inScrollMessage = false;
+    inPreScroll = false;
+}
+
+// 返回 true = 这条 WM_VSCROLL 已经处理完（已经滚过，或者正押着）。false = 照常交给控件。
+static bool preScrollHandleVScroll(UINT code) {
+    if (code == SB_ENDSCROLL) {
+        // 拖动结束：最后一步已经在 SB_THUMBPOSITION 里画全并滚过了，押后状态就此作废。
+        pendingScrollTop = -1;
+        preScrollCancelRetry();
+        return false;      // 这条对滚动条来说只是「结束了」的通知，照样交给控件
+    }
+
+    bool isThumb    = (code == SB_THUMBTRACK);
+    bool isFinal    = (code == SB_THUMBPOSITION);
+    bool isDiscrete = (code == SB_PAGEUP || code == SB_PAGEDOWN ||
+                       code == SB_LINEUP || code == SB_LINEDOWN ||
+                       code == SB_TOP    || code == SB_BOTTOM);
+    if (!isThumb && !isFinal && !isDiscrete) return false;
+
+    SCROLLINFO si;
+    if (!preScrollVertInfo(&si)) return false;
+
+    bool exact = false;
+    int top = preScrollTargetTop(code, &si, &exact);
+    if (top < 0) return false;
+
+    // 图标 / 列表视图：目标窗口只能估算，不做押后。尽力渲一遍再照滚 —— 蒙对了这一帧就是
+    // 完整的，蒙错了退化成原来的行为（绘制路径的就地渲染兜底）。
+    if (isThumb && !exact) {
+        iconPrepareWindow(top, ICON_SCROLL_PREPARE_MS);
+        return false;
+    }
+
+    bool ready = iconPrepareWindow(top, isThumb ? ICON_SCROLL_PREPARE_MS : ICON_SCROLL_FINAL_MS);
+
+    if (isFinal || isDiscrete) {
+        // 一次性滚动：多补一次大预算（用户没在连着拖，等一下看不出来），然后照滚。
+        if (!ready) iconPrepareWindow(top, ICON_SCROLL_FINAL_MS);
+        preScrollApply(code);
+        return true;
+    }
+
+    // 拖滑块：就位就滚；没就位先押着不滚（顺带省掉这次整屏重画）。
+    DWORD now = GetTickCount();
+    if (pendingScrollTop < 0) pendingScrollSince = now;   // 这一轮押后的起点
+    pendingScrollTop = top;
+
+    if (ready || now - pendingScrollSince >= ICON_SCROLL_HOLD_MAX_MS) {
+        preScrollApply((UINT)SB_THUMBTRACK);
+        return true;
+    }
+
+    // 押后期间必须自己找机会重试（见 WM_TIMER 的 TIMER_ICON_SCROLL 分支）。
+    if (!iconScrollTimerPending) {
+        iconScrollTimerPending = true;
+        if (!SetTimer(hwndContentView, TIMER_ICON_SCROLL, ICON_SCROLL_RETRY_MS, NULL)) {
+            // SetTimer 失败就别押了：宁可闪一下，也不能把内容押死在这里。
+            iconScrollTimerPending = false;
+            preScrollApply((UINT)SB_THUMBTRACK);
+        }
+    }
+    return true;
+}
+
+// 目录加载时把「共享来源」一次性渲染进池 —— 在首帧之前，且排在 iconFillVisibleSync 前面。
+//
+// 为什么非它不可：共享来源（目录 / 驱动器 / 按扩展名登记的非 exe、lnk、ico 文件）的图案与
+// **具体哪个文件**无关 —— system32 里几百个 .dll 全部共用同一个来源 id，渲染一次就能点亮
+// 整屏。可池是按尺寸惰性填充的：**首次**进那个目录时池里一个 .dll 槽都没有，首帧那一片
+// dll 就是空格子，要等补齐渲染完再补画上去，看上去正是「图标消失一下又立刻显示」。
+//
+// 为什么必须排在 iconFillVisibleSync **之前**：那 150ms 首屏预算按项顺序花，同屏的 exe 会
+// 先把它吃干（每个 exe 一次 ICONLOCATION 加一次 PE 解码，几十毫秒级），排在后面的共享来源
+// 就整个轮不到 —— 这正是「首次进 system32，闪的是 dll 而不是 exe」的成因。共享来源单独
+// 先跑，数量只有「本目录的扩展名种类」（通常个位数到几十），于是无论首屏预算够不够，
+// dll / 文件夹 / 常见扩展名这些一定是第一帧就在的。
+//
+// 独占项（exe / lnk / ico）刻意**不**预热：它们每个文件都要单独解码，代价随目录里的 exe
+// 数量线性增长，那正是首屏同步预算与邻域预取该花的地方。
+static void prewarmSharedIcons(void) {
+    if (!hwndContentView || !items || numItems <= 0) return;
+
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) return;
+
+    // 共享槽**不参与 LRU 淘汰**（见 poolSlotFor），所以预热必须自带有界：最多占半个池，
+    // 剩下一半留给独占项。否则整池被共享项占满，独占项进来只能反过来把共享项顶掉，
+    // 一个进一个出，来回翻烧饼 —— 那又是另一种「图标闪」。
+    int sharedInPool = 0;
+    for (int i = 0; i < p->slotCount; i++) {
+        int owner = p->slotId[i];
+        if (owner > 0 && owner <= iconSourceCount && (iconSources[owner - 1].flags & ICONSRC_SHARED))
+            sharedInPool++;
+    }
+    int budgetShared = p->slotCount / 2 - sharedInPool;
+    if (budgetShared > ICON_PREWARM_MAX) budgetShared = ICON_PREWARM_MAX;
+    if (budgetShared <= 0) return;
+
+    DWORD deadline = GetTickCount() + ICON_PREWARM_BUDGET_MS;
+    int added = 0;
+
+    // 按显示顺序扫（文件夹在前、同类按名）：先在屏上的项优先，预算不够时先保它们。
+    for (int i = 0; i < numItems; i++) {
+        // 扫描本身也要受预算约束：几万项的目录里「所有共享来源都已在池中」时一次都不会命中
+        // 下面的 break，逐项扫完虽然只要几毫秒，但没必要为它多等。每 64 项查一次时钟。
+        if ((i & 63) == 0 && i > 0 && GetTickCount() >= deadline) break;
+
+        struct ListItem* item = &items[i];
+        if (!item->node) continue;
+        if (nodeIconIsPerFile(item->node)) continue;   // exe/lnk/ico：交给首屏同步补齐
+
+        // 只解析 id，**不**走 loadItemData：后者会顺带格式化大小与日期，而这一趟只要图标
+        // （虚拟列表「按需物化」的约定也不该被这里打破，提前解析的只有图标这一项）。
+        // 同一扩展名的第二个文件起都是去重表的命中，连 shell 都不碰，所以整趟扫描的代价是
+        // 「本目录的扩展名种类 × 一次 shell 查询」，与文件总数无关。
+        int id = resolveIconId(item);
+        if (id <= 0) continue;
+        if (poolSlotLookup(p, id) >= 0) continue;      // 这条来源已经在池里了
+
+        if (poolSlotFor(p, id) >= 0) added++;
+        if (added >= budgetShared) break;
+        if (GetTickCount() >= deadline) break;
+    }
+}
+
+// 补齐第一步用来收集「本屏用到的来源 id」的去重缓冲（见 iconFillRange）。
+// 静态复用，避免每轮分配；容量不够才翻倍。nIds 通常个位数到十几。
+// 进程级一次性缓冲，不随目录切换释放（最多几百个 int）。
+static int* iconFillIds = NULL;
+static int iconFillIdsCap = 0;
+
 // 补一轮可见区（含绘制上报的项），deadline = 时间预算到点时刻。
 // 返回 true = 范围内还有没就位的（本屏这一帧还画不出来）。
-static bool iconFillRange(DWORD deadline) {
+static bool iconFillRangeInner(DWORD deadline) {
     struct IconPool* p = currentIconPool();
-    if (!p || p->himl != currentImageList) { iconPanePend = false; return false; }
+    if (!p || p->himl != currentImageList) return false;
 
     DWORD scrollTickAtEntry = lastScrollTick;
 
     int first, last;
     visibleItemRange(&first, &last);
+    // 可见区范围单独留一份：第一步的「按 id 去重渲染」只扫可见区（它才是用户正看着的地方，
+    // 而且项数有界、去重不会变慢）；绘制上报的 miss 区间可能横跨上千项，交给第二步逐项兜底。
+    int visFirst = first, visLast = last;
 
     // 把绘制路径上报的「缺图标」区间并进来（取走后立刻复位）。绘制看到的东西必然在屏上；
-    // 只要漏掉一个，就会出现「补齐判定完成 → 整屏重画 → 绘制还是缺 → 又安排补齐」的往复。
-    if (iconMissLast >= iconMissFirst) {
-        if (iconMissFirst < first) first = iconMissFirst;
-        if (iconMissLast + 1 > last) last = iconMissLast + 1;
+    // 只要漏掉一个，就会出现「补齐判定完成 → 重画 → 绘制还是缺 → 又安排补齐」的往复。
+    int missFirst = iconMissFirst, missLast = iconMissLast;
+    if (missLast >= missFirst) {
+        if (missFirst < first) first = missFirst;
+        if (missLast + 1 > last) last = missLast + 1;
     }
     iconMissFirst = numItems;
     iconMissLast = -1;
     if (first < 0) first = 0;
     if (last > numItems) last = numItems;
+    if (first >= last) return false;
 
-    // 从这一刻起本屏按「还没齐」对待：绘制一律画空位，直到下面把闸放掉。
-    iconPanePend = true;
-
-    // 本轮开始时本屏已就位的项数。收工时再数一次：**没有变多**说明这一轮虽然在渲染，
-    // 但渲染进来的又被顶掉了（池容量与这一屏的项数对不上），那是空转而不是推进。
+    // 本轮开始时本屏已就位的项数。收工时再数一次，用来判断「这一轮有没有真的推进」。
     int paintedAtEntry = 0;
     for (int i = first; i < last; i++) if (itemIconPainted(p, &items[i])) paintedAtEntry++;
 
+    // ---- 第一步：按「去重后的来源 id」渲染 ----
+    //
+    // 为什么按 id 而不是按项：一屏几十项往往只对应**个位数**的来源 —— 文件夹、.dll、常见
+    // 扩展名这些共享项一个 id 就能点亮几十个格子，只有 exe/lnk/ico 才各占一个。按项顺序补时，
+    // 一旦预算用尽、或被滚动打断，靠后的项就整片空着；而它们多半和前面共用同一个来源，
+    // 本来一次渲染就能点亮。先渲染 id，等于用最少的毫秒换最多的格子。
+    //
+    // 这正是「首次进入 windows/system32 这类目录才看到图标闪」的解法：那里的可见区里绝大多数
+    // 是共用同一个 .dll 来源的格子，去重后往往只剩几次渲染 —— 首屏那 150ms 同步预算就够补完。
+    int nIds = 0;
+    for (int i = visFirst; i < visLast; i++) {
+        struct ListItem* it = &items[i];
+        if (!it->node) continue;
+        if (!it->loaded) loadItemData(it);          // 便宜：来源命中表时连 shell 都不碰
+        if (!iconIdTypeNameValid(it->icon)) continue;
+        bool dup = false;
+        for (int k = 0; k < nIds; k++) if (iconFillIds[k] == it->icon) { dup = true; break; }
+        if (dup) continue;
+        if (nIds >= iconFillIdsCap) {
+            int newCap = iconFillIdsCap ? iconFillIdsCap * 2 : 64;
+            int* tmp = realloc(iconFillIds, (size_t)newCap * sizeof(int));
+            if (!tmp) break;                        // 扩容失败就退化成逐项补（第二步仍会走）
+            iconFillIds = tmp;
+            iconFillIdsCap = newCap;
+        }
+        iconFillIds[nIds++] = it->icon;
+        // 预算用尽就停止收集：先把已经收集到的渲染掉（它们覆盖的格子最多），
+        // 没收集到的项交给第二步。没有这条检查，收集阶段的 shell 查询会把首屏同步补齐
+        // 的预算整个吃掉，进目录反而更慢。
+        if (GetTickCount() >= deadline && nIds > 0) break;
+    }
+
+    for (int k = 0; k < nIds; k++) {
+        if (lastScrollTick != scrollTickAtEntry) break;       // 用户又在滚了：让位
+        if (GetTickCount() >= deadline) break;
+        if (poolSlotLookup(p, iconFillIds[k]) >= 0) continue; // 池里已有槽：不必重渲染
+        poolSlotFor(p, iconFillIds[k]);                       // 渲染 + 占一个槽
+    }
+
+    // ---- 第二步：逐项兜底 ----
+    // 第一步点亮的是「已经解析出 id 的来源」；这一步负责剩下的：还没解析出 id 的项、以及渲染
+    // 失败需要记退避的项。已经点亮的项在这里只是几次数组读取，开销可忽略。
     // 时间预算按「处理完一项再判」的方式用：即使预算早已过期也要保证每趟至少推进一项，
     // 否则就成了「0 进展却不停投递」的空转。
-    bool ready = true, abortedByScroll = false;
+    bool ready = true;
     for (int i = first; i < last; i++) {
         if (!itemIconReady(p, i)) ready = false;
-        if (lastScrollTick != scrollTickAtEntry) { ready = false; abortedByScroll = true; break; }
+        // 用户又在滚了：让位。滚动期间的画面应当是「池里已有的照常画、少数格子先空着」，
+        // 停手后（滚动静默）的绘制会重新安排补齐。
+        if (lastScrollTick != scrollTickAtEntry) return true;
         if (GetTickCount() >= deadline) { if (i + 1 < last) ready = false; break; }
     }
-
-    if (ready) {
-        iconFillStall = 0;
-        iconPanePend = false;      // 本屏齐了：下一次绘制可以整体画出
-        return false;
-    }
-
-    if (abortedByScroll) return true;   // 用户又在滚了：让位，这不算「补不齐」
 
     int paintedAtExit = 0;
     for (int i = first; i < last; i++) if (itemIconPainted(p, &items[i])) paintedAtExit++;
 
-    // 认输阀：连续几轮「本屏已就位的项数一个都没变多」＝ 渲染一个、顶掉一个。典型是大图标
-    // 128px 只有几十个槽，而整屏几乎全是各自带图标的独占项：被顶掉的下轮又被重新渲染，
-    // 互相顶替、永远凑不齐。这时把还没就位的项标记掉（它们画成空位是稳定的），并放开闸让
-    // 其余图标正常显示 —— 宁可有几格空着，也不要整屏一直空着 + 后台空转。
-    // 注意判据是「这一轮有没有推进」而不是「这一轮做完了没有」：一轮被 8ms 预算截断是正常的。
-    if (paintedAtExit <= paintedAtEntry) {
-        if (++iconFillStall >= ICON_PANE_GIVEUP_ROUNDS) {
-            iconFillStall = 0;
-            for (int i = first; i < last; i++) {
-                if (!itemIconPainted(p, &items[i])) items[i].iconFailed = true;
-            }
-            iconPanePend = false;
-            return false;
+    // 本轮**补进了新图标** → 把绘制报告过缺图标的区间重画一次（**不擦背景**，不闪）。
+    // 判据是「本屏就位的项数变多了」，不是「全屏就位」：等全屏就位才画，正是「滚动/翻页后
+    // 整屏图标长时间空白」的成因。重画限流，免得把补齐那点预算全花在重绘上。
+    if (!ready && paintedAtExit > paintedAtEntry && missLast >= missFirst) {
+        DWORD now = GetTickCount();
+        if (now - lastIconRepaintTick >= ICON_REPAINT_MIN_MS) {
+            lastIconRepaintTick = now;
+            iconPaintMissed = false;              // 收口那一次不必再来一遍
+            if (missFirst < 0) missFirst = 0;
+            if (missLast >= numItems) missLast = numItems - 1;
+            ListView_RedrawItems(hwndContentView, missFirst, missLast);
         }
+    }
+
+    if (ready) { iconFillStall = 0; return false; }
+
+    // 连续几轮「本屏就位的项数一个都没变多」＝ 剩下的项这几轮渲染不出来（注册表坐标指向
+    // 本 prefix 里不存在的文件、池这一刻挑不出可淘汰的槽……）。**停止自续投递**，别在后台
+    // 空转：下一次绘制/滚动会重新安排补齐，那时它们会被再试一次。
+    // 这里绝不写任何「永久失败」标记（退避计数由 itemIconReady 管）：哪几项恰好没就位取决于
+    // 渲染顺序与滚动时机，把随机几项永久标成失败，正是「随机文件在本目录内永远缺图标」的根因。
+    if (paintedAtExit <= paintedAtEntry) {
+        if (++iconFillStall >= ICON_FILL_STALL_ROUNDS) { iconFillStall = 0; return false; }
     }
     else iconFillStall = 0;
 
     return true;   // 下一趟继续（scheduleIconFill 按滚动静默决定立刻投递还是挂定时器）
 }
 
+// 补齐循环的重入闸：iconFillIds 是静态复用缓冲，重入会让内层覆盖外层正在用的那份
+// （外层那轮就会漏渲几条来源 —— 表现正是「随机几项缺图标」）。重入时让内层直接退出，
+// 外层那轮结束后按正常节奏还会再投递。
+static bool iconFillRange(DWORD deadline) {
+    if (inIconFillRange) return false;
+    inIconFillRange = true;
+    bool more = iconFillRangeInner(deadline);
+    inIconFillRange = false;
+    return more;
+}
+
 // 补一轮可见区图标（异步路径）。返回 true = 还没补完，需要继续投递。
 static bool iconFillStep(void) {
-    // 没有可补的内容（空目录 / 导航中途 items 被释放）：闸必须放掉，否则图标会一直空着。
-    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return false; }
+    if (!hwndContentView || !items || numItems <= 0) return false;
 
     struct IconPool* p = currentIconPool();
-    if (!p || p->himl != currentImageList) { iconPanePend = false; return false; }   // 池没挂上：交给系统列表兜底
+    if (!p || p->himl != currentImageList) return false;   // 池没挂上：交给系统列表兜底
 
-    // 先把当前区域（还没画出来的）画出来：首帧因此不必等任何图标提取。没有脏区时
-    // UpdateWindow 是空操作。注意若此时本屏还没齐，这一帧画的是**整屏空位**（闸开着），
-    // 不会出现「一半有图标一半空白」。
-    UpdateWindow(hwndContentView);
-
+    // 这里**不再**每轮 UpdateWindow 强刷。曾经的做法是把「当前状态」立刻推到屏幕上，
+    // 但补齐每轮都刷一次，等于把「一半项还没有图标」的中间状态反复亮出来 —— 滚动时看到的
+    // 图标闪，有一半来自这里。画面交给控件自己调度：补进来的图标由 iconFillRange 的
+    // 「有进展就重画缺过的区间」（不擦背景）负责呈现。
     if (iconFillRange(GetTickCount() + ICON_FILL_BUDGET_MS)) return true;
 
-    // 可见项全部就位 —— **整屏重画一次**，让它们同时出现。只在绘制确实画过空格子时做，
-    // 省掉「补齐先于首次绘制完成」这种情形下的一次无谓全屏重绘。
+    // 本屏补完（或这几轮实在渲染不出来）：把绘制报告过「缺图标」的区间再重画一次
+    // （**不擦背景**，不闪）。补齐过程中每有进展已经重画过一次，这里只是收口，
+    // 覆盖「补齐先于首次绘制完成」这种一次都没重画过的情形。
     if (iconPaintMissed) {
         iconPaintMissed = false;
         InvalidateRect(hwndContentView, NULL, FALSE);
@@ -5331,14 +5909,14 @@ static bool iconFillStep(void) {
 }
 
 // 在**下一次绘制之前**同步把本屏补齐。绘制路径只画已经就位的图标，所以补齐跑在绘制
-// 前面时，那一帧就是完整的 —— 图标一起出现，不会「有的一格一格冒」。
-// 预算内补不完就交给异步循环收尾：此时闸（iconPanePend）已经置位，接下来的绘制整屏画
-// 空位（整屏一致，仍然是「一起出现」），补齐把本屏补完时再一次性画出。
+// 前面时，那一帧就已经是完整的 —— 首屏因此不会「先空白再一格一格冒」。
+// 预算内补不完就交给异步循环收尾：剩下的格子先是空的，补齐每有进展就把缺过的区间重画
+// 一次（逐步填充），绝不会出现「等整屏齐了才画」那种长时间整屏空白。
 static void iconFillVisibleSync(int budgetMs) {
-    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return; }
+    if (!hwndContentView || !items || numItems <= 0) return;
 
     struct IconPool* p = currentIconPool();
-    if (!p || p->himl != currentImageList) { iconPanePend = false; return; }
+    if (!p || p->himl != currentImageList) return;
 
     if (iconFillRange(GetTickCount() + (DWORD)budgetMs)) {
         scheduleIconFill();     // 没补完：交给异步循环接着补
@@ -5347,26 +5925,26 @@ static void iconFillVisibleSync(int budgetMs) {
     scheduleIconPrefetch();
 }
 
-// 绘制入口：在**任何一格被画出来之前**决定这一帧画不画图标。
-// Wine 是一格一格画过去的，等画到第一个缺图标的格子才置位就太晚了 —— 它前面那些格子
-// 已经把图标画上去了，看上去还是参差。所以这里先扫一遍可见区（纯池查询，一屏最多几十次
-// 数组读取，绝不渲染），发现「本来画得出来、却还没就位」的项就把闸打开，让这一帧整屏
-// 统一画空位，并把补齐安排上。
-static void updateIconPaneGate(void) {
-    if (!hwndContentView || !items || numItems <= 0) { iconPanePend = false; return; }
+// 绘制入口：可见区里还有缺图标的项就安排一轮补齐。
+// 只做**纯池查询**（一屏最多几十次数组读取，绝不渲染）—— 这里不能渲染，否则首帧就要等
+// 整屏图标提完（Wine 先 WM_ERASEBKGND 擦成窗口底色再 WM_PAINT，用户看到的是「点进去
+// 闪一下白」）。
+//
+// 它不再决定「这一帧画不画图标」：绘制一律「有就画」。
+//
+// 这里**不做**「滚动静默」判断，交给 scheduleIconFill —— 它在静默期内挂一次性定时器、
+// 静默过后直接投消息。必须这样：滚动静默之后很可能一次绘制都不再发生（画面已经静止），
+// 若这里直接返回就再没人叫补齐，那一屏图标会永远空着。定时器则一定会到点。
+static void requestIconFillForVisible(void) {
+    if (!hwndContentView || !items || numItems <= 0) return;
 
     struct IconPool* p = currentIconPool();
-    if (!p || p->himl != currentImageList) { iconPanePend = false; return; }
-    if (iconPanePend) return;   // 已经在「整屏空位」状态，等补齐放闸
+    if (!p || p->himl != currentImageList) return;
 
     int first, last;
     visibleItemRange(&first, &last);
     for (int i = first; i < last; i++) {
-        if (!itemIconPainted(p, &items[i])) {
-            iconPanePend = true;
-            scheduleIconFill();
-            return;
-        }
+        if (!itemIconPainted(p, &items[i])) { scheduleIconFill(); return; }
     }
 }
 
@@ -5391,7 +5969,11 @@ static bool iconPrefetchStep(void) {
     if (iconPrefetchDoneSize == p->size) return false;   // 这个尺寸已经收工
     if (p->filled >= p->slotCount) { iconPrefetchDoneSize = p->size; return false; }  // 没有空槽
     if (iconFillPosted) return true;                     // 可见区还有活没干完：先紧着它
-    if (GetTickCount() - lastScrollTick < ICON_FILL_SCROLL_QUIET_MS) return true;     // 还在滚：下趟再说
+
+    // 这里**不再**要求「滚动静默」。滚动恰恰是预取最有用的时候：滚动带进视口的项如果没被提前
+    // 渲染，那一格就会先空、随后补齐才画上 —— 用户看到的就是「滚动时随机几个图标闪一下」。
+    // 预取走 WM_TIMER（消息队列里优先级最低，输入永远排在它前面），每趟也只占 8ms，
+    // 不会跟拖动抢消息。
 
     int span = visibleIconSpan();
     if (span <= 0) return false;
@@ -5402,7 +5984,6 @@ static bool iconPrefetchStep(void) {
 
     int filledAtEntry = p->filled;
     DWORD deadline = GetTickCount() + ICON_FILL_BUDGET_MS;
-    DWORD scrollTickAtEntry = lastScrollTick;
 
     // 向下、再向上：拖动多数是往下走，先补下面。两个方向都走到头才算收工。
     for (int dir = 0; dir < 2; dir++) {
@@ -5411,7 +5992,6 @@ static bool iconPrefetchStep(void) {
         int step = (dir == 0) ? 1 : -1;
         for (; i != end; i += step) {
             if (p->filled >= p->slotCount) { iconPrefetchDoneSize = p->size; return false; }
-            if (lastScrollTick != scrollTickAtEntry) return true;   // 用户又在滚了：下趟再说
             if (GetTickCount() >= deadline) {
                 // 一趟下来一个图标都没进池（例如整段目录全是共享图标，光扫前缀就吃满预算）：
                 // 再继续也只是反复扫同一段，收工。宁可不预取，也不要后台空转。
@@ -5435,7 +6015,21 @@ static void scheduleIconPrefetch(void) {
 // 同一时刻只挂一条补齐消息：绘制每帧都会来安排一次，不设这个闸就会一次排上一屏
 // 消息，把 WM_PAINT 挤到最后。（变量本体声明在文件开头，供窗口过程引用。）
 static void scheduleIconFill(void) {
-    if (iconFillPosted || !hwndContentView) return;
+    if (!hwndContentView) return;
+
+    DWORD now = GetTickCount();
+
+    // 看门狗：两个调度闸（iconFillPosted / iconFillTimerPending）只要卡住超过 1 秒就强制
+    // 复位。它们是「同一时刻只挂一条」的唯一凭据 —— 一旦卡在 true，之后**所有**补齐调度
+    // 都被挡掉，整个图标子系统就再也不动了，表现正是「滚过一次之后图标再也不补回来」。
+    // 卡住的可能来源：SetTimer 失败、消息被丢弃、定时器被外部 KillTimer。
+    if (now - iconFillDispatchTick > 1000 && (iconFillPosted || iconFillTimerPending)) {
+        iconFillPosted = false;
+        iconFillTimerPending = false;
+        KillTimer(hwndContentView, TIMER_ICON_FILL);
+    }
+
+    if (iconFillPosted) return;
 
     // 滚动刚发生过就先让位。这一步不是优化而是必须的：
     // 拖动滚动条时列表在连续重绘，每一帧绘制都会走到这里；而 PostMessage 投出去的消息
@@ -5443,15 +6037,19 @@ static void scheduleIconFill(void) {
     // → 绘制又安排补齐」这个自续环会把鼠标消息一直压在后面 —— 拖动就感觉「粘住了」，
     // 文件越多（滚动范围越大、越容易滚到还没补图标的区域）越明显。
     // 这里改成挂一个一次性定时器等滚动静默；WM_TIMER 的优先级最低，不会跟拖动抢。
-    if (GetTickCount() - lastScrollTick < ICON_FILL_SCROLL_QUIET_MS) {
+    if (now - lastScrollTick < ICON_FILL_SCROLL_QUIET_MS) {
         if (!iconFillTimerPending) {
             iconFillTimerPending = true;
-            SetTimer(hwndContentView, TIMER_ICON_FILL, ICON_FILL_SCROLL_QUIET_MS, NULL);
+            iconFillDispatchTick = now;
+            // 返回值必须检查：SetTimer 失败却把闸留在 true，补齐就永久停摆了。
+            if (!SetTimer(hwndContentView, TIMER_ICON_FILL, ICON_FILL_SCROLL_QUIET_MS, NULL))
+                iconFillTimerPending = false;
         }
         return;
     }
 
     iconFillPosted = true;
+    iconFillDispatchTick = now;
     // 投递失败必须把闸复位：这个闸是「同一时刻只挂一条」的唯一凭据，一旦卡在 true，
     // 之后所有补齐调度都会被它挡掉，整个图标子系统就再也不动了。
     if (!PostMessage(hwndContentView, MSG_ICON_FILL, 0, 0)) iconFillPosted = false;
@@ -5466,6 +6064,10 @@ void refreshContentView() {
         return;
     }
     
+    // 换目录：押后滚动的目标（项号）已经没有任何意义，连同重试定时器一起作废。
+    pendingScrollTop = -1;
+    preScrollCancelRetry();
+
     // 清空项目数据（保留列，避免在详细信息视图中删除/重建列导致的闪烁）
     ListView_SetItemCountEx(hwndContentView, 0, 0);
     
@@ -5585,13 +6187,16 @@ void refreshContentView() {
     // 就是完整的 —— 图标一起出现，而不是「一半有图标、一半空白，剩下的过一会儿才冒」。
     // （旧路径参差的根源：池是按目录保留的，上一个目录的共享图标和一些独占图标都还在，
     // 首帧只画得出来这些，其余靠异步补齐 —— 同屏两批人，看上去就是不同步。）
-    // 预算（ICON_SYNC_BUDGET_MS）内补不完就走异步：此时闸已置位，首帧整屏画空位
-    // （整屏一致），补齐一轮把本屏补完时再整屏重画一次 —— 任何时刻都不会参差。
+    // 预算（ICON_SYNC_BUDGET_MS）内补不完就走异步：首帧画的是「池里已经有槽的那些」，
+    // 其余先空着，补齐每有进展就把缺过的区间重画一次 —— 逐步填充，不会整屏空白。
     iconPaintMissed = false;      // 上一屏的「缺图标」见证属于旧内容，作废
     iconMissFirst = numItems;
     iconMissLast = -1;
     iconPrefetchDoneSize = 0;     // 换了内容：邻域预取重新开始
     iconFillStall = 0;
+    // 共享来源先单独渲染掉（见 prewarmSharedIcons）：本目录几十个 .dll 共用同一个来源 id，
+    // 预热一次就点亮整屏，且不受后面 150ms 首屏预算被 exe 吃干的影响。
+    prewarmSharedIcons();
     iconFillVisibleSync(ICON_SYNC_BUDGET_MS);
 
     // 整表失效重绘，恢复原版绘制路径。不用 LVSICF_NOINVALIDATEALL 做增量刷新：
