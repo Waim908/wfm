@@ -3687,6 +3687,45 @@ void setFolderSortMode(enum FolderSortMode newMode) {
     updateFolderSortMenuCheckmarks();
 }
 
+// 按当前字体实测一段文字的像素宽度（拿不到 DC / 没字体时返回 0）。
+// 列宽一律用它算，**不要写死像素**：字体来自 NONCLIENTMETRICS 的系统消息字体
+// （main.c 里 CreateFontIndirect 出来的 hGuiFont，DPI 一变大字号就跟着变），
+// 日期串又是定长格式；写死的值在别人的字体/DPI 下可能刚好差几个像素，
+// 表现就是「整列显示成省略号」。
+static int measureTextWidth(const wchar_t* text) {
+    if (!text || !text[0] || !hwndContentView) return 0;
+    HDC hdc = GetDC(hwndContentView);
+    if (!hdc) return 0;
+    HGDIOBJ oldFont = hGuiFont ? SelectObject(hdc, hGuiFont) : NULL;
+    SIZE sz = {0};
+    if (!GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz)) sz.cx = 0;
+    if (oldFont) SelectObject(hdc, oldFont);
+    ReleaseDC(hwndContentView, hdc);
+    return sz.cx;
+}
+
+// 一列的默认宽度：取「条目样本文字 + 左右内缩」与「表头文字 + 排序箭头余量」的较大值。
+// Wine 侧的依据：
+//   · 详细视图的子项文本区**就是整列宽**（listview.c:2462 `Label.right = Box.right`，子项在
+//     :2473-2477 直接 goto，没有任何内缩；本控件也没开 LVS_EX_SUBITEMIMAGES，所以子项不会
+//     像 :2435-2438 那样再让出一个图标位）；绘制时左端内缩 `LABEL_HOR_PADDING` = 5px
+//     （:370，用在 :4758-4759），左对齐列右端不内缩 → 条目侧要 `文字宽 + 5 + 一点余量`；
+//   · 表头文本左右各留 `iMargin`（header.c:1628 `iMargin = 3*SM_CXEDGE`，即 6px），
+//     而**被设上排序箭头的那一列**还要额外腾出箭头的位置（header.c:499-502
+//     `sort_w = 2*sort_h - 1 + iMargin*2`，16px 字体下 ≈19px）—— 列表控件自己不管
+//     箭头（listview.c 里搜不到 HDF_SORT），宽度不够时箭头会压住表头文字。
+static int defaultColumnWidth(const wchar_t* headerText, const wchar_t* itemSample, int minWidth) {
+    int w = 0;
+    int itemW = measureTextWidth(itemSample);
+    if (itemW > 0) w = itemW + 5 /*LABEL_HOR_PADDING*/ + 6 /*余量，免得刚好卡住触发省略号*/;
+    int headerW = measureTextWidth(headerText);
+    if (headerW > 0) {
+        int h = headerW + 12 /*iMargin×2*/ + 20 /*排序箭头*/;
+        if (h > w) w = h;
+    }
+    return (w > minWidth) ? w : minWidth;          // 量不到时至少不小于原来的默认值
+}
+
 void createLVColumns() {
     LVCOLUMN column = {0};
     column.mask = LVCF_WIDTH | LVCF_TEXT;
@@ -3703,7 +3742,11 @@ void createLVColumns() {
     column.pszText = lc_str.size;
     ListView_InsertColumn(hwndContentView, COLUMN_SIZE_IDX, &column);
 
-    column.cx = 100;
+    // 日期列按字体实测宽度给（原来写死 100px，装不下 "09/16/2026 15:33" 就被截成省略号）。
+    // 样本串取日期格式的最宽形态：见 file_utils.h 的 formatModifiedDate ——
+    // `L"%02d/%02d/%04d %02d:%02d"`，每个数字位都占满即为上界（这里写 8 而不是 9，
+    // 是因为宽度只取决于位数，与具体数字无关）。
+    column.cx = defaultColumnWidth(lc_str.date, L"88/88/8888 88:88", 110);
     column.pszText = lc_str.date;
     ListView_InsertColumn(hwndContentView, COLUMN_DATE_IDX, &column);
 }
