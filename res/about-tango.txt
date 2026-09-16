@@ -1,0 +1,11 @@
+tango图标无需授权与协议限制，可以使用
+https://commons.wikimedia.org/wiki/
+
+本目录里取自 Tango 图标集的素材（.svg 为源文件，.ico 为编进 exe 的产物）：
+
+  Utilities-terminal-tango.svg  ->  terminal.ico  ->  IDI_TERMINAL  工具栏「CMD」按钮
+  Computer-tango.svg            ->  computer.ico  ->  IDI_COMPUTER  工具栏「Explorer」按钮
+
+.ico 的生成方式（可复现）：先用 rsvg-convert 把 SVG 按 4 倍尺寸渲染，再用
+ImageMagick 以 Lanczos 降采样到 16/24/32/48 四个尺寸，最后合成多帧 ico。
+四个尺寸都是 32bpp 带 alpha；16px 那帧是工具栏实际取用的尺寸（16x16 图像列表）。

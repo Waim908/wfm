@@ -25,7 +25,7 @@ REGRESSION_AUDIT_2026-09-12.md
 # 主机侧对照预览脚本：只在本地出 PNG 到 .workbuddy/，不参与构建，不入版本库
 tools/preview_*.py
 
-# 角标产线的 SVG 源素材：只被 tools/gen_shortcut_overlay.sh 读取，不参与构建，
-# 不入版本库（res/ 里只留会编进 exe 的东西）。字节级的产物 res/shortcut_overlay.ico
-# 已在版本库中，本文件留着只为「以后还想重跑产线换配色」。
-res/*.svg
+# 注：res/*.svg 是入库的素材源文件，不忽略 —— Tango 图标集无需授权与协议限制，
+# 可光明正大提交（来源与产物对应关系见 res/about-tango.txt）。
+# 它只被 tools/gen_shortcut_overlay.sh 之类的产线脚本读取，不参与构建；
+# res/ 里真正编进 exe 的仍是同名 .ico。

@@ -112,7 +112,7 @@ $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
 # 前置条件必须列全 res/ 下被 resource.rc 引用的每个素材：windres 不是 C
 # 编译器，-MMD 管不到它，漏掉任何一个都会让「只换素材」的改动不触发重编，
 # 编出来的 exe 里还是旧图标（且体积一样、看不出异常）。
-$(OBJDIR)/resource.o: res/resource.rc res/Application.manifest res/main.ico res/go.ico res/refresh.ico res/search.ico res/nav_arrow.ico res/up.ico res/copy.ico res/cut.ico res/paste.ico res/delete.ico res/new_folder.ico res/new_file.ico res/shortcut_overlay.ico include/resource.h | $(OBJDIR)
+$(OBJDIR)/resource.o: res/resource.rc res/Application.manifest res/main.ico res/go.ico res/refresh.ico res/search.ico res/nav_arrow.ico res/up.ico res/copy.ico res/cut.ico res/paste.ico res/delete.ico res/new_folder.ico res/new_file.ico res/shortcut_overlay.ico res/bookmark.ico res/preloader_1.ico res/preloader_2.ico res/preloader_3.ico res/preloader_4.ico res/preloader_5.ico res/preloader_6.ico res/preloader_7.ico res/preloader_8.ico res/computer.ico res/terminal.ico include/resource.h | $(OBJDIR)
 	${RC} ${INCLUDE_DIR} -I./res -i $< -o $@
 
 # 头文件依赖由 -MMD 生成，必须放在 OBJS / USE_LIBCDIO 判定之后。

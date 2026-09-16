@@ -33,10 +33,6 @@ extern HINSTANCE globalHInstance;
 extern HWND hwndMain;
 
 HWND hwndToolbar = NULL;
-// createToolButtons 建的那份图标列表。留着是为了首帧之后往 8、9 位追加
-// CMD / Explorer 的真实图标（见 appendShellExeToolIcons）。原先它是函数里的局部
-// 变量，追加这条路就没法走。
-static HIMAGELIST toolbarImageList = NULL;
 
 LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return OrigWndProc(hwnd, msg, wParam, lParam);
@@ -67,16 +63,11 @@ void createToolButtons() {
     ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FOLDER]);
     ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FILE]);
     ImageList_AddIcon(hImageList, uiIcons[ICON_BOOKMARK]);
-    // ICON_CMD / ICON_EXPLORER 的两个**故意不在这里加**：它们的图标要取系统 exe 的真实
-    // 图案（一次 PE 解析），是启动路径上最贵的一段，所以挪到首帧之后由
-    // appendShellExeToolIcons() 追加（见 main.c 的 loadShellExeIcons 说明）。
-    //
-    // 这里少加两个是安全的：buttons[] 里 CMD/Explorer 的 bmpId 就是 8 和 9，此刻列表只有
-    // 0..7，越界索引在 ImageList_DrawIndirect 里被直接判掉
-    // （wine/dlls/comctl32/imagelist.c：`if ((pimldp->i < 0) || (pimldp->i >= himl->cCurImage)) return FALSE;`），
-    // 控件画不出东西也不画错 —— 于是那两个按钮先空着。稍后 AddIcon 把真图标**追加**到
-    // 第 8、9 位，索引天然对上，不需要 ReplaceIcon，也不会打乱前 8 个。
-    toolbarImageList = hImageList;
+    // 这两个按钮画的是内嵌的 Tango 素材（res/terminal.ico / res/computer.ico），
+    // 和上面 8 个一样走 LoadImage —— 不再去读系统 cmd.exe / explorer.exe，
+    // 也就没有了那次 PE 解析（以及为它做的一整套「首帧后再补图标」的延迟机制）。
+    ImageList_AddIcon(hImageList, uiIcons[ICON_CMD]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_EXPLORER]);
 
     SendMessage(hwndToolbar, TB_SETIMAGELIST, 0, (LPARAM)hImageList);
 
@@ -99,30 +90,6 @@ void createToolButtons() {
 
     // 启动时剪贴板为空，粘贴按钮置灰
     setPasteButtonEnabled(false);
-}
-
-// 首帧之后补 CMD / Explorer 两个按钮的真实图标。
-//
-// 为什么要拆开：这两个图标要读系统 exe（cmd.exe / explorer.exe）做一次 PE 解析，
-// 是 preloadIcons 里最贵的一步，而它们只影响工具栏最右两个按钮的图案 —— 排在
-// ShowWindow 之前就等于把这段耗时算进「敲完命令到窗口出现」的等待里。挪到
-// UpdateWindow 之后（见 main.c 的 WinMain），按钮先空着，几十毫秒后图案出现。
-//
-// 索引为什么天然对上：createToolButtons 只把前 8 个内嵌图标加进列表，而
-// buttons[8]/buttons[9] 的 bmpId 就是 8/9 —— 这里按同样顺序追加两个，正好落在
-// 第 8、9 位，既不用 ReplaceIcon，也不会打乱前面 8 个。图标个数与
-// iconMap[] 的内嵌项数（12）无关，只跟 buttons[] 的前 8 项有关。
-void appendShellExeToolIcons(void) {
-    if (!toolbarImageList || !hwndToolbar) return;
-
-    // 真正取图标（失败时 loadIconFromSystemExe 会退到共享应用图标，恒非 NULL）
-    loadShellExeIcons();
-
-    ImageList_AddIcon(toolbarImageList, uiIcons[ICON_CMD]);
-    ImageList_AddIcon(toolbarImageList, uiIcons[ICON_EXPLORER]);
-
-    // 控件持有的是同一个 HIMAGELIST 句柄，追加完重画一次即可看到新图案
-    InvalidateRect(hwndToolbar, NULL, TRUE);
 }
 
 // 粘贴按钮在 buttons[] 中的下标（见 onClipboardChanged 的联动逻辑）

@@ -155,41 +155,12 @@ static const struct IconMapping iconMap[] = {
     {ICON_SEARCH, IDI_SEARCH},
     {ICON_NAV_ARROW, IDI_NAV_ARROW},
     {ICON_BOOKMARK, IDI_BOOKMARK},
-    // ICON_CMD / ICON_EXPLORER 不内嵌 ico，见 loadIconFromSystemExe()
+    // 工具栏最右两个按钮：CMD 用 Tango 的 terminal 图案、Explorer 用 Tango 的 computer
+    // 图案。它们以前是去读系统 cmd.exe / explorer.exe 的真实图标（一次 PE 解析，是启动
+    // 路径上最贵的一段），现在和上面 12 个一样内嵌 ico，那笔开销没有了。
+    {ICON_CMD, IDI_TERMINAL},
+    {ICON_EXPLORER, IDI_COMPUTER},
 };
-
-// CMD/Explorer 工具栏按钮的图标直接取系统 exe 的真实图标：
-// cmd.exe 在 %SystemRoot%\System32，explorer.exe 在 %SystemRoot%。
-// 依次尝试自有 PE 解析器 → shell 关联图标 → 共享应用图标，
-// 保证返回的句柄恒非 NULL，杜绝空 HICON 进 ImageList。
-static HICON loadIconFromSystemExe(const wchar_t* exeName, BOOL useWindowsDir) {
-    wchar_t dir[MAX_PATH];
-    UINT len = useWindowsDir ? GetWindowsDirectoryW(dir, MAX_PATH)
-                             : GetSystemDirectoryW(dir, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) return LoadIconW(NULL, IDI_APPLICATION);
-
-    // 去掉可能的尾反斜杠，再用 strsafe 拼接，整体超界就走末级兜底
-    size_t dirLen = wcslen(dir);
-    if (dirLen > 0 && dir[dirLen - 1] == L'\\') dir[dirLen - 1] = L'\0';
-
-    wchar_t path[MAX_PATH];
-    if (SUCCEEDED(StringCchCopyW(path, MAX_PATH, dir)) &&
-        SUCCEEDED(StringCchCatW(path, MAX_PATH, L"\\")) &&
-        SUCCEEDED(StringCchCatW(path, MAX_PATH, exeName))) {
-        HICON hIcon = extractIconFromExe(path, 16, 16);
-        if (hIcon) return hIcon;
-
-        // 次选：shell 关联图标（项目已有 SHGetFileInfo 使用先例，Wine 可用）。
-        // 返回的 HICON 归调用方，与 uiIcons 的释放约定一致。
-        SHFILEINFOW sfi = {0};
-        if (SHGetFileInfoW(path, 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_SMALLICON) && sfi.hIcon) {
-            return sfi.hIcon;
-        }
-    }
-
-    // 末选：共享应用图标（DestroyIcon 对共享图标无害失败）
-    return LoadIconW(NULL, IDI_APPLICATION);
-}
 
 void preloadIcons() {
     int mapCount = (int)(sizeof(iconMap) / sizeof(iconMap[0]));
@@ -198,18 +169,7 @@ void preloadIcons() {
             globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
             IMAGE_ICON, 16, 16, 0);
     }
-    startupMark("  icons: LoadImage x12");
-}
-
-// 工具栏最右两个按钮（CMD / Explorer）要取系统 exe 的真实图标：走自有 PE 解析器读
-// cmd.exe / explorer.exe 一次，取不到再退 shell 关联图标。这是原先 preloadIcons 里
-// 最贵的一段（一次 PE 解析），而它只影响那两个按钮的图案 —— 所以从 preloadIcons 拆出来，
-// 交给 toolbar.c 的 appendShellExeToolIcons() 在首帧之后补，不占「等窗口」的时间。
-// 用 uiIcons 的现值判空，重复调用不会重复提取（appendShellExeToolIcons 可能被多次触发）。
-void loadShellExeIcons(void) {
-    if (!uiIcons[ICON_CMD])      uiIcons[ICON_CMD]      = loadIconFromSystemExe(L"cmd.exe", FALSE);
-    if (!uiIcons[ICON_EXPLORER]) uiIcons[ICON_EXPLORER] = loadIconFromSystemExe(L"explorer.exe", TRUE);
-    startupMark("  icons: cmd + explorer");
+    startupMark("  icons: LoadImage x14");
 }
 
 void freeUIcons() {
@@ -989,12 +949,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     startupMark("ShowWindow");
     UpdateWindow(hwndMain);
     startupMark("UpdateWindow (first paint)");
-
-    // 工具栏 CMD / Explorer 的真实图标留到这里才提取：preloadIcons 里那一步是启动路径上
-    // 最贵的一段（一次 PE 解析），而它只影响最右两个按钮的图案，晚几十毫秒出现完全无感。
-    // 放在 UpdateWindow 之后，它就不再计入「敲完命令到窗口出现」的等待。
-    appendShellExeToolIcons();
-    startupMark("deferred shell exe icons");
 
     // 启动时对齐一次剪贴板相关 UI：菜单里的「粘贴 / 粘贴快捷方式 / 清空剪贴板」、
     // 工具栏粘贴按钮、状态栏来源指示，全部由 CF_HDROP 是否可用来决定。

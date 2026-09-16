@@ -25,6 +25,8 @@ IDI_PRELOADER_7 ICON "preloader_7.ico"
 IDI_PRELOADER_8 ICON "preloader_8.ico"
 IDI_BOOKMARK ICON "bookmark.ico"
 IDI_SHORTCUT_OVERLAY ICON "shortcut_overlay.ico"
+IDI_TERMINAL ICON "terminal.ico"
+IDI_COMPUTER ICON "computer.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "Application.manifest"
 
