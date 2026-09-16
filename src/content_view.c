@@ -5197,6 +5197,7 @@ static bool resolveLnkIconLocation(const wchar_t* lnkPath, wchar_t* iconPath, in
     *iconIndex = 0;
     if (!lnkPath || !lnkPath[0]) return false;
 
+    ensureComInitialized();   // IShellLinkW 是 COM 对象，用之前先补初始化
     bool ok = false;
     IShellLinkW* isl = NULL;
     if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
@@ -5240,6 +5241,7 @@ static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, in
     targetPath[0] = L'\0';
     if (!lnkPath || !lnkPath[0]) return false;
 
+    ensureComInitialized();   // IShellLinkW 是 COM 对象，用之前先补初始化
     bool ok = false;
     IShellLinkW* isl = NULL;
     if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,

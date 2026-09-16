@@ -129,6 +129,10 @@ void freeUIcons();
 void startupMark(const char* label);
 void startupMarkN(const char* label, long value);
 
+// COM 初始化改到「第一次真正要用时」再做（实现见 main.c）。全项目只有处理
+// .lnk 快捷方式的三处需要它 —— 调 CoCreateInstance 之前先调一次这个。
+void ensureComInitialized(void);
+
 #ifndef IDC_STATIC
 #define IDC_STATIC -1
 #endif

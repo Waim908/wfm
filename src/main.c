@@ -109,6 +109,32 @@ void startupMarkN(const char* label, long value) {
     WriteFile(hErr, buf, (DWORD)strlen(buf), &written, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// COM 的惰性初始化
+//
+// 全项目真正用 COM 的只有三处，全部跟 .lnk 快捷方式有关：
+//   content_view.c  resolveLnkIconLocation()   读 lnk 自己的 ICONLOCATION
+//   content_view.c  resolveLnkTargetPath()     读 lnk 指向的目标路径
+//   file_actions.c                             右键「创建快捷方式」
+// 它们用的 IShellLinkW 是 COM 对象，真 Windows 上不先初始化 apartment 就直接
+// CoCreateInstance 会失败（Wine 容忍裸用，所以这注释是给真机留的）。
+//
+// 之所以不放在 WinMain 开头：CoInitializeEx 函数体本身很便宜（Wine 里
+// enter_apartment -> apartment_construct 只有一个 calloc 加几个链表初始化），
+// 实测那 100 ms 是**本进程第一次碰 COM** 时把 ole32 -> combase -> rpcrt4 整条栈
+// 从磁盘拉起来的开销。启动时进一个不含 .lnk 的目录根本用不到它。
+//
+// 这个改法是自适应的：启动目录里要是有 .lnk，第一次解析时就初始化，行为跟原来
+// 完全一致 —— 不存在「白延」，最坏情况就是等于没改。
+// 只在主线程调用（.lnk 的 shell 解析都在主线程，后台线程只做纯解码）。
+// ---------------------------------------------------------------------------
+void ensureComInitialized(void) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+}
+
 HICON uiIcons[NUM_UI_ICONS] = {0};
 
 struct IconMapping {
@@ -831,10 +857,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     startupMark("WinMain entry");
     SetProcessDPIAware();
     startupMark("SetProcessDPIAware");
-    // COM 初始化：lnk 图标解析（IShellLink，content_view.c）与创建快捷方式
-    // （IShellLink，file_actions.c）都依赖它。真 Windows 上未初始化 apartment
-    // 的 CoCreateInstance 会直接失败（Wine 容忍裸用），这里统一补上。
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    // COM 不在这里初始化了 —— 见 ensureComInitialized()。启动路径上没有它更快：
+    // 这一段原本实测要 100 ms，是本进程第一次碰 COM 时把整条 COM 栈拉起来的
+    // 成本，而被推迟的那三处调用启动时基本都用不到。
     startupMark("CoInitializeEx (lazy)");
     int numArgs;
     wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &numArgs);

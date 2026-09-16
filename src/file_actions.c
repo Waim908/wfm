@@ -1030,6 +1030,7 @@ void pasteFiles(wchar_t* dstDir) {
 static void createShortcut(wchar_t* srcPath, wchar_t* dstPath) {
     HRESULT hres;
 
+    ensureComInitialized();   // IShellLinkW 是 COM 对象，用之前先补初始化
     IShellLinkW* isl;
     hres = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (LPVOID*)&isl);
     if (SUCCEEDED(hres)) {
