@@ -82,6 +82,7 @@ static int pendingScrollTop = -1;    // 已经准备好、但还没落地的目�
 static DWORD pendingScrollSince;     // 本次押后的起点（超过 ICON_SCROLL_HOLD_MAX_MS 就放弃押后）
 static bool iconScrollTimerPending;  // 已经挂了一个「押后期间重试」的定时器
 static bool inPreScroll;             // 我们自己在把滚动交给控件（别再拦，否则会自锁）
+static bool preScrollFromTimer;      // 这次调用来自「押后期间的重试」，不是真实的拖动消息（别当快拖）
 
 // 滚动静默：滚动类消息（拖滚动条 / 滚轮 / 翻页键 / 改窗口大小）刚发生过的时间戳。
 // 补齐必须据此让位 —— 见 scheduleIconFill 里为什么这事关「拖动滚动条卡住」。
@@ -101,14 +102,17 @@ static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工�
 #define ICON_SCROLL_SYNC_BUDGET_MS 8     // 离散滚动一步之后同步补新露出区域的预算
 #define ICON_PREWARM_BUDGET_MS     80    // 目录加载时预热「共享来源」的时间预算
 #define ICON_PREWARM_MAX           64    // 一次预热最多新增多少共享槽（另受「最多占半个池」约束）
-#define ICON_PAINT_RENDER_MIN      24    // 一次绘制「就地渲染」的额度下限；上限按本屏跨度给（见 WM_PAINT）
-#define ICON_PAINT_RENDER_MS       100   // 一次绘制的就地渲染累计时间上限（要够把本屏每一条来源都渲出来）
+#define ICON_PAINT_RENDER_MIN      8     // 一次绘制「就地渲染」的额度下限
+#define ICON_PAINT_RENDER_CAP      16    // 额度上限：它直接等于「拖动时每帧多卡多久」，不能放开（见 WM_PAINT）
+#define ICON_PAINT_RENDER_MS       25    // 一次绘制的就地渲染累计时间上限
 #define ICON_SCROLL_PAINT_WINDOW_MS 60   // 绘制距最近一次滚动消息多久之内算「滚动驱动的绘制」
 #define ICON_FILL_STALL_ROUNDS     4     // 本屏连续这么多轮毫无进展就停止自续投递，见 iconFillRange
 #define ICON_REPAINT_MIN_MS        40    // 两趟「补进新图标后重画」之间至少隔这么久
 #define ICON_RETRY_BACKOFF_ROUNDS  3     // 某项渲染/登记失败后退避几轮再试（见 itemIconReady）
-#define ICON_SCROLL_PREPARE_MS     12    // 一次「滚动前预渲染」的时间片（见 preScrollHandleVScroll）
-#define ICON_SCROLL_HOLD_MAX_MS    120   // 拖动时最多把内容押后多久；超过就照滚（宁可闪，不能粘住）
+#define ICON_SCROLL_PREPARE_MS     8     // 一次「滚动前预渲染」的时间片（见 preScrollHandleVScroll）
+#define ICON_SCROLL_HOLD_MAX_MS    60    // 拖动时最多把内容押后多久；超过就照滚（宁可闪，不能粘住）
+#define ICON_SCROLL_FAST_DRAG_MS   50    // 相邻两条 WM_VSCROLL 间隔小于它＝用户在快拖：跟手优先，预渲染让路
+#define ICON_SCROLL_HOLD_MAX_MISS  12    // 目标窗口缺口超过这么多就不押后（渲不完，押着只会白扣滞后）
 #define ICON_SCROLL_FINAL_MS       80    // 松手 / 翻页这类一次性滚动的预渲染预算
 #define ICON_SCROLL_RETRY_MS       15    // 押后期间的重试间隔（走 WM_TIMER，优先级最低）
 
@@ -1706,23 +1710,24 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     if (msg == WM_PAINT) {
         // 本次绘制重开「就地渲染」额度（见 getIconSlotForPaint）。
         //
-        // 额度按**本屏跨度**给，不再是一个写死的小数目。绘制路径唯一必须保证的事是
-        // 「这一帧里，本屏每一条来源都已经在池里」：一屏有几十项，但去重后通常只有个位数
-        // 到十几个来源（.dll 这类共享项一个 id 就点亮整屏），所以「本屏有多少项」就是
-        // 「最多要渲多少条来源」的天然上界。
+        // 这是「滚动那一帧」的兜底渲染额度。拖滑块时每一条 WM_VSCROLL 都把整屏同步重画一次
+        // （Wine 的 scroll_list = ScrollWindowEx(整块 rcList) + UpdateWindow），额度就是那一帧
+        // 最多肯花多少时间在渲染上 —— 它**直接等于「拖动时每帧多卡多久」**。
         //
-        // 曾经这里是 10 个 / 15ms，那正是「拖动滚动条过快必然随机几个图标缺失」的直接原因：
-        // Wine 的 scroll_list() 是 ScrollWindowEx(整块 rcList) + UpdateWindow()，拖滑块每走
-        // 一步就把**整屏**同步重画一次。一屏要渲的来源超过 10 条、或几条加起来超过 15ms
-        // （解一次 PE 就 3~5ms）时，排在后面的那几条被额度截掉、那一帧就是空格子；而哪几条
-        // 被截取决于绘制顺序与各自的解码耗时，看上去正是「随机几个」。
-        // Wine 的 explorer 用的是 shell 的系统图标表，那一帧永远查得到图，所以它不掉图标
-        // （代价是快拖时它更重）—— 这里走同一条路子：宁可这一帧多花几毫秒，也不留空格子。
+        // 它已经被「先渲后滚」的预渲染（preScrollHandleVScroll）挤到次要位置：慢拖时目标窗口
+        // 早在滚动之前就渲好了，这里一条都不用渲。只有当用户**快拖**（预渲染主动让路，见
+        // ICON_SCROLL_FAST_DRAG_MS）、或缺口大到押后也没用时，这一帧才真得靠它自己画。
+        //
+        // 所以额度必须收住，两个极端都错：曾经是写死的 10 个 / 15ms（一屏来源多于它就被截掉
+        // → 「快拖随机几个图标缺失」）；后来放大成「一屏跨度 / 100ms」（不掉了，但拖动粘住）。
+        // 现在取中间值，且**上限** ICON_PAINT_RENDER_CAP：快拖那一帧够画本屏去重后的来源
+        // （.dll 这类共享项一个 id 点亮整屏，通常个位数到十几个），又不会让拖动变粘。
         DWORD now = GetTickCount();
         bool scrollDriven = inScrollMessage || (now - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS);
         if (scrollDriven) {
             int quota = visibleIconSpan();
             if (quota < ICON_PAINT_RENDER_MIN) quota = ICON_PAINT_RENDER_MIN;
+            if (quota > ICON_PAINT_RENDER_CAP) quota = ICON_PAINT_RENDER_CAP;
             iconPaintRenderBudget = quota;
             iconPaintRenderDeadline = now + ICON_PAINT_RENDER_MS;
         }
@@ -1751,8 +1756,11 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             // PostMessage —— PostMessage 的优先级高于输入消息，自续环会把鼠标消息压在后面，
             // 那正是「拖动粘住」的成因（见 scheduleIconFill 里的同类说明）。
             iconScrollTimerPending = false;
-            if (pendingScrollTop >= 0 && !inPreScroll)
+            if (pendingScrollTop >= 0 && !inPreScroll) {
+                preScrollFromTimer = true;      // 这不是真实消息，别被当成「快拖」而撤销押后
                 preScrollHandleVScroll((UINT)SB_THUMBTRACK);
+                preScrollFromTimer = false;
+            }
         }
         else {
             iconPrefetchTimerPending = false;
@@ -5522,7 +5530,10 @@ static bool nodeIconIsPerFile(const struct FileNode* node) {
 // **先把目标窗口的图标渲进池，再让控件滚**。
 //
 // 三种滚动分开对待：
-//   · 拖滑块（SB_THUMBTRACK）：连续几十上百条消息。渲完了就滚；没渲完就先押着不滚 ——
+//   · 拖滑块（SB_THUMBTRACK）**快拖**（相邻两条消息间隔 < ICON_SCROLL_FAST_DRAG_MS）：跟手优先。
+//     押后会让内容比滑块滞后，连续拖动时那就是「滚动条卡一下」—— 快拖一律不押后，预渲染一次
+//     就立刻把消息交回控件（稳态下池已命中，几乎不花钱）。
+//   · 拖滑块（SB_THUMBTRACK）**慢拖**：连续几十上百条消息。渲完了就滚；没渲完就先押着不滚 ——
 //     押着同时也省掉了这一次整屏重画。押后上限 ICON_SCROLL_HOLD_MAX_MS，超了就照滚：
 //     宁可闪一下，也不能让内容粘在滑块后面不动。押后期间滑块本身照旧跟手 ——
 //     它的位置由 win32u/scroll.c 的 g_tracking_info 直接画，与我们滚没滚无关。
@@ -5612,6 +5623,29 @@ static bool iconPrepareWindow(int top, int budgetMs) {
     return ready;
 }
 
+// 只查池、不渲染：目标窗口里还有几项没就位。退避中的项不算 —— 它们这几轮永远不会就位，
+// 计入缺口只会让「押后也没用」被误判（见 preScrollHandleVScroll）。
+static int iconWindowMissing(int top) {
+    struct IconPool* p = currentIconPool();
+    if (!p || p->himl != currentImageList) return 0;
+    if (!items || numItems <= 0) return 0;
+
+    int span = visibleIconSpan();
+    if (span <= 0) span = 64;
+    if (top < 0) top = 0;
+    int last = top + span;
+    if (last > numItems) last = numItems;
+
+    int miss = 0;
+    for (int i = top; i < last; i++) {
+        struct ListItem* it = &items[i];
+        if (!it->node) continue;
+        if (it->iconTries > 0) continue;
+        if (!itemIconPainted(p, it)) miss++;
+    }
+    return miss;
+}
+
 static void preScrollCancelRetry(void) {
     if (!iconScrollTimerPending) return;
     if (hwndContentView) KillTimer(hwndContentView, TIMER_ICON_SCROLL);
@@ -5652,10 +5686,36 @@ static bool preScrollHandleVScroll(UINT code) {
     int top = preScrollTargetTop(code, &si, &exact);
     if (top < 0) return false;
 
+    // 拖动速率：相邻两条 WM_VSCROLL 的间隔。lastScrollTick 此刻还是**上一条**滚动消息的
+    // 时间戳（本条的更新在窗口过程尾部），正好用来量间隔。
+    //
+    // 快拖与慢拖分派不同。**押后**（渲好目标窗口才让控件滚）能让那一帧不留空格子，代价是内容
+    // 比滑块滞后一小段时间 —— 连续快拖时这个滞后正是用户看到的「滚动条卡一下」。所以快拖一律
+    // 不押后：预渲染照做（一次小时间片就回到控件；稳态下这些来源早在池里，等于不花钱，只有
+    // 首次经过新区域才真付），宁可丢一两个图标，也不能粘。
+    DWORD now = GetTickCount();
+    bool fastDrag = isThumb && !preScrollFromTimer &&
+                    (now - lastScrollTick) < ICON_SCROLL_FAST_DRAG_MS;
+
+    if (fastDrag) {
+        pendingScrollTop = -1;
+        preScrollCancelRetry();
+        iconPrepareWindow(top, ICON_SCROLL_PREPARE_MS);
+        return false;
+    }
+
     // 图标 / 列表视图：目标窗口只能估算，不做押后。尽力渲一遍再照滚 —— 蒙对了这一帧就是
     // 完整的，蒙错了退化成原来的行为（绘制路径的就地渲染兜底）。
     if (isThumb && !exact) {
         iconPrepareWindow(top, ICON_SCROLL_PREPARE_MS);
+        return false;
+    }
+
+    // 缺口太大（目标窗口整片都是没见过的来源）：渲不完，押着也白押 —— 上限一到照样滚，
+    // 还平白让内容滞后一段时间。直接放行，让滑块跟手（缺的图标等停手后的补齐补上）。
+    if (isThumb && iconWindowMissing(top) > ICON_SCROLL_HOLD_MAX_MISS) {
+        pendingScrollTop = -1;
+        preScrollCancelRetry();
         return false;
     }
 
@@ -5669,7 +5729,6 @@ static bool preScrollHandleVScroll(UINT code) {
     }
 
     // 拖滑块：就位就滚；没就位先押着不滚（顺带省掉这次整屏重画）。
-    DWORD now = GetTickCount();
     if (pendingScrollTop < 0) pendingScrollSince = now;   // 这一轮押后的起点
     pendingScrollTop = top;
 
