@@ -72,15 +72,17 @@ static void updateTreeItems() {
     tvis.hInsertAfter = TVI_ROOT;
     tvis.itemex.mask = TVIF_CHILDREN | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_PARAM | TVIF_TEXT | TVIF_STATE;
 
-    // 从"此电脑"节点获取系统图像列表（只需设置一次）
-    ITEMIDLIST* pidlComputer = NULL;
-    SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidlComputer);
-    if (pidlComputer) {
-        SHFILEINFO sfi = {0};
-        HIMAGELIST himl = (HIMAGELIST)SHGetFileInfo((LPCWSTR)pidlComputer, 0, &sfi, sizeof(SHFILEINFO), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_PIDL);
-        if (himl) TreeView_SetImageList(hwndTreeview, himl, TVSIL_NORMAL);
-        CoTaskMemFree(pidlComputer);
-    }
+    // 把系统小图标列表挂到树上：下面每个节点给的 iImage 都是 shell 图标索引，
+    // 只有配上这份列表才画得出来。
+    // 原先这里是「先取 CSIDL_DRIVES 的 PIDL，再拿它查一次 SHGetFileInfo
+    // (SHGFI_PIDL | SHGFI_SYSICONINDEX | SHGFI_SMALLICON)」，绕一大圈只是为了换到
+    // 这个句柄 —— 而 SHGetFileInfo 那条分支内部走的就是 SHGetImageList(SHIL_SMALL)
+    // （wine/dlls/shell32/shell32_main.c:392），返回的正是 shell_imagelists[SHIL_SMALL]。
+    // 同一个列表用 Shell_GetImageLists 直接拿（iconcache.c:620），省掉一次 shell
+    // 命名空间绑定 —— 这一笔实测占了 createTreeview 里最大的一段。
+    HIMAGELIST himlSmallTree = NULL;
+    if (Shell_GetImageLists(NULL, &himlSmallTree) && himlSmallTree)
+        TreeView_SetImageList(hwndTreeview, himlSmallTree, TVSIL_NORMAL);
     startupMark("    tv: shell imagelist");
 
     struct FileNode* node = treeFileNode;
