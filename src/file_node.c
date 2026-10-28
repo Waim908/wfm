@@ -6,6 +6,8 @@ struct FileNode* currPathFileNode = NULL;
 static wchar_t desktopPath[MAX_PATH] = {0};
 static wchar_t personalPath[MAX_PATH] = {0};
 static wchar_t userProfilePath[MAX_PATH] = {0}; // 新增：用户目录路径
+static wchar_t tempPath[MAX_PATH] = {0};        // %TEMP%：侧边栏「临时文件夹」入口
+static wchar_t startMenuPath[MAX_PATH] = {0};   // 开始菜单（CSIDL_PROGRAMS）
 static wchar_t* userProfileNodeName = NULL;     // 用于指针识别
 
 wchar_t* getDesktopPath() {
@@ -226,6 +228,17 @@ void initFileNodes() {
     SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, personalPath);
     GetEnvironmentVariableW(L"USERPROFILE", userProfilePath, MAX_PATH);
 
+    // %TEMP%：清缓存、捞可疑文件都要反复进这个目录，给它一条固定入口。
+    // 先问环境变量（wine 与 Winlator 都会设 TEMP），拿不到再退回 GetTempPathW。
+    // 两条来源都可能带尾部分隔符，统一去掉 —— 只有 "X:\" 这种根路径例外（去掉就成了 "X:"）。
+    DWORD tempLen = GetEnvironmentVariableW(L"TEMP", tempPath, MAX_PATH);
+    if (tempLen == 0 || tempLen >= MAX_PATH) GetTempPathW(MAX_PATH, tempPath);
+    size_t tempPathLen = wcslen(tempPath);
+    if (tempPathLen > 3 && tempPath[tempPathLen - 1] == L'\\') tempPath[tempPathLen - 1] = L'\0';
+
+    // 开始菜单：CSIDL_PROGRAMS 就是「开始菜单 → 程序」那一层，快捷方式全在这里
+    SHGetFolderPath(NULL, CSIDL_PROGRAMS, NULL, SHGFP_TYPE_CURRENT, startMenuPath);
+
     // 创建顶级节点
     struct FileNode* desktopNode = allocFileNode(lc_str.desktop, TYPE_DESKTOP);
     struct FileNode* documentsNode = allocFileNode(lc_str.documents, TYPE_PERSONAL);
@@ -255,19 +268,33 @@ void initFileNodes() {
         return;
     }
     computerNode->hasChildDirs = true;
-    
-    // 链接顺序：桌面 -> 文档 -> 用户 -> 此电脑
-    desktopNode->sibling = documentsNode;
-    documentsNode->sibling = userNode;
-    userNode->sibling = computerNode;
-    
+
+    // 临时目录 / 开始菜单：目录不存在（或分配失败）就不摆这个入口 ——
+    // 点进去是空的比没有更糟。两者都是「点一下就导航过去」的叶子项，不设 hasChildDirs。
+    struct FileNode* tempNode = NULL;
+    if (tempPath[0] && isPathExists(tempPath))
+        tempNode = allocFileNode(lc_str.temp_folder, TYPE_TEMP);
+
+    struct FileNode* startMenuNode = NULL;
+    if (startMenuPath[0] && isPathExists(startMenuPath))
+        startMenuNode = allocFileNode(lc_str.start_menu, TYPE_STARTMENU);
+
+    // 链接顺序：桌面 -> 文档 -> 用户 -> 临时 -> 开始菜单 -> 此电脑
+    struct FileNode* chain[6];
+    int chainLen = 0;
+    chain[chainLen++] = desktopNode;
+    chain[chainLen++] = documentsNode;
+    chain[chainLen++] = userNode;
+    if (tempNode) chain[chainLen++] = tempNode;
+    if (startMenuNode) chain[chainLen++] = startMenuNode;
+    chain[chainLen++] = computerNode;
+    for (int i = 0; i + 1 < chainLen; i++) chain[i]->sibling = chain[i + 1];
+
     // 构建“此电脑”的子项（驱动器）
     buildChildNodes(computerNode, true);
     
     treeFileNode = desktopNode;
     currPathFileNode = NULL;
-    
-
     
     // 默认选中“此电脑”
     setCurrPathFileNode(computerNode);
@@ -304,6 +331,12 @@ int getFileNodePath(struct FileNode* node, wchar_t* path) {
                     break;
                 case TYPE_USERPROFILE:
                     filename = userProfilePath;
+                    break;
+                case TYPE_TEMP:
+                    filename = tempPath;
+                    break;
+                case TYPE_STARTMENU:
+                    filename = startMenuPath;
                     break;
                 case TYPE_FILE:
                 case TYPE_DIR:

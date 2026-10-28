@@ -25,7 +25,11 @@ enum FileType {
     TYPE_USERPROFILE,
     TYPE_COMPUTER,
     TYPE_BOOKMARK_ROOT,
-    TYPE_BOOKMARK_ITEM
+    TYPE_BOOKMARK_ITEM,
+    // 侧边栏两个固定入口：%TEMP%（清缓存 / 找可疑文件）与开始菜单目录（快捷方式）。
+    // 追加在末尾，已有类型的取值一律不变。
+    TYPE_TEMP,
+    TYPE_STARTMENU
 };
 
 struct FileInfo {
@@ -231,6 +235,12 @@ static inline void getFileInfo(wchar_t* path, enum FileType type, bool largeIcon
         case TYPE_USERPROFILE:
             wcscpy_s(result->typeName, 80, lc_str.folder);
             break;      
+        case TYPE_TEMP:
+            wcscpy_s(result->typeName, 80, lc_str.temp_folder);
+            break;
+        case TYPE_STARTMENU:
+            wcscpy_s(result->typeName, 80, lc_str.start_menu);
+            break;
         case TYPE_COMPUTER:
             wcscpy_s(result->typeName, 80, lc_str.computer);
             break;

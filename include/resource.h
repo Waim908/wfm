@@ -292,6 +292,9 @@ struct LC_STR {
     wchar_t* drive_usage_bar_graph;
     wchar_t* drive_usage_bar_total;
     wchar_t* drive_usage_bar_none;
+    // 侧边栏两个固定入口的名字：%TEMP% 与开始菜单目录
+    wchar_t* temp_folder;
+    wchar_t* start_menu;
 };
 
 extern struct LC_STR lc_str;

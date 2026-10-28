@@ -42,8 +42,9 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
             int iconIndex = getTreeIcon(path, node->type);
 
             bool isExpandable = node->hasChildDirs;
-            // 用户和文档节点不显示展开/折叠按钮，和桌面一样
-            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+            // 用户、文档、临时目录、开始菜单都是「点一下就导航」的叶子项，不给展开/折叠按钮
+            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL ||
+                node->type == TYPE_TEMP || node->type == TYPE_STARTMENU) {
                 isExpandable = false;
             }
 
@@ -105,6 +106,17 @@ static void updateTreeItems() {
                 }
                 break;
             }
+            case TYPE_TEMP: {
+                // %TEMP% 没有对应的 CSIDL，只能按真实路径建 PIDL —— 这样拿到的才是
+                // shell 认的那个文件夹图标，而不是退到通用文件图标
+                wchar_t tempDir[MAX_PATH] = {0};
+                if (getFileNodePath(node, tempDir) && tempDir[0])
+                    pidl = ILCreateFromPathW(tempDir);
+                break;
+            }
+            case TYPE_STARTMENU:
+                SHGetSpecialFolderLocation(NULL, CSIDL_PROGRAMS, &pidl);
+                break;
             default:
                 break;
         }
@@ -114,8 +126,9 @@ static void updateTreeItems() {
         CoTaskMemFree(pidl);
 
         bool isExpandable = node->hasChildDirs;
-        // 用户和文档节点不显示展开/折叠按钮，和桌面一样
-        if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+        // 用户、文档、临时目录、开始菜单都是「点一下就导航」的叶子项，不给展开/折叠按钮
+        if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL ||
+            node->type == TYPE_TEMP || node->type == TYPE_STARTMENU) {
             isExpandable = false;
         }
 
@@ -170,8 +183,9 @@ LRESULT treeviewNotify(NMHDR* nmhdr) {
             }
             
             struct FileNode* node = (struct FileNode*)lParam;
-            // 用户和文档节点不允许展开/折叠，和桌面一样
-            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL) {
+            // 用户、文档、临时目录、开始菜单都是叶子项，不允许展开/折叠
+            if (node->type == TYPE_USERPROFILE || node->type == TYPE_PERSONAL ||
+                node->type == TYPE_TEMP || node->type == TYPE_STARTMENU) {
                 return TRUE; // 阻止展开
             }
             if (nmtv->action == TVE_EXPAND) treeItemExpand(nmtv->itemNew.hItem, node);

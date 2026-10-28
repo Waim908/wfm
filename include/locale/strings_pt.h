@@ -151,6 +151,8 @@ static inline void loadStrings_pt() {
     lc_str.drive_usage_bar_total = L"Apenas Tamanho Total";
     lc_str.drive_usage_bar_none = L"Oculto";
     lc_str.drive_usage_bar = L"Exibição de Uso do Disco";
+    lc_str.temp_folder = L"Temporários";
+    lc_str.start_menu = L"Menu Iniciar";
 }
 
 #endif

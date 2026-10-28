@@ -152,6 +152,8 @@ static inline void loadStrings_ru() {
     lc_str.drive_usage_bar_total = L"Только общий размер";
     lc_str.drive_usage_bar_none = L"Скрыть";
     lc_str.drive_usage_bar = L"Отображение занятости диска";
+    lc_str.temp_folder = L"Временные файлы";
+    lc_str.start_menu = L"Главное меню";
 }
 
 #endif
