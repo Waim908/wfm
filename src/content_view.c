@@ -1241,24 +1241,34 @@ static void iconRenderInvalidate(void) {
 //     iconFillRangeInner）就落在**绘制帧**上，而「绘制路径只查缓存、绝不现算」是图标子系统
 //     那几轮教训换来的规矩。
 // 结构照抄「后台图标渲染」：请求 / 完成两个环形队列 + 事件唤醒 + PostMessage 通知主线程。
+// 区别是**多条工作线程**（见 FOLDER_COUNT_WORKERS）：一屏十几二十个目录，单线程时它们是
+// 一个接一个串行枚举的，条目数就会「从上往下一个个慢慢跳出来」。
 //
 // 结果怎样安全地认回「是哪一行」：任务只带 {requestId, idx}，而 requestId 被**记在
 // items[idx] 这一格上**（ListItem.countRequestId）。回主线程时三条一起验：idx 仍在范围内、
 // items[idx].countRequestId 等于发出去的那个、且该 node 还是目录。中途换目录 / 重排 / 刷新都会
 // 重建 items[]（memset 成 0）→ 验证必然失败 → 结果丢弃。这是**自愈**的：新的一格
-// countRequestId 是 0，下一次 loadItemData 会重新排队。所以既不需要「代次」全局变量，也不会有
-// 图标那边「在途标记清不掉 → 永久缺图标」的隐患。
+// countRequestId 是 0，下一次 loadItemData 会重新排队。也不会有图标那边「在途标记清不掉 →
+// 永久缺图标」的隐患。
+// 另有一条与它配套的**代次**（folderCountDropStale）：不算正确性凭据，只为「别把时间花在
+// 已经没人看的目录上」—— 队列里上一批目录的任务连同在途的都会在枚举前被跳过。
 #define FOLDER_COUNT_QUEUE_MAX  64   // 在途请求上限（只有可见行会进来，够用）
 #define FOLDER_COUNT_DONE_MAX  128
 #define FOLDER_COUNT_IDLE_MS   500
-// 数到这个数就停，显示「9999+ 项」：十万项的目录不该为了一个数字把后台线程占住。
+// 数到这个数就停，显示「9999+ 项」：十万项的目录不该为了一个数字把工作线程占住。
 #define FOLDER_COUNT_CAP      9999
+// 工作线程上限。数条目是「一次系统调用查一个名字」的 I/O 型活（Wine 侧每次 FindNextFile
+// 都要过一趟服务端），单线程时 N 个目录的耗时就是 N 条串起来的和 —— 一屏 20 个目录就是
+// 「从上往下一个个慢慢跳出来」。多线程并行等待能把这段耗时按线程数摊开。
+// 上限 4：再多也只是和图标渲染线程、UI 线程抢 CPU，而真正受限的是 I/O 等待。
+#define FOLDER_COUNT_WORKERS   4
 // 查过了但枚举失败（权限 / 路径过长）：记成这个值，别再反复排队
 #define CHILD_ITEM_COUNT_FAILED (-2)
 
 struct FolderCountJob {
     unsigned requestId;
     int idx;
+    unsigned generation;   // 入队时的代次；items[] 重建后旧代次的任务不再有意义
     wchar_t path[MAX_PATH];
 };
 
@@ -1274,12 +1284,19 @@ static struct FolderCountDone folderCountDone[FOLDER_COUNT_DONE_MAX];
 static int folderCountDoneHead, folderCountDoneTail, folderCountDoneCount;
 static CRITICAL_SECTION folderCountLock;
 static bool folderCountLockReady = false;
-static HANDLE folderCountThread = NULL;
+static int folderCountWorkerCount = 0;
+// **手动复位**事件：队列非空期间一直保持有信号，这样一次入队能把所有在工作线程都叫起来
+// （自动复位事件只唤醒一个，剩下的线程会继续睡，队列里排着的任务就变成一条线程串行做完）。
 static HANDLE folderCountWake = NULL;
 static volatile LONG folderCountStop = 0;
+// 代次：items[] 一旦重建（换目录 / 刷新 / 排序 / 换视图）就 ++，队列里属于上一批目录的
+// 任务直接作废。只在主线程写，工作线程只读。
+static volatile LONG folderCountGeneration = 1;
 // 只增不减；0 保留给「本格没有在途请求」。用无符号是为了让回绕有定义（int 自增溢出是 UB），
 // 回绕本身无害 —— 认领只看相等，而 0 已被显式跳过。
 static unsigned folderCountRequestSeq = 0;
+// 已投递但还没处理的结果通知。多条结果只投一条消息，省掉每个目录一次 PostMessage。
+static volatile LONG folderCountPostPending = 0;
 
 // 数一个目录里的条目数（后台线程唯一做的事）。**只读**，不递归。
 // 过滤规则必须与 buildChildNodes 一致（跳过 . / ..，按 g_showHiddenFiles 决定是否含隐藏项），
@@ -1326,6 +1343,12 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
             folderCountJobCount--;
             have = true;
         }
+        else {
+            // 队列空 = 这条线程要睡了。复位必须与「判空」在同一个临界区里：否则入队方
+            // 可能正好在判空之后、复位之前 SetEvent，那个信号被随后的复位吃掉，整批
+            // 任务就得等 IDLE_MS 超时才会被捡起来。
+            ResetEvent(folderCountWake);
+        }
         LeaveCriticalSection(&folderCountLock);
 
         if (!have) {
@@ -1333,6 +1356,11 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
             WaitForSingleObject(folderCountWake, FOLDER_COUNT_IDLE_MS);
             continue;
         }
+
+        // 用户已经换过目录 / 刷新过：这批任务是上一屏的，枚举一次目录可能要上万次
+        // FindNextFile，白跑一趟就意味着当前这一屏的条目数晚到。直接跳过 —— 对应的
+        // 那一格已经不在了，没有人在等这个结果。
+        if (job.generation != (unsigned)folderCountGeneration) continue;
 
         int count = countItemsInFolder(job.path);
 
@@ -1355,29 +1383,85 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
             Sleep(2);
         }
 
-        HWND hwnd = hwndContentView;
-        if (hwnd && IsWindow(hwnd)) PostMessage(hwnd, MSG_FOLDER_COUNT_DONE, 0, 0);
+        // 一批结果只需要一条通知：主线程的 pump 一次就把完成队列抽干。多线程下每个目录
+        // 各投一条的话，一屏 20 个目录就是 20 条消息打在队列里。
+        if (InterlockedExchange(&folderCountPostPending, 1) == 0) {
+            HWND hwnd = hwndContentView;
+            if (!hwnd || !IsWindow(hwnd)) {
+                // 投不出去就别把闸门留着，否则以后永远不再投
+                InterlockedExchange(&folderCountPostPending, 0);
+            }
+            else PostMessage(hwnd, MSG_FOLDER_COUNT_DONE, 0, 0);
+        }
     }
     return 0;
 }
 
+// 要几条工作线程：按核数折半、夹在 1..FOLDER_COUNT_WORKERS。
+// 真机上目录枚举的时间几乎全花在等 I/O（每次 FindNextFile 都是一趟服务端往返），
+// 所以并行度能直接换成速度；但也不能把核占满 —— 图标渲染线程和 UI 线程都要跑。
+static int folderCountWorkerTarget(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int cores = (int)si.dwNumberOfProcessors;
+    int n = cores / 2;
+    if (n < 1) n = 1;
+    if (n > FOLDER_COUNT_WORKERS) n = FOLDER_COUNT_WORKERS;
+    return n;
+}
+
 // 惰性起线程。**只在主线程调用**。
 static void folderCountStart(void) {
-    if (folderCountThread) return;
+    if (folderCountWorkerCount > 0) return;
 
     if (!folderCountLockReady) {
         InitializeCriticalSection(&folderCountLock);
         folderCountLockReady = true;
     }
-    if (!folderCountWake) folderCountWake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!folderCountWake) folderCountWake = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!folderCountWake) return;
 
     folderCountStop = 0;
-    folderCountThread = CreateThread(NULL, 0, folderCountTask, NULL, 0, NULL);
-    if (!folderCountThread) {
+    folderCountPostPending = 0;
+    int want = folderCountWorkerTarget();
+    for (int i = 0; i < want; i++) {
+        HANDLE h = CreateThread(NULL, 0, folderCountTask, NULL, 0, NULL);
+        if (!h) break;
+        // 这些线程只做活、没人 join：句柄留着没用，直接关掉（线程照跑）。
+        CloseHandle(h);
+        folderCountWorkerCount++;
+    }
+    if (folderCountWorkerCount == 0) {
         CloseHandle(folderCountWake);
         folderCountWake = NULL;
     }
+}
+
+// items[] 重建时调：抬代次，并把队列里属于上一批目录的任务原地剔掉。
+// **只由主线程调用**（与 folderCountRequest 同一把锁）。
+//
+// 为什么必须剔：快速连点几个目录，64 格队列会先被上一批目录占满 —— 新目录那一屏的
+// 条目数排在它们后面才轮得到，看着就是「先空着，过好一会儿才跳出来」。剔掉之后新请求
+// 立刻有位置，工作线程也不会把时间花在没人看的目录上。
+static void folderCountDropStale(void) {
+    InterlockedIncrement(&folderCountGeneration);
+    if (!folderCountLockReady) return;
+
+    unsigned gen = (unsigned)folderCountGeneration;
+    EnterCriticalSection(&folderCountLock);
+    int keep = 0;
+    for (int i = 0; i < folderCountJobCount; i++) {
+        struct FolderCountJob job = folderCountJobs[(folderCountJobHead + i) % FOLDER_COUNT_QUEUE_MAX];
+        if (job.generation != gen) continue;
+        int dst = (folderCountJobHead + keep) % FOLDER_COUNT_QUEUE_MAX;
+        if (dst != (folderCountJobHead + i) % FOLDER_COUNT_QUEUE_MAX) folderCountJobs[dst] = job;
+        keep++;
+    }
+    folderCountJobCount = keep;
+    // 尾指针必须跟着回退到「有效区间的末尾」。只改 count 不改 tail 的话，下一次入队
+    // 会写进压缩后的区间之外 —— 那条任务永远不会被弹出，对应的格子就再也不会重新排队。
+    folderCountJobTail = (folderCountJobHead + keep) % FOLDER_COUNT_QUEUE_MAX;
+    LeaveCriticalSection(&folderCountLock);
 }
 
 // 给第 idx 项（目录）排一次计数。**只由主线程调用**（要写 items[idx].countRequestId）。
@@ -1394,7 +1478,7 @@ static void folderCountRequest(int idx) {
     if (path[0] == L'\0') return;
 
     folderCountStart();
-    if (!folderCountThread) return;
+    if (folderCountWorkerCount <= 0) return;
 
     unsigned requestId = ++folderCountRequestSeq;
     if (requestId == 0) requestId = ++folderCountRequestSeq;    // 跳过保留值 0
@@ -1405,6 +1489,7 @@ static void folderCountRequest(int idx) {
     memset(j, 0, sizeof(*j));
     j->requestId = requestId;
     j->idx = idx;
+    j->generation = (unsigned)folderCountGeneration;
     // 路径必须在这里**复制**进任务：FileNode 树会在换目录时整个释放，后台线程只认这份快照。
     wcsncpy(j->path, path, MAX_PATH - 1);
     j->path[MAX_PATH - 1] = L'\0';
@@ -1413,14 +1498,19 @@ static void folderCountRequest(int idx) {
     // 「本格有在途请求」的标记必须与入队放在同一临界区：否则后台可能在标记盖上之前就完成，
     // 主线程随即把结果吃掉 —— 而标记随后才盖上，那一格就再也不会排队了。
     item->countRequestId = requestId;
-    LeaveCriticalSection(&folderCountLock);
-
+    // SetEvent 也放在锁里：工作线程的「判空 → ResetEvent」在同一把锁内完成，两边不会
+    // 交错成「先复位、后置位被吃掉」的丢唤醒。
     SetEvent(folderCountWake);
+    LeaveCriticalSection(&folderCountLock);
 }
 
 // 接管后台数好的结果：写回 FileNode → 让那一行重新格式化 → 重画。**只由主线程调用**。
 static void folderCountPump(void) {
-    if (!folderCountThread || !folderCountLockReady) return;
+    if (folderCountWorkerCount <= 0 || !folderCountLockReady) return;
+
+    // 通知闸门在**抽队之前**清掉：任何一条结果只要在下面这个循环之前入队，就一定会被
+    // 抽走；在这之后入队的，那时闸门已经是 0，工作线程必然重新投递。两边都不会漏。
+    InterlockedExchange(&folderCountPostPending, 0);
 
     int firstRedraw = -1, lastRedraw = -1;
     for (;;) {
@@ -2145,6 +2235,10 @@ void clearContentView() {
     }
     numItems = 0;
     itemsCapacity = 0;
+
+    // 这一批格子的编号全部作废：队列里还在等着的条目数任务属于上一批目录，没有任何人
+    // 在等它们的结果（剔掉之后新目录的请求才排得进来）
+    folderCountDropStale();
 
     // 清除搜索缓存，防止文件树重建后指针悬空
     free(searchCache.results);
@@ -4973,8 +5067,8 @@ static const BYTE* getShortcutOverlayPixels(int* outSize) {
 }
 
 // 双线性缩放 32bpp RGBA 像素（预乘后插值，透明像素不会拉出脏色边）。
-// 用于把低分辨率目标图标平滑缩放到列表槽位尺寸——箭头角标随后按素材
-// 原生帧叠加，不随目标图标一起被放大成马赛克。srcSize/dstSize 为边长。
+// **只用于缩小**（整数倍优先走 downsampleIconPixels、非整数倍才落到这里）；
+// 放大一律走 scaleIconPixelsNearest，理由见那里的注释。srcSize/dstSize 为边长。
 static BYTE* scaleIconPixelsBilinear(const BYTE* src, int srcSize, int dstSize) {
     if (srcSize <= 0 || dstSize <= 0 || srcSize == dstSize) return NULL;
     // calloc 而不是 malloc：下面每个像素的四通道都会被赋值，但赋值点埋在两层
@@ -5084,9 +5178,45 @@ static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize) {
     return pixels;
 }
 
-// 把方形像素缓冲缩放到 dstSize×dstSize。整数倍缩小先反复折半（每步都是整数倍盒式
-// 均值），最后一步再收尾：256→48 若直接用点采样式双线性，会漏掉大部分源像素、细节
-// 发花；非整数倍（含放大）走双线性，不会出现最近邻那种块状。
+// 最近邻放大（像素复制）32bpp RGBA 像素。srcSize < dstSize 才有意义。
+//
+// **放大必须走这条，不能用双线性。** 放大不产生任何新信息：源帧只有 48px 时，128px 的
+// 格子只能把每个源像素铺成 2~3 个格子。双线性在这种场合干的事是把每个像素的边界抹成
+// 一片渐变 —— 图标资源是硬边像素画（Wine 自带图标、绝大多数 exe 的内嵌图标、像素风
+// .ico 都是），抹开之后整张图发糊，这就是「大图标视图看着不清楚」的直接来源，和图标
+// 尺寸设置本身无关。像素复制保住硬边：整数倍（48→96、32→64/128）是逐像素整块复制，
+// 非整数倍（48→64/128、96→128）也只是个别源列被多复制一次，不会出现半透明过渡色。
+//
+// 取样用「目标像素中心覆盖到的源像素」：sx = ((2x+1) * src) / (2 * dst)，整数运算。
+// 不落 double，整数倍时结果与按块复制逐字节相同；用中心取样而不是简单截断，是为了
+// 非整数倍时把多出来的那一列摊匀（48→128 是 3,3,2 的循环，而不是末尾挤出一段 3）。
+static BYTE* scaleIconPixelsNearest(const BYTE* src, int srcSize, int dstSize) {
+    if (!src || srcSize <= 0 || dstSize <= srcSize) return NULL;
+
+    // calloc 的理由同 scaleIconPixelsBilinear：每个像素都由 memcpy 写满，但写入点埋在
+    // 两层循环 + 手算下标里，-fanalyzer 证明不了「全量写入」会报假警告。
+    BYTE* out = (BYTE*)calloc((size_t)dstSize * dstSize * 4, 1);
+    if (!out) return NULL;
+
+    for (int y = 0; y < dstSize; y++) {
+        int sy = (int)(((long long)(2 * y + 1) * srcSize) / (2 * dstSize));
+        if (sy >= srcSize) sy = srcSize - 1;
+        const BYTE* srcRow = src + (size_t)sy * (size_t)srcSize * 4;
+        BYTE* outRow = out + (size_t)y * (size_t)dstSize * 4;
+
+        for (int x = 0; x < dstSize; x++) {
+            int sx = (int)(((long long)(2 * x + 1) * srcSize) / (2 * dstSize));
+            if (sx >= srcSize) sx = srcSize - 1;
+            memcpy(outRow + (size_t)x * 4, srcRow + (size_t)sx * 4, 4);
+        }
+    }
+    return out;
+}
+
+// 把方形像素缓冲缩放到 dstSize×dstSize。
+// 缩小：整数倍先反复折半（每步都是整数倍盒式均值），最后一步再收尾 —— 256→48 若直接
+// 用点采样式双线性，会漏掉大部分源像素、细节发花；非整数倍走双线性。
+// 放大：一律最近邻复制（见 scaleIconPixelsNearest），绝不插值。
 //
 // **无论成功失败都消费 pixels**（尺寸相同则原样交回，省掉一次整幅 memcpy；需要重采样
 // 时旧缓冲已被释放）。渲染路径要的就是这个语义：解码出的原生帧缓冲直接传进来，拿到
@@ -5110,9 +5240,12 @@ static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize) {
 
     BYTE* scaled = cur;
     if (curSize != dstSize) {
-        scaled = (curSize > dstSize && curSize % dstSize == 0)
-            ? downsampleIconPixels(cur, curSize, dstSize)
-            : scaleIconPixelsBilinear(cur, curSize, dstSize);
+        if (curSize < dstSize)
+            scaled = scaleIconPixelsNearest(cur, curSize, dstSize);
+        else if (curSize % dstSize == 0)
+            scaled = downsampleIconPixels(cur, curSize, dstSize);
+        else
+            scaled = scaleIconPixelsBilinear(cur, curSize, dstSize);
         free(cur);
     }
     return scaled;
@@ -6874,6 +7007,8 @@ void refreshContentView() {
         items = NULL;
     }
     numItems = 0;
+    // 同上：这一批格子作废，队列里残留的条目数任务直接剔掉，别挡着新目录的请求
+    folderCountDropStale();
     freeMenuItems();
 
     // 清理图标查看器资源
