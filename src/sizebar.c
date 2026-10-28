@@ -3,7 +3,6 @@
 static WNDPROC OrigWndProc;
 static bool isTracking = false;
 static bool isSizing = false;
-static POINTS currPos;
 static int startX;
 static HCURSOR cursorArrow;
 static HCURSOR cursorSizeLR;
@@ -27,10 +26,6 @@ LRESULT CALLBACK SizebarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
         case WM_NCHITTEST:
             return HTCLIENT;
-        case WM_MOVE: {
-            currPos = MAKEPOINTS(lParam);
-            break;
-        }
         case WM_SETCURSOR: {
             return 1;
         }       
