@@ -3436,6 +3436,17 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     return CDRF_NOTIFYITEMDRAW;
                 case CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
+                    // 设过背景图：非选中条目不要实心底色。
+                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而这个值
+                    // 由控件在每次通知前从 infoPtr->clrTextBk 拷过来（customdraw_fill，
+                    // :1063；那个字段归 LVM_SETTEXTBKCOLOR 管，不是 LVM_SETBKCOLOR），
+                    // 所以逐条目改这里就生效。
+                    // **必须放在下面两个早退之前**：大图标视图和磁盘占用条那两条分支都会提前
+                    // return，放在后面的话它们连"清底色"都轮不到 —— 盘符那一屏整片白底就是这么来的。
+                    // 选中项**不**改：那次填充同时负责画选中高亮，一并关掉就看不出选了谁。
+                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
+                        lvcd->clrTextBk = CLR_NONE;
+                    }
                     // 大图标视图：完全自绘条目（Wine 默认对非选中项只画一行文件名）
                     if (viewStyle == STYLE_LARGE_ICON) {
                         if (idx >= 0 && idx < numItems && items[idx].node) {
@@ -3449,17 +3460,6 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         && items[idx].node->type == TYPE_DRIVE && items[idx].driveTotalBytes > 0) {
                         return CDRF_NOTIFYSUBITEMDRAW;
                     }
-                    // 设过背景图：非选中条目不要实心底色。
-                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而这个值
-                    // 由控件在每个条目送 CDDS_ITEMPREPAINT 之前从 infoPtr->clrTextBk 拷过来
-                    // （:1063，那个字段由 LVM_SETTEXTBKCOLOR 设置，不是 LVM_SETBKCOLOR），
-                    // 所以逐条目改这里就生效。不改的话详细/列表/小图标视图里每个格子的文字区
-                    // 都被 ETO_OPAQUE 填成窗口色，背景图透不出来 —— 大图标视图之所以一直正常，
-                    // 是因为那条路径由 drawLargeIconItem 自绘并返回 CDRF_SKIPDEFAULT。
-                    // 选中项**不**改：那次填充同时负责画选中高亮，一并关掉就看不出选中了谁。
-                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
-                        lvcd->clrTextBk = CLR_NONE;
-                    }
                     // 隐藏文件用灰色文字
                     if (idx >= 0 && idx < numItems && items[idx].isHidden) {
                         lvcd->clrText = RGB(160, 160, 160);
@@ -3468,6 +3468,11 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                 }
                 case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
+                    // 子项阶段是**另一次**通知，clrTextBk 已被 customdraw_fill 重新拷回默认值，
+                    // 上面条目阶段改的那一份到不了这里，所以必须再设一次。
+                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
+                        lvcd->clrTextBk = CLR_NONE;
+                    }
                     if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
                         && items[idx].driveTotalBytes > 0 && lvcd->iSubItem == COLUMN_SIZE_IDX) {
                         
@@ -3499,7 +3504,12 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         }
                         else {
                             // Background bar: light gray for free space
-                            FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
+                            // 设了背景图就不铺这层浅灰：它是一块不透明的实心矩形，铺上去
+                            // 这个格子照样是「白底」，背景图穿不出来。已用部分那几条
+                            // 彩色长度条仍然画，信息不丢。
+                            if (!hasBackgroundImage()) {
+                                FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
+                            }
 
                             // Used space bar
                             double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
