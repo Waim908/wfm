@@ -38,8 +38,13 @@ static HANDLE hMorePopupMenu;
 static bool isEditMode;
 static wchar_t keyword[64] = {0};
 static bool searchEditEmpty = true;
-static struct AddrButton* addrButtons = NULL;
-static int numAddrButtons = 0;
+// 地址栏按钮槽位。**槽位常驻、窗口惰性创建、按需复用**：地址栏每次导航都要重建一遍，
+// 而 CreateWindowEx/DestroyWindow 在 Wine 下是真开销（F 一个按钮一次窗口对象创建），
+// 一条 "C:\a\b" 的路径是 3 段 = 6 个窗口。复用之后这条路径上只剩隐藏 / 设文本 / 定位。
+// 数组用固定容量（MAX_PATH 深度下的最大段数 × 2），免掉 realloc 与释放，不会泄漏。
+static struct AddrButton addrButtons[MAX_ADDR_BUTTONS];
+static int numAddrButtons = 0;      // 本轮导航实际占用的槽数
+static int addrButtonsAlloc = 0;    // 其中**已经建出窗口**的槽数（只增不减）
 
 extern struct FileNode* currPathFileNode;
 extern HINSTANCE globalHInstance;
@@ -449,17 +454,31 @@ int getNavbarHeight() {
 }
 
 static struct AddrButton* addAddrButton() {
-    int index = numAddrButtons++;
-    struct AddrButton* tmp = realloc(addrButtons, numAddrButtons * sizeof(struct AddrButton));
-    if (!tmp) {                    // realloc 失败时保留旧指针，回滚计数，避免泄漏与 NULL 解引用
-        numAddrButtons--;
-        return NULL;
+    if (numAddrButtons >= MAX_ADDR_BUTTONS) return NULL;
+
+    // 槽位不够用才真的建窗口，建好之后一直留着给下一次导航复用
+    if (numAddrButtons >= addrButtonsAlloc) {
+        struct AddrButton* nb = &addrButtons[addrButtonsAlloc];
+        nb->hwnd = CreateWindowEx(0, WC_BUTTON, NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0,
+                                  hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
+        if (!nb->hwnd) return NULL;
+        nb->node = NULL;
+        nb->width = 0;
+        nb->isArrow = false;
+        nb->isHidden = true;
+        addrButtonsAlloc++;
     }
-    addrButtons = tmp;
-    struct AddrButton* button = &addrButtons[index];
-    button->hwnd = CreateWindowEx(0, WC_BUTTON, NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwndNavbar, (HMENU)NULL, globalHInstance, NULL);
+
+    struct AddrButton* button = &addrButtons[numAddrButtons++];
     button->isArrow = false;
+    // 字体每次都设一遍：旧实现每次导航都重建窗口，顺带就把字体刷新了；改成复用之后
+    // 只在建窗口时设，WM_DPICHANGED 换了 hGuiFont 这些按钮就会停在旧字体上。
+    // 这是一次子窗口消息，比建窗口便宜得多。
     SendMessage(button->hwnd, WM_SETFONT, (WPARAM)hGuiFont, 0);
+    // 复用的槽上一轮可能是箭头按钮（BS_ICON）：把样式清回普通按钮，否则随后
+    // WM_SETTEXT 设进去的路径段文字不会画出来。
+    LONG_PTR style = GetWindowLongPtr(button->hwnd, GWL_STYLE);
+    SetWindowLongPtr(button->hwnd, GWL_STYLE, (style & ~BS_TYPEMASK) | BS_PUSHBUTTON);
     return button;
 }
 
@@ -488,14 +507,12 @@ static void calcAddrButtonWidth(struct AddrButton* button) {
 }
 
 void clearAddrButtons() {
-    for (int i = 0; i < numAddrButtons; i++) DestroyWindow(addrButtons[i].hwnd);
-    
-    if (addrButtons) {
-        free(addrButtons);
-        addrButtons = NULL;
+    // **不销毁窗口**，只把它们藏起来：下一次导航 updateAddrButtons 会按新路径重新
+    // 占用这些槽位（见 addAddrButton）。窗口是 hwndNavbar 的子窗口，随它一起销毁。
+    for (int i = 0; i < numAddrButtons; i++) {
+        if (addrButtons[i].hwnd) ShowWindow(addrButtons[i].hwnd, SW_HIDE);
     }
-    
-    numAddrButtons = 0; 
+    numAddrButtons = 0;
 }
 
 void updateAddrButtons() {
