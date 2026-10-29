@@ -106,6 +106,11 @@
 #define IDC_BTN_KEEP_BOTH 274
 #define IDC_CHECK_APPLY_ALL 275
 
+// 退出确认对话框。不用 MessageBox 的原因见 main.c 的 ConfirmExitDialogProc：
+// MessageBox 的宽度只按「正文 + 按钮」算，标题比它宽时会被截成省略号。
+#define IDD_CONFIRM_EXIT 280
+#define IDC_CONFIRM_TEXT 281
+
 #define ICON_UP          0
 #define ICON_COPY        1
 #define ICON_CUT         2

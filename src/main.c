@@ -197,6 +197,55 @@ static const struct IconMapping iconMap[] = {
     {ICON_EXPLORER, IDI_COMPUTER},
 };
 
+// 退出确认对话框。
+//
+// **这里不用 MessageBox**，原因是它没法控制宽度：wine 的 msgbox 只按「正文 + 按钮」
+// 算对话框宽度（dlls/user32/msgbox.c:274 `twidth = max((bw + bspace) * buttons +
+// bspace - tleft, rect.right)`，`wwidth` 由它推出），标题**完全不参与**；而标题绘制
+// 带 DT_END_ELLIPSIS（dlls/win32u/defwnd.c:1706）。只要标题比那个宽度宽，就必然是
+// 「确…」这种省略号。
+//
+// 中文正好撞上：MB_YESNO 的按钮是「是 / 否」，一个字，比英文 Yes / No 窄，撑出来的框
+// 更窄；而「确认退出」四个全角字比「是 / 否」撑的宽度宽 —— 于是英文下正常、中文下被
+// 截断。别的弹窗标题只有两三个字，所以只有这个框会出问题。
+// 换成自己的对话框模板（IDD_CONFIRM_EXIT）后宽度是写死的 236 个对话框单位，
+// 标题栏永远够用；按钮文字也一并本地化，不再依赖 Wine 的系统按钮语言。
+INT_PTR CALLBACK ConfirmExitDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;   // 没有初始化参数（DialogBoxParam 的 dwInitParam 用不到）
+    switch (msg) {
+        case WM_INITDIALOG: {
+            // 对话框模板坐标是 (0, 0)，不挪就贴在屏幕左上角 —— 与 AboutDialogProc 同一套居中做法
+            RECT rect, rect1;
+            GetWindowRect(GetParent(hwndDlg), &rect);
+            GetClientRect(hwndDlg, &rect1);
+            SetWindowPos(hwndDlg, NULL,
+                         (rect.right + rect.left) / 2 - (rect1.right - rect1.left) / 2,
+                         (rect.bottom + rect.top) / 2 - (rect1.bottom - rect1.top) / 2,
+                         0, 0, SWP_NOZORDER | SWP_NOSIZE);
+
+            SetWindowText(hwndDlg, lc_str.confirm_exit);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_CONFIRM_TEXT), lc_str.msg_confirm_exit_app);
+            SetWindowText(GetDlgItem(hwndDlg, IDOK), lc_str.ok);
+            SetWindowText(GetDlgItem(hwndDlg, IDCANCEL), lc_str.cancel);
+            return TRUE;
+        }
+        case WM_COMMAND: {
+            switch (LOWORD(wParam)) {
+                case IDOK:
+                case IDCANCEL:
+                    EndDialog(hwndDlg, (INT_PTR)LOWORD(wParam));
+                    return TRUE;
+            }
+            break;
+        }
+        case WM_CLOSE: {
+            EndDialog(hwndDlg, IDCANCEL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 void preloadIcons() {
     int mapCount = (int)(sizeof(iconMap) / sizeof(iconMap[0]));
     for (int i = 0; i < mapCount; i++) {
@@ -586,11 +635,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // 「禁用 owner + 记下 *modal_owner」这条模态路径（user32/dialog.c:582-601）；owner = NULL
             // 时这个框就是一个无归属的顶层窗口 —— 主窗口照旧可点（还能点出第二个确认框），
             // WM_TRANSIENT_FOR 也没有，层级与焦点全靠窗口管理器「尽力而为」。
-            int answer = MessageBox(hwndMain, lc_str.msg_confirm_exit_app, lc_str.confirm_exit,
-                                    MB_YESNO | MB_ICONQUESTION);
-            // 放在 MessageBox 之后才复位：确认框期间的重复 WM_CLOSE 一律被上面的标志位吃掉
+            // 确认框改成自绘对话框（IDD_CONFIRM_EXIT），原因见 ConfirmExitDialogProc 上方：
+            // MessageBox 的宽度不把标题算进去，中文标题会被截成省略号。
+            INT_PTR answer = DialogBoxParam(globalHInstance, MAKEINTRESOURCE(IDD_CONFIRM_EXIT),
+                                            hwndMain, &ConfirmExitDialogProc, 0);
+            // 放在对话框之后才复位：确认框期间的重复 WM_CLOSE 一律被上面的标志位吃掉
             exitConfirmPending = false;
-            if (answer == IDYES) {
+            if (answer == IDOK) {
                 PostQuitMessage(0);
             }
             return 0;
