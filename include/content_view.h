@@ -35,6 +35,11 @@ bool refreshFlashBegin(void);
 #define REFRESH_FLASH_MS           70
 #define REFRESH_FLASH_MAX_ITEMS    400      // 超过这么多条目就不表演了
 
+// 显式刷新（工具栏按钮 / 右键菜单「刷新」）时调用：把当前目录各直接子目录的条目数缓存
+// 标成过时。数字仍然显示（不清空），后台会重数一遍再改对 —— 见 content_view.c 的
+// 「条目数缓存」一节。普通导航（进/退目录）不调用它，缓存直接命中。
+void markFolderCountsStale(void);
+
 void onMenuItemUpClick();
 void onMenuItemOpenClick();
 void onMenuItemEditClick();

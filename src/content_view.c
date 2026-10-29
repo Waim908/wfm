@@ -190,6 +190,9 @@ struct ListItem {
     unsigned countRequestId;
     // 发出请求的时刻（GetTickCount）。只给兜底对账用：在途太久没回来就当它丢了，重排一次。
     DWORD countRequestTick;
+    // 这一格的数字来自「条目数缓存」，且缓存被标成过时（显式刷新过）：先照旧显示，
+    // 同时放行一次重数去更新它（见「条目数缓存」一节）。
+    bool countStale;
 };
 
 // 搜索线程持有的只读节点池。
@@ -1273,10 +1276,105 @@ static void iconRenderInvalidate(void) {
 // 数到一半发现换过目录 / 刷新过：这条结果直接作废，不入完成队列
 #define FOLDER_COUNT_ABORTED   (-3)
 
+// ---------------------------------------------------------------------------
+// 条目数缓存：目录路径 →「这个目录里有几项」。
+//
+// 要解决的问题：进一个放着几十个子目录的目录，那几十个数字要一个个数出来，而 Wine 里
+// **每个条目都要一次 stat**（见 countItemsInFolder），大目录要好几秒，看起来就是一片
+// 空白慢慢填。可这些数字绝大多数时候并没有变 —— 上次看到的就还是对的。
+//
+// 只由**主线程**访问，所以不上锁：查在 loadItemData（某一行第一次要格式化）时、写在
+// 后台结果认领时与进目录刷新时、失效在显式刷新时，全在这一个线程。「这一格还是不是当初
+// 那一格」由 countRequestId 那一关负责验，缓存不重复承担正确性。
+//
+// 键是「路径 + 当时的隐藏文件开关」，不是一个路径：计数规则跟着 g_showHiddenFiles 走
+// （见 countItemsInFolder），同一目录在两种开关下条目数不同，只按路径缓存会显示错的数字。
+//
+// stale 的语义是「这个数字是上次的，内容可能变了」。显式刷新**不删**缓存而是标 stale ——
+// 删掉的话刷新后那一屏又会空一片，正是要修的那个毛病；标 stale 之后数字立刻还在（用户
+// 要的就是这个），同时放行一次重数在后台更新它。
+#define FOLDER_COUNT_CACHE_MAX  128
+
+struct FolderCountCacheEntry {
+    wchar_t path[MAX_PATH];
+    int count;          // 已按 FOLDER_COUNT_CAP 截断，>= 0
+    bool showHidden;    // 计数时的隐藏文件开关
+    bool stale;         // 内容可能已变：照旧显示，但允许重数
+};
+
+static struct FolderCountCacheEntry folderCountCache[FOLDER_COUNT_CACHE_MAX];
+static int folderCountCacheCount = 0;   // 已填条数（表紧凑，满了走环形覆盖）
+static int folderCountCacheNext = 0;    // 环形覆盖位置
+
+static int folderCountCacheFind(const wchar_t* path, bool showHidden) {
+    for (int i = 0; i < folderCountCacheCount; i++) {
+        if (folderCountCache[i].showHidden != showHidden) continue;
+        // Windows 路径不区分大小写。同一棵树里拼出来的串本来一致，但用户可能从地址栏
+        // 手打进来（大小写不同），那也该算同一个目录。
+        if (_wcsicmp(folderCountCache[i].path, path) == 0) return i;
+    }
+    return -1;
+}
+
+// 返回 0 = 没查过，1 = 有值且新鲜，2 = 有值但过时。命中时把数字写进 count。
+static int folderCountCacheLookup(const wchar_t* path, bool showHidden, int* count) {
+    if (!path || !path[0] || !count) return 0;
+    int i = folderCountCacheFind(path, showHidden);
+    if (i < 0) return 0;
+    *count = folderCountCache[i].count;
+    return folderCountCache[i].stale ? 2 : 1;
+}
+
+static void folderCountCacheStore(const wchar_t* path, bool showHidden, int count) {
+    if (!path || !path[0] || count < 0) return;   // 数失败（-2 / -3）不进缓存，下次还会重数
+    int i = folderCountCacheFind(path, showHidden);
+    if (i < 0) {
+        if (folderCountCacheCount < FOLDER_COUNT_CACHE_MAX) {
+            i = folderCountCacheCount++;
+        }
+        else {
+            // 满了就覆盖最老的一条（环形推进）。真正的 LRU 要多维护一份访问时间戳，
+            // 而 128 条对「一屏二十个目录 + 来回进几个」已经够宽裕。
+            i = folderCountCacheNext;
+            folderCountCacheNext = (folderCountCacheNext + 1) % FOLDER_COUNT_CACHE_MAX;
+        }
+        wcsncpy(folderCountCache[i].path, path, MAX_PATH - 1);
+        folderCountCache[i].path[MAX_PATH - 1] = L'\0';
+        folderCountCache[i].showHidden = showHidden;
+    }
+    folderCountCache[i].count = count;
+    folderCountCache[i].stale = false;
+}
+
+// child 是不是 parent 的**直接**子目录（只比一层，孙子不算）。
+// parent 的长度由调用方给，因为根路径 "C:\" 去掉尾部分隔符后是 "C:"。
+static bool pathIsDirectChild(const wchar_t* child, const wchar_t* parent, size_t parentLen) {
+    if (_wcsnicmp(child, parent, parentLen) != 0) return false;
+    const wchar_t* rest = child + parentLen;
+    if (*rest != L'\\') return false;        // 等于自己，或 "C:\Users" 对 "C:\Users2"
+    rest++;
+    if (*rest == L'\0') return false;
+    for (const wchar_t* p = rest; *p; p++) {
+        if (*p == L'\\') return false;       // 还有一层分隔符 → 是孙子
+    }
+    return true;
+}
+
+// 显式刷新：把 parent 下各直接子目录的缓存标成过时（不删，数字照旧先显示）。
+static void folderCountCacheMarkChildrenStale(const wchar_t* parent) {
+    if (!parent || !parent[0]) return;
+    size_t n = wcslen(parent);
+    while (n > 1 && parent[n - 1] == L'\\') n--;   // 去掉尾部分隔符；"C:\" 留下 "C:"
+    for (int i = 0; i < folderCountCacheCount; i++) {
+        if (pathIsDirectChild(folderCountCache[i].path, parent, n)) folderCountCache[i].stale = true;
+    }
+}
+
 struct FolderCountJob {
     unsigned requestId;
     int idx;
     unsigned generation;   // 入队时的代次；items[] 重建后旧代次的任务不再有意义
+    bool showHidden;       // 入队时的隐藏文件开关：计数规则依赖它，结果要按它进缓存
     wchar_t path[MAX_PATH];
 };
 
@@ -1284,6 +1382,7 @@ struct FolderCountDone {
     unsigned requestId;
     int idx;
     int count;          // < 0 = 枚举失败
+    bool showHidden;    // 同 FolderCountJob.showHidden，随结果一起回来
 };
 
 static struct FolderCountJob  folderCountJobs[FOLDER_COUNT_QUEUE_MAX];
@@ -1407,6 +1506,7 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
                 d->requestId = job.requestId;
                 d->idx = job.idx;
                 d->count = count;
+                d->showHidden = job.showHidden;
                 folderCountDoneTail = (folderCountDoneTail + 1) % FOLDER_COUNT_DONE_MAX;
                 folderCountDoneCount++;
                 LeaveCriticalSection(&folderCountLock);
@@ -1541,8 +1641,10 @@ static bool folderCountRequest(int idx) {
     struct ListItem* item = &items[idx];
     struct FileNode* node = item->node;
     if (!node || node->type != TYPE_DIR) return true;
-    // 已经有结果 / 已有在途请求：不需要再排
-    if (node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN || item->countRequestId != 0) return true;
+    // 已经有结果 / 已有在途请求：不需要再排。
+    // 「缓存标过时」（显式刷新过）是例外：数字有，但要在后台重数一遍更新它。
+    if (item->countRequestId != 0) return true;
+    if (node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN && !item->countStale) return true;
 
     wchar_t path[MAX_PATH] = {0};
     getFileNodePath(node, path);
@@ -1562,6 +1664,9 @@ static bool folderCountRequest(int idx) {
     j->requestId = requestId;
     j->idx = idx;
     j->generation = (unsigned)folderCountGeneration;
+    // 计数规则依赖这个开关，结果回主线程时要按**入队时**的值进缓存 —— 用户可能在
+    // 请求飞行途中切了「显示隐藏文件」，用回来时的值会写到另一个键上。
+    j->showHidden = g_showHiddenFiles;
     // 路径必须在这里**复制**进任务：FileNode 树会在换目录时整个释放，后台线程只认这份快照。
     wcsncpy(j->path, path, MAX_PATH - 1);
     j->path[MAX_PATH - 1] = L'\0';
@@ -1606,11 +1711,19 @@ static void folderCountPump(void) {
 
         items[done.idx].countRequestId = 0;
         items[done.idx].countRequestTick = 0;
+        items[done.idx].countStale = false;
         if (done.count < 0) {
             node->childItemCount = CHILD_ITEM_COUNT_FAILED;   // 查过了、没结果，不再重试
             continue;
         }
         node->childItemCount = done.count;
+        // 进缓存：下次进这个目录直接就有数字，不用再等后台数一遍。键要带上入队时的
+        // 隐藏文件开关，不能读当前值（飞行途中可能被切过）。
+        {
+            wchar_t cachePath[MAX_PATH] = {0};
+            getFileNodePath(node, cachePath);
+            folderCountCacheStore(cachePath, done.showHidden, done.count);
+        }
         // **当场把文本算好、当场失效那一行**。旧写法只把 loaded 置回 false、指望「下一次
         // 绘制顺手重新格式化」再靠 ListView_RedrawItems 触发重画 —— 这条链上任何一环没走到
         // （消息和绘制谁先谁后、行矩形算得准不准、RedrawItems 失效到哪一列），屏幕上就是
@@ -1647,7 +1760,8 @@ static void folderCountReconcile(void) {
     for (int i = first; i < last; i++) {
         struct ListItem* item = &items[i];
         if (!item->node || item->node->type != TYPE_DIR) continue;
-        if (item->node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN) continue;
+        // 有数字且不是「缓存标过时」的，这一格已经不用管了
+        if (item->node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN && !item->countStale) continue;
 
         if (item->countRequestId != 0) {
             if (now - item->countRequestTick < FOLDER_COUNT_STUCK_MS) { pending = true; continue; }
@@ -1655,12 +1769,13 @@ static void folderCountReconcile(void) {
             item->countRequestTick = 0;
         }
         if (!folderCountRequest(i)) { pending = true; break; }   // 队列满：下一轮再来
-        // 排上之后仍然「无在途标记且数字未知」＝这一格根本排不进去（路径拼不出来，
-        // 见 folderCountRequest 的空路径分支）。标成失败即止，否则这一行每 300ms
-        // 都会把它重试一次，定时器永远停不下来。
-        if (item->countRequestId == 0 &&
-            item->node->childItemCount == CHILD_ITEM_COUNT_UNKNOWN) {
-            item->node->childItemCount = CHILD_ITEM_COUNT_FAILED;
+        // 排上之后仍然「无在途标记」＝这一格根本排不进去（路径拼不出来 / 线程起不来，
+        // 见 folderCountRequest 的那几个早退分支）。就地收口，否则这一行每 300ms 都会被
+        // 重试一次，定时器永远停不下来。缓存标过时的行收口时**保留旧数字**，只是不再重试。
+        if (item->countRequestId == 0) {
+            item->countStale = false;
+            if (item->node->childItemCount == CHILD_ITEM_COUNT_UNKNOWN)
+                item->node->childItemCount = CHILD_ITEM_COUNT_FAILED;
             continue;
         }
         pending = true;
@@ -3152,8 +3267,26 @@ static void loadItemData(struct ListItem* item, int idx) {
         // 绝不能在这里同步枚举目录：本函数的调用点有两个在绘制帧上（itemIconReady /
         // iconFillRangeInner），详见「后台文件夹条目数计数」一节。
         // 只有详细信息视图有「大小」这一列，图标/列表视图不必白白去枚举目录。
+        // 条目数缓存：这次会话里数过这个目录，就把上次的数字直接填上再格式化 ——
+        // 屏幕上立刻就有数字，不用等后台。
+        // 查表放在这里而不是 items 构造时，是因为本函数只对**要画到屏上的行**调用，
+        // 代价与可见行数成正比；放在构造循环里的话，进一个五千个子目录的目录要在
+        // 进目录那一刻扫五千遍表（每遍一次路径拼接 + 128 条全表比），白卡一下。
+        if (node->childItemCount == CHILD_ITEM_COUNT_UNKNOWN) {
+            wchar_t cachePath[MAX_PATH] = {0};
+            getFileNodePath(node, cachePath);
+            int cached = 0;
+            int hit = folderCountCacheLookup(cachePath, g_showHiddenFiles, &cached);
+            if (hit) {
+                node->childItemCount = cached;
+                item->countStale = (hit == 2);
+            }
+        }
         formatFolderCountText(item);
-        if (node->childItemCount < 0 && viewStyle == STYLE_DETAILS) {
+        // 有数字就直接用（多半来自条目数缓存）；没有、或者是「刷新过、标成过时」的，
+        // 再排一次后台计数 —— 后者数字已经在屏幕上，重数只是把它改对。
+        if (viewStyle == STYLE_DETAILS &&
+            (node->childItemCount < 0 || item->countStale)) {
             countDeferred = !folderCountRequest(idx);
         }
     }
@@ -7146,6 +7279,18 @@ bool refreshFlashBegin(void) {
     return true;
 }
 
+// 显式刷新（工具栏 / 右键菜单）时调用，见 content_view.h。
+// 只把「当前目录的直接子目录」标过时：它们才是屏幕上那一列「N 项」。
+void markFolderCountsStale(void) {
+    if (!currPathFileNode) return;
+
+    wchar_t path[MAX_PATH] = {0};
+    getFileNodePath(currPathFileNode, path);
+    if (path[0] == L'\0') return;
+
+    folderCountCacheMarkChildrenStale(path);
+}
+
 void refreshContentView() {
     // 启动计时打点（默认关闭，见 main.c 的 startupMark）。这一段的耗时才是「进目录
     // 要等多久」的主体，所以拆成 入口 / 建表 / 预热共享图标 / 补齐首屏 四段。
@@ -7219,6 +7364,21 @@ void refreshContentView() {
     for (struct FileNode* node = currPathFileNode->children; node; node = node->sibling)
         childCount++;
 
+    // 当前目录**自己**的条目数：上面这个数就是白拿的，顺手写回「条目数缓存」。
+    // 它显示在**上级**那一屏上。用户在这个目录里删掉几个文件、退回上级时，上级那格
+    // 直接就是改对后的数字 —— 不必等后台重数，也不会停在改动前的旧值（缓存唯一的
+    // 真缺口就在这儿：内容变了没有任何事件通知缓存）。
+    // childCount == 0 不写：buildChildNodes 在 FindFirstFile 失败时也是空，分不出
+    // 「真空目录」和「没权限」；写进去会让没权限的目录显示成「0 项」（后台计数那边
+    // 对这种情况给的是 FAILED＝留空）。空目录本来就只有两次 FindNextFile，不值当冒险。
+    if (childCount > 0) {
+        wchar_t selfPath[MAX_PATH] = {0};
+        getFileNodePath(currPathFileNode, selfPath);
+        if (selfPath[0] != L'\0')
+            folderCountCacheStore(selfPath, g_showHiddenFiles,
+                                  childCount >= FOLDER_COUNT_CAP ? FOLDER_COUNT_CAP : childCount);
+    }
+
     numItems = 0;
     itemsCapacity = 0;
     if (childCount > 0) {
@@ -7234,7 +7394,6 @@ void refreshContentView() {
             memset(item, 0, sizeof(struct ListItem));
             item->node = node;
             item->loaded = false;
-
             fillFileInfo(node, item);
         }
     }

@@ -668,6 +668,10 @@ void navigateRefresh() {
 void navigateRefreshWithFeedback() {
     if (!currPathFileNode) return;
 
+    // 用户显式要「重新统计」：把当前目录各子目录的条目数标成过时。数字照旧先显示在
+    // 屏幕上（直接删掉的话刷新后又空一片，那正是要修的毛病），后台随后重数再改对。
+    markFolderCountsStale();
+
     if (!refreshFlashPending && refreshFlashBegin()) {
         refreshFlashPending = true;
         if (SetTimer(hwndMain, TIMER_REFRESH_FLASH, REFRESH_FLASH_MS, NULL)) return;
