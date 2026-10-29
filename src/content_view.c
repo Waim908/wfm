@@ -1628,7 +1628,10 @@ static void invalidateItemRow(int idx) {
     if (!ListView_GetItemRect(hwndContentView, idx, &itemRc, LVIR_BOUNDS)) return;
     if (!GetClientRect(hwndContentView, &clientRc)) return;
     RECT band = { clientRc.left, itemRc.top, clientRc.right, itemRc.bottom };
-    InvalidateRect(hwndContentView, &band, FALSE);
+    // 不擦背景是因为「擦」会闪。但设了背景图之后，条目本身不再是实心底色
+    // （见 NM_CUSTOMDRAW 里把 clrTextBk 设成 CLR_NONE 那段），不擦就会把旧文字留在
+    // 新文字下面变成残影，所以这种情况下必须擦 —— 擦一次恰好会把背景图按裁剪区重贴。
+    InvalidateRect(hwndContentView, &band, hasBackgroundImage());
 }
 
 static void folderCountStartWatchdog(void);
@@ -3446,6 +3449,17 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         && items[idx].node->type == TYPE_DRIVE && items[idx].driveTotalBytes > 0) {
                         return CDRF_NOTIFYSUBITEMDRAW;
                     }
+                    // 设过背景图：非选中条目不要实心底色。
+                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而这个值
+                    // 由控件在每个条目送 CDDS_ITEMPREPAINT 之前从 infoPtr->clrTextBk 拷过来
+                    // （:1063，那个字段由 LVM_SETTEXTBKCOLOR 设置，不是 LVM_SETBKCOLOR），
+                    // 所以逐条目改这里就生效。不改的话详细/列表/小图标视图里每个格子的文字区
+                    // 都被 ETO_OPAQUE 填成窗口色，背景图透不出来 —— 大图标视图之所以一直正常，
+                    // 是因为那条路径由 drawLargeIconItem 自绘并返回 CDRF_SKIPDEFAULT。
+                    // 选中项**不**改：那次填充同时负责画选中高亮，一并关掉就看不出选中了谁。
+                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
+                        lvcd->clrTextBk = CLR_NONE;
+                    }
                     // 隐藏文件用灰色文字
                     if (idx >= 0 && idx < numItems && items[idx].isHidden) {
                         lvcd->clrText = RGB(160, 160, 160);
@@ -3990,7 +4004,8 @@ void setViewStyle(enum ViewStyle newViewStyle) {
         }
         else {
             ListView_Arrange(hwndContentView, LVA_DEFAULT);
-            InvalidateRect(hwndContentView, NULL, FALSE);
+            // 有背景图时必须擦：条目不再有实心底色，不擦会留旧位置的重影
+            InvalidateRect(hwndContentView, NULL, hasBackgroundImage());
         }
     }
 
@@ -7314,7 +7329,8 @@ static bool iconFillStep(void) {
     // 覆盖「补齐先于首次绘制完成」这种一次都没重画过的情形。
     if (iconPaintMissed) {
         iconPaintMissed = false;
-        InvalidateRect(hwndContentView, NULL, FALSE);
+        // 同上：有背景图时条目没有实心底色，不擦会留残影
+        InvalidateRect(hwndContentView, NULL, hasBackgroundImage());
     }
     scheduleIconPrefetch();    // 可见区搞定了，再用空档预取邻域
     return false;
