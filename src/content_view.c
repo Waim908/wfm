@@ -4565,7 +4565,7 @@ GpStatus WINGDIPAPI GdipGetImageGraphicsContext(GpImage*, GpGraphics**);
 GpStatus WINGDIPAPI GdipSetInterpolationMode(GpGraphics*, INT);
 GpStatus WINGDIPAPI GdipGraphicsClear(GpGraphics*, DWORD);
 GpStatus WINGDIPAPI GdipDrawImageRectI(GpGraphics*, GpImage*, INT, INT, INT, INT);
-GpStatus WINGDIPAPI GdipCreateSolidBrush(DWORD, GpBrush**);
+GpStatus WINGDIPAPI GdipCreateSolidFill(DWORD, GpBrush**);
 GpStatus WINGDIPAPI GdipFillRectangleI(GpGraphics*, GpBrush*, INT, INT, INT, INT);
 GpStatus WINGDIPAPI GdipDeleteBrush(GpBrush*);
 GpStatus WINGDIPAPI GdipDeleteGraphics(GpGraphics*);
@@ -4742,7 +4742,7 @@ void rebuildBackgroundBitmap(void) {
             int a = (backgroundDim > 100) ? 100 : backgroundDim;
             GpBrush* brush = NULL;
             DWORD dimArgb = ((DWORD)(a * 255 / 100) << 24) | (argb & 0x00FFFFFFu);
-            if (GdipCreateSolidBrush(dimArgb, &brush) == Ok && brush) {
+            if (GdipCreateSolidFill(dimArgb, &brush) == Ok && brush) {
                 GdipFillRectangleI(g, brush, 0, 0, cw, ch);
                 GdipDeleteBrush(brush);
             }

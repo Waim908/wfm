@@ -10,6 +10,11 @@
   「零告警」就是空话。覆盖 x86_64 与 aarch64、带与不带 `USE_LIBCDIO`，四个组合都要过。
 - `res/resource.rc` 可以单独验，不必整包构建：
   `x86_64-w64-mingw32-windres -I include -i res/resource.rc -o <仓库外的路径>.o`，退出码 0 即语法通过。
+- **手写声明的系统函数（`.c` 里的 `WINGDIPAPI xxx(...)` 这类）必须回导入库核一遍符号名**，
+  语法自查抓不到这类错误，只有链接时才报 `undefined symbol`。GDI+ 的扁平 API 名字不直觉，
+  例如创建纯色刷子是 `GdipCreateSolidFill`（不是 `GdipCreateSolidBrush`）。核法：
+  `nm -g --defined-only <toolchain>/x86_64-w64-mingw32/lib/libgdiplus.a | grep -w 'T <符号>'`；
+  aarch64 的库宿主 `nm` 不认 ARM64 COFF，要用工具链自带的 `llvm-nm`。
 - 改完源码必须明确告诉用户：改了哪些文件、**要不要重编**、设备上怎么确认生效。单文件语法通过
   不等于已验证。
 
