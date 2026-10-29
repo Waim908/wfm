@@ -40,6 +40,10 @@ bool refreshFlashBegin(void);
 // 「条目数缓存」一节。普通导航（进/退目录）不调用它，缓存直接命中。
 void markFolderCountsStale(void);
 
+// 确保 GDI+ 已初始化。进程内只真正初始化一次，重复调用是空操作。
+// 必须在主线程第一次调用（GDI+ 的 token 是进程级的，别在两个线程同时首调）。
+void gdiplusInit(void);
+
 // 内容区背景图片。做法是把「解码 + 缩放 + 遮罩」全部在合成阶段做完，交给列表控件的永远
 // 是一张与客户区同尺寸的成品位图（LVM_SETBKIMAGE）。原因与 wine 侧的限制见
 // content_view.c 的「内容区背景图片」一节。

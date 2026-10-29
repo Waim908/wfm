@@ -316,6 +316,8 @@ struct LC_STR {
     wchar_t* background_image;
     wchar_t* clear_background;
     wchar_t* image_files;
+    // 内置图片查看器：解码失败时的提示
+    wchar_t* msg_open_image_failed;
 };
 
 extern struct LC_STR lc_str;

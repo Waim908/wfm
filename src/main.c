@@ -848,6 +848,12 @@ void openFileNode(struct FileNode* node) {
             openedByAssoc = ((INT_PTR)hInst > 32);
         }
         if (!openedByAssoc) {
+            // 图片优先交给内置查看器：Wine 里通常没有图片关联，交给 ShellExecute 只会
+            // 弹出「打开方式」，而这里已经能看了。用户显式配过关联的走上面那条分支。
+            if (isImageFileName(node->name)) {
+                openImageViewer(path);
+                return;
+            }
             // 和 Explorer 一样：先让 Wine 处理（Windows exe / Linux 程序都支持）
             HINSTANCE hInst = ShellExecute(hwndMain, L"open", path, NULL, parentPath, SW_SHOW);
             if ((INT_PTR)hInst <= 32) {

@@ -159,6 +159,7 @@ static inline void loadStrings_en() {
     lc_str.background_image = L"Background Image...";
     lc_str.clear_background = L"Clear Background";
     lc_str.image_files = L"Image files";
+    lc_str.msg_open_image_failed = L"Cannot open this image file";
 }
 
 #endif

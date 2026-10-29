@@ -25,7 +25,7 @@ static BYTE* scalePixelsOwned(BYTE* pixels, int srcSize, int dstSize);
 static HICON createIconFromPixels(const BYTE* pixels, int width, int height);
 static BYTE* getIconPixelsSquare(HICON hIcon, int* outSize);
 static bool stampShortcutOverlay(BYTE* dst, int outSize);
-static void initGdiplus(void);                  // 后台解码 PNG 帧要用；起线程前必须已在主线程调过
+void gdiplusInit(void);                         // 后台解码 PNG 帧要用；起线程前必须已在主线程调过（查看器也用它）
 static void iconQueueRender(int id, int size);  // 排一条来源给后台渲染（主线程）
 static void iconRenderPump(void);               // 接管后台渲好的图标（主线程）
 static void iconRenderInvalidate(void);         // 清缓存：作废在途任务与已完成结果
@@ -1112,7 +1112,7 @@ static void iconRenderStart(void) {
         InitializeCriticalSection(&iconRenderLock);
         iconRenderLockReady = true;
     }
-    initGdiplus();
+    gdiplusInit();
 
     if (!iconRenderWake) iconRenderWake = CreateEventW(NULL, FALSE, FALSE, NULL);
     if (!iconRenderWake) return;
@@ -4588,7 +4588,7 @@ GpStatus WINGDIPAPI GdipCreateHBITMAPFromBitmap(GpBitmap*, HBITMAP*, DWORD);
 
 static ULONG_PTR g_gdiplusToken = 0;
 
-static void initGdiplus(void) {
+void gdiplusInit(void) {
     if (g_gdiplusToken) return;
     GdiplusStartupInput input;
     memset(&input, 0, sizeof(input));
@@ -4608,7 +4608,7 @@ static HICON createIconFromPngData(const BYTE* data, DWORD dataSize) {
     static const BYTE pngSig[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
     if (memcmp(data, pngSig, 8) != 0) return NULL;
 
-    initGdiplus();
+    gdiplusInit();
 
     /* Create IStream from memory */
     IStream* pStream = SHCreateMemStream(data, dataSize);
@@ -4716,7 +4716,7 @@ void rebuildBackgroundBitmap(void) {
     int ch = rc.bottom - rc.top;
     if (cw <= 0 || ch <= 0 || cw > 8192 || ch > 8192) return;
 
-    initGdiplus();
+    gdiplusInit();
 
     GpBitmap* src = NULL;
     if (GdipCreateBitmapFromFile(backgroundPath, &src) != Ok || !src) return;   // 路径失效：静默退回纯色

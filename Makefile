@@ -92,7 +92,7 @@ ifeq ($(USE_LIBCDIO),1)
 endif
 
 SRC_NAMES = main content_view toolbar navbar treeview sizebar statusbar \
-            file_node file_actions input_dialog bookmarks open_with_dialog
+            file_node file_actions input_dialog bookmarks open_with_dialog image_viewer
 OBJS = $(SRC_NAMES:%=$(OBJDIR)/%.o) $(OBJDIR)/resource.o
 ifeq ($(USE_LIBCDIO),1)
     OBJS += $(OBJDIR)/libcdio_loader.o
