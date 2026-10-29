@@ -7423,7 +7423,11 @@ void refreshContentView() {
         pruneIconPools(pool);
     }
 
+    startupMark("  refresh: list attach");
     if (sortColumnIdx != -1) sortItems();
+    // 排序单独打一段：它算的是 O(n log n) 次比较 + **整块搬 400 字节结构体**的交换，
+    // 大目录里很可能是「进目录」耗时的主体之一，混在后面这几步里就看不见了。
+    startupMark("  refresh: sort");
     ListView_SetItemCountEx(hwndContentView, numItems, 0);
 
     // 大图标/小图标视图：强制重排所有项目，覆盖 SetWindowLongPtr 切换样式时

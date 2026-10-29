@@ -690,7 +690,12 @@ static void navigateRefreshNow() {
     // 都走这里，所以必须在最里面守一次，否则下面两处都会解引用空指针。
     if (!currPathFileNode) return;
 
+    startupMark("  nav: entry");
     buildChildNodes(currPathFileNode, false);
+    // 枚举单独打一段：这一趟是一次 FindFirstFile/FindNextFile 循环，每个条目在 Wine 下
+    // 都是「目录缓冲里取一条 + 属性/时间换算 + 两次 malloc」。它跟目录规模成正比，是
+    // 「进一个几千项的目录要等多久」的主要候选，混进 refreshContentView 里就分不出来了。
+    startupMark("  nav: enum");
     // 从这一刻起内容区才第一次有真东西。setViewStyle 用它判断「启动首次应用样式」
     // （那时 children 还是空的）与「运行期切视图」（必须刷新），见 content_view.c。
     hasNavigatedContent = true;
