@@ -224,13 +224,68 @@ A: 确保你的挂载盘取消挂载后，删除*wfm.exe*和*libcdio.dll*，执�
 ```HKEY_CURRENT_USER\Software\Winlator```
 
 
-# 在 Linux 上快速完成编译
+# 编译构建
 
-1. 安装mingw64
+## Linux 交叉编译（llvm-mingw clang，默认）
 
-2. ```make -j4``` 如果需要 libcdio 文件挂载功能支持，必须使用```make USE_LIBCDIO=1 -j4``` PS: 数字4 为编译线程数，根据CPU核心数自行设置。
+默认工具链是 llvm-mingw（clang + UCRT），工具链路径默认取
+`/home/waim/mingw-toolchain/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64`，
+装在别处时用 `make LLVM_MINGW=/你的/路径` 指定。
 
-3. 编译完成，执行exe文件
+```sh
+# x86_64 版（带 libcdio 挂载功能）
+make USE_LIBCDIO=1 -j$(nproc)
+
+# aarch64 版（带 libcdio 挂载功能）
+make ARCH=aarch64 USE_LIBCDIO=1 -j$(nproc)
+
+# 不带挂载功能：USE_LIBCDIO=0
+make USE_LIBCDIO=0 -j$(nproc)
+```
+
+不带 libcdio 功能时直接 `make` 就行，不需要任何额外依赖。
+
+## Linux 交叉编译（mingw-w64 gcc，旧行为）
+
+```sh
+make TOOLCHAIN=gcc USE_LIBCDIO=1 -j$(nproc)
+```
+
+gcc 只支持 x86_64，且带挂载功能时必须链接仓库根目录下的
+`libcdio.a` / `libiso9660.a`（gcc 旧库）。
+
+**clang 和 gcc 的静态库不可混用**：clang(llvm-mingw/UCRT) 构建的库依赖
+UCRT 符号，gcc(msvcrt) 工具链里没有；反过来也不行。Makefile 已按
+工具链自动选库，不需要手动指定。
+
+## Windows 原生编译
+
+运行 `build.bat`（使用 w64devkit 的 gcc，x86_64）。
+
+## 一键打包
+
+```sh
+./package.sh all          # x86_64 与 aarch64 各打 nolibcdio / libcdio 两个包，共四个 zip
+./package.sh              # 仅 x86_64 libcdio 包
+./package.sh nolibcdio    # 仅 x86_64 nolibcdio 包
+./package.sh aarch64      # 仅 aarch64 libcdio 包
+```
+
+包名带 `-aarch64` 后缀的是 ARM64 版本，Winlator 原生环境（Android arm64
+设备）直接用这个版本，不再需要 box64 转译。
+
+## 重新构建 libcdio 静态库
+
+`libcdio-static/{x86_64,aarch64}/` 下的静态库由脚本从 libcdio 源码构建：
+
+```sh
+bash ../agent_workspace/libcdio-static-build/build-libcdio-static.sh x86_64
+bash ../agent_workspace/libcdio-static-build/build-libcdio-static.sh aarch64
+```
+
+脚本会用 llvm-mingw 交叉编译 libcdio / libiso9660 / libudf，并把同版本的
+头文件与 config.h 同步回 `include/libcdio/`。头文件、config.h 和静态库
+必须来自同一次构建，手动只换其中一样会造成结构体布局不一致。
 
 # 感谢以下项目
 

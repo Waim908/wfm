@@ -1,6 +1,6 @@
 /*
     Copyright (C) 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2012
-                  2016, 2019 Rocky Bernstein <rocky@gnu.org>
+                  2016, 2019, 2025, 2026 Rocky Bernstein <rocky@gnu.org>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -17,20 +17,21 @@
 */
 
 /**
-   \file mmc.h
+   @file mmc.h
 
-   \brief Common definitions for MMC (Multimedia Commands). Applications
+   @brief Common definitions for MMC (Multimedia Commands). Applications
    include this for direct MMC access.
 
    The documents we make use of are described in several
    specifications made by the SCSI committee T10
    http://www.t10.org. In particular, SCSI Primary Commands (SPC),
-   SCSI Block Commands (SBC), and Multi-Media Commands (MMC). These
-   documents generally have a numeric level number appended. For
-   example SPC-3 refers to ``SCSI Primary Commands - 3'.
+   SCSI Block Commands (SBC), and Multi-Media Commands (MMC).
 
-   In year 2010 the current versions were SPC-3, SBC-2, MMC-5.
+   We will use the MMC-6 draft 2g circa 2009 described in
+   https://www.13thmonkey.org/documentation/SCSI/mmc6r02g.pdf
 
+   For SPC-3, we use the draft found at:
+   https://www.13thmonkey.org/documentation/SCSI/spc3r23.pdf
 */
 
 #ifndef CDIO_MMC_H_
@@ -62,9 +63,9 @@ extern "C" {
    /**
       Structure of a SCSI/MMC sense reply.
 
-      This has been adapted from GNU/Linux request_sense of <linux/cdrom.h>
-      include this for direct MMC access.
-      See SCSI Primary Commands-2 (SPC-3) table 26 page 38.
+      This has been adapted from GNU/Linux request_sense of <linux/cdrom.h>.
+      Include this for direct MMC access.
+      See SCSI Primary Commands-2 (SPC-3) table 26, page 38.
     */
     typedef struct cdio_mmc_request_sense {
 #if defined(__MMC_BIG_ENDIAN_BITFIELD)
@@ -76,9 +77,9 @@ extern "C" {
 #endif
         uint8_t segment_number;
 #if defined(__MMC_BIG_ENDIAN_BITFIELD)
-        uint8_t filemark        : 1; /**< manditory in sequential
+        uint8_t filemark        : 1; /**< mandatory in sequential
                                       * access devices */
-        uint8_t eom             : 1; /**< end of medium. manditory in
+        uint8_t eom             : 1; /**< end of medium. mandatory in
                                       * sequential access and
                                       * printer devices */
         uint8_t ili             : 1; /**< incorrect length indicator */
@@ -88,10 +89,10 @@ extern "C" {
         uint8_t sense_key       : 4;
         uint8_t reserved1       : 1;
         uint8_t ili             : 1; /**< incorrect length indicator */
-        uint8_t eom             : 1; /**< end of medium. manditory in
+        uint8_t eom             : 1; /**< end of medium. mandatory in
                                       * sequential access and
                                       * printer devices */
-        uint8_t filemark        : 1; /**< manditory in sequential
+        uint8_t filemark        : 1; /**< mandatory in sequential
                                       * access devices */
 #endif
         uint8_t information[4];
@@ -125,11 +126,11 @@ extern "C" {
     } cdio_mmc_sense_key_t;
 
     /**
-       \brief The opcode-portion (generic packet commands) of an MMC command.
+       @brief The opcode-portion (generic packet commands) of an MMC command.
 
        In general, those opcodes that end in 6 take a 6-byte command
        descriptor, those that end in 10 take a 10-byte
-       descriptor and those that in in 12 take a 12-byte descriptor.
+       descriptor, and those that end in 12 take a 12-byte descriptor.
 
        (Not that you need to know that, but it seems to be a
        big deal in the MMC specification.)
@@ -145,7 +146,7 @@ extern "C" {
                                                    (6 bytes). */
   CDIO_MMC_GPCMD_MODE_SENSE_6           = 0x1a, /**< Get medium or device
                                                  information. Should be issued
-                                                 before MODE SELECT to get
+                                                 before `MODE SELECT` to get
                                                  mode support or save current
                                                  settings. (6 bytes). */
   CDIO_MMC_GPCMD_START_STOP_UNIT        = 0x1b, /**< Enable/disable Disc
@@ -155,15 +156,15 @@ extern "C" {
                                                    removal. (6 bytes). */
 
   /**
-      Group 2 Commands (CDB's here are 10-bytes)
+      Group 2 Commands (CDB's here it is 10 bytes)
   */
-  CDIO_MMC_GPCMD_READ_FORMAT_CAPACITIES = 0x23, /**< MMC-5 Section 6.24 */
-  CDIO_MMC_GPCMD_READ_CAPACITIY         = 0x25, /**< MMC-5 Section 6.19 */
+  CDIO_MMC_GPCMD_READ_FORMAT_CAPACITIES = 0x23, /**< MMC-6 Section 6.23 `READ FORMAT CAPABILITIES` Command */
+  CDIO_MMC_GPCMD_READ_CAPACITIY         = 0x25, /**< MMC-6 2g Section 6.18 `READ CAPACITY` Command */
   CDIO_MMC_GPCMD_READ_10                = 0x28, /**< Read data from drive
                                                    (10 bytes). */
   CDIO_MMC_GPCMD_WRITE_10               = 0x2a,
   CDIO_MMC_GPCMD_SEEK_10                = 0x2b,
-  CDIO_MMC_GPCMD_ERASE_10               = 0x2c, /**< MMC5 Section 6.4 */
+  CDIO_MMC_GPCMD_ERASE_10               = 0x2c, /**< MMC5 Section 6.4; Removed from MMC6 */
   CDIO_MMC_GPCMD_WRITE_AND_VERIFY_10    = 0x2e,
   CDIO_MMC_GPCMD_VERIFY_10              = 0x2f,
   CDIO_MMC_GPCMD_SYNCHRONIZE_CACHE      = 0x35,
@@ -237,7 +238,7 @@ extern "C" {
                                                    handled by Plextor drives.
                                                 */
   CDIO_MMC_GPCMD_WRITE_12               = 0xaa,
-  CDIO_MMC_GPCMD_READ_MEDIA_SERIAL_12   = 0xab, /**< MMC-5 Section 6.25 */
+  CDIO_MMC_GPCMD_READ_MEDIA_SERIAL_12   = 0xab, /**< MMC-6 2g Section 6.24 READ MEDIA SERIAL NUMBER Command */
   CDIO_MMC_GPCMD_GET_PERFORMANCE        = 0xac,
   CDIO_MMC_GPCMD_READ_DVD_STRUCTURE     = 0xad, /**< Get DVD structure info
                                                    from media (12 bytes). */
@@ -245,7 +246,7 @@ extern "C" {
   CDIO_MMC_GPCMD_SET_STREAMING          = 0xb6,
   CDIO_MMC_GPCMD_READ_MSF               = 0xb9, /**< Read almost any field
                                                    of a CD sector at specified
-                                                   MSF. (12 bytes). */
+                                                   MSF (12 bytes). */
   CDIO_MMC_GPCMD_SET_SPEED              = 0xbb, /**< Set drive speed
                                                    (12 bytes). This is listed
                                                    as optional in ATAPI 2.6,
@@ -361,7 +362,7 @@ PRAGMA_END_PACKED
 
 
 /**
-    Return type codes for GET_CONFIGURATION.
+    Return type codes for MMC `GET_CONFIGURATION`.
 */
 typedef enum {
   CDIO_MMC_GET_CONF_ALL_FEATURES     = 0,  /**< all features without regard
@@ -370,7 +371,7 @@ typedef enum {
                                               in effect (e.g. based on
                                               medium inserted). */
   CDIO_MMC_GET_CONF_NAMED_FEATURE    = 2   /**< just the feature named in
-                                              the GET_CONFIGURATION cdb. */
+                                              the `GET_CONFIGURATION` cdb. */
 } cdio_mmc_get_conf_t;
 
 
@@ -453,7 +454,7 @@ typedef enum {
 #define MAX_CDB_LEN 12
 
 /**
-    \brief A Command Descriptor Block (CDB) used in sending MMC
+    @brief A Command Descriptor Block (CDB) used in sending MMC
     commands.
  */
 typedef struct mmc_cdb_s {
@@ -461,8 +462,8 @@ typedef struct mmc_cdb_s {
 } mmc_cdb_t;
 
   /**
-      \brief Format of header block in data returned from an MMC
-    GET_CONFIGURATION command.
+     @brief Format of header block in data returned from an MMC
+    `GET_CONFIGURATION` command.
   */
   typedef struct mmc_feature_list_header_s {
     unsigned char length_msb;
@@ -477,7 +478,7 @@ typedef struct mmc_cdb_s {
 
   /**
       An enumeration indicating whether an MMC command is sending
-      data, or getting data, or does none of both.
+      data, or getting data, both, or neither.
   */
   typedef enum mmc_direction_s {
     SCSI_MMC_DATA_READ,
@@ -485,11 +486,11 @@ typedef struct mmc_cdb_s {
     SCSI_MMC_DATA_NONE
   } cdio_mmc_direction_t;
   /**
-     Indicate to applications that \p SCSI_MMC_DATA_NONE is available.
+     Indicate to applications that #SCSI_MMC_DATA_NONE is available.
      It has been added after version 0.82 and should be used with
      commands that neither read nor write payload bytes. (On
-     Linux, at least, these work with \p SCSI_MMC_DATA_READ and \p
-     SCSI_MMC_DATA_WRITE, too.)
+     Linux, at least, these work with #SCSI_MMC_DATA_READ and
+     #SCSI_MMC_DATA_WRITE, too.)
   */
 #define SCSI_MMC_HAS_DIR_NONE 1
 
@@ -540,9 +541,11 @@ typedef struct mmc_cdb_s {
   cdb[7] = (len >>  8) & 0xff; \
   cdb[8] = (len      ) & 0xff
 
+/* @deprecated Use CDIO_MMC_SET_LEN16 instead */
 #define CDIO_MMC_SET_READ_LENGTH16(cdb, len) \
   CDIO_MMC_SET_LEN16(cdb, 7, len)
 
+/* @deprecated */
 #define CDIO_MMC_SET_READ_LENGTH8(cdb, len) \
   cdb[8] = (len      ) & 0xff
 
@@ -553,11 +556,11 @@ typedef struct mmc_cdb_s {
 
 /**
    Get the output port volumes and port selections used on AUDIO PLAY
-   commands via a MMC \p MODE \p SENSE command using the CD Audio Control
+   commands via an MMC `MODE SENSE` command using the CD Audio Control
    Page.
    @param p_cdio the CD object to be acted upon.
    @param p_volume volume parameters retrieved
-   @return \p DRIVER_OP_SUCCESS if we ran the command ok.
+   @return #DRIVER_OP_SUCCESS if we ran the command ok.
 */
 driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
                                            mmc_audio_volume_t *p_volume);
@@ -597,12 +600,12 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
     Get the lsn of the end of the CD
 
     @param p_cdio the CD object to be acted upon.
-    @return the lsn. On error return CDIO_INVALID_LSN.
+    @return the lsn. On error, return CDIO_INVALID_LSN.
   */
   lsn_t mmc_get_disc_last_lsn( const CdIo_t *p_cdio );
 
   /**
-    Return the discmode as reported by the MMC Read (FULL) \p TOC
+    Return the discmode as reported by the MMC Read (FULL) `TOC`
     command.
 
     Information was obtained from Section 5.1.13 (Read TOC/PMA/ATIP)
@@ -634,21 +637,21 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
 
     @param p_cdio the CD object to be acted upon.
     @param s location to store DVD information.
-    @return the DVD discmode.
+    @return the DVD disc mode.
   */
   discmode_t mmc_get_dvd_struct_physical ( const CdIo_t *p_cdio,
                                            cdio_dvd_struct_t *s);
 
   /**
-    Find out if media tray is open or closed.
+    Find out if the media tray is open or closed.
     @param p_cdio the CD object to be acted upon.
     @return 1 if media is open, 0 if closed. Error
-    return codes are the same as \p driver_return_code_t.
+    return codes are the same as #driver_return_code_t.
   */
   int mmc_get_tray_status ( const CdIo_t *p_cdio );
 
   /**
-    Get the CD-ROM hardware info via an MMC \p INQUIRY command.
+    Get the CD-ROM hardware info via an MMC `INQUIRY` command.
 
     @param p_cdio the CD object to be acted upon.
     @param p_hw_info place to store hardware information retrieved
@@ -663,16 +666,16 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
     Find out if media has changed since the last call.
     @param p_cdio the CD object to be acted upon.
     @return 1 if media has changed since last call, 0 if not. Error
-    return codes are the same as \p driver_return_code_t.
+    return codes are the same as #driver_return_code_t.
   */
   int mmc_get_media_changed(const CdIo_t *p_cdio);
 
   /**
-    Get the media catalog number (\p MCN) from the CD via MMC.
+    Get the media catalog number (`MCN`) from the CD via MMC.
 
     @param p_cdio the CD object to be acted upon.
-    @return the media catalog number r NULL if there is none or we
-    don't have the ability to get it.
+    @return the media catalog number or `NULL` if there is none, or we
+    can't get it.
 
     Note: The caller must free the returned string with cdio_free()
     when done with it.
@@ -681,12 +684,12 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
   char * mmc_get_mcn(const CdIo_t *p_cdio);
 
   /**
-    Get the international standard recording code (\p ISRC) of the track via MMC.
+    Get the international standard recording code (`ISRC`) of the track via MMC.
 
     @param p_cdio the CD object to be acted upon.
     @param i_track the track to get the ISRC info for
-    @return international standard recording code or NULL if there is
-    none or we don't have the ability to get it.
+    @return international standard recording code or `NULL` if there is
+    none or we can't get it.
 
     Note: The caller must free the returned string with cdio_free()
     when done with it.
@@ -700,13 +703,13 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
     This is the raw SCSI/MMC reply as retrieved by mmc_read_toc_cdtext().
     It consists of 4 header bytes and a variable number of text packs.
 
-    The first two bytes of the header, a Big-Endian number, specifies
+    The first two bytes of the header, a Big-Endian number, specify
     the number of following bytes. The count also includes the next two
-    header bytes which should be 0.
+    header bytes, which should be 0.
 
     See also information in mmc_read_toc_cdtext().
 
-    Here is some code to parse the text packs into a \p cdtext_t object:
+    Here is some code to parse the text packs into a #cdtext_t object:
 
     @code
       #include <cdio/mmc.h>
@@ -719,7 +722,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
     @endcode
 
     @param p_cdio the CD object to be acted upon.
-    @return pointer to data on success, \p NULL on error or if CD-Text
+    @return pointer to data on success, `NULL` on error or if CD-Text
             information does not exist.
 
     Note: the caller must free the returned memory.
@@ -729,8 +732,8 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
 
   /**
     Report if CD-ROM has a particular kind of interface (ATAPI, SCSCI, ...)
-    Is it possible for an interface to have several? If not this
-    routine could probably return the single \p mmc_feature_interface_t.
+    Is it possible for an interface to have several? If not, this
+    routine could probably return the single #mmc_feature_interface_t.
     @param p_cdio the CD object to be acted upon.
     @param e_interface
     @return true if we have the interface and false if not.
@@ -746,11 +749,11 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
       @param p_cdio object to read from
 
       @param p_buf place to read data into.  The caller should make
-             sure this location can store at least \p CDIO_CD_FRAMESIZE,
-             \p M2RAW_SECTOR_SIZE, or \p M2F2_SECTOR_SIZE depending on the
-             kind of sector getting read. If you don't know whether
+             sure this location can store at least #CDIO_CD_FRAMESIZE,
+             #M2RAW_SECTOR_SIZE, or #M2F2_SECTOR_SIZE depending on the
+             kind of sector being read. If you don't know whether
              you have a Mode 1/2, Form 1/ Form 2/Formless sector best
-             to reserve space for the maximum, \p M2RAW_SECTOR_SIZE.
+             to reserve space for the maximum, #M2RAW_SECTOR_SIZE.
 
       @param i_lsn sector to read
       @param i_blocksize size of each block
@@ -783,7 +786,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
     @param i_buf         Size of buffer
     @param p_buf         Buffer for data, both sending and receiving.
 
-    @return 0 if command completed successfully.
+    @return 0 if the command completed successfully.
   */
   driver_return_code_t
   mmc_run_cmd( const CdIo_t *p_cdio, unsigned int i_timeout_ms,
@@ -793,7 +796,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
 
   /**
     Run a Multimedia command (MMC) specifying the CDB length.
-    The motivation here is for example ot use in is an undocumented
+    The motivation here, for example, is its use in an undocumented
     debug command for LG drives (namely E7), whose length is being
     miscalculated by mmc_get_cmd_len(); it doesn't follow the usual
     code number to length conventions. Patch supplied by SukkoPera.
@@ -818,17 +821,17 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
 
   /**
       Obtain the SCSI sense reply of the most-recently-performed MMC command.
-      These bytes give an indication of possible problems which occured in
+      These bytes indicate possible problems which occurred in
       the drive while the command was performed. With some commands they tell
-      about the current state of the drive (e.g. 00h \p TEST \p UNIT \p READY).
+      about the current state of the drive (e.g. 00h `TEST UNIT READY`).
       @param p_cdio CD structure set by cdio_open().
 
       @param pp_sense returns the sense bytes received from the drive.
-      This is allocated memory or NULL if no sense bytes are
-      available. Dispose non-NULL pointers by cdio_free() when no longer
+      This is allocated memory or `NULL` if no sense bytes are
+      available. Dispose of non-NULL pointers by cdio_free() when no longer
       needed.  See SPC-3 4.5.3 Fixed format sense data.  SCSI error
-      codes as of SPC-3 Annex D, MMC-5 Annex F: sense[2]&15 = Key ,
-      sense[12] = \p ASC , sense[13] = \p ASCQ
+      codes as of SPC-3 Annex D, MMC-5 Annex F: `sense[2]&15 = Key`,
+      `sense[12] = ASC` , `sense[13] = ASCQ`
 
       @return number of valid bytes in sense, 0 when no sense
               bytes are available, and less than 0 when there is an internal error.
@@ -837,7 +840,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
                            cdio_mmc_request_sense_t **pp_sense);
 
   /**
-    Set the block size for subsequest read requests, via MMC.
+    Set the block size for subsequent read requests via MMC.
   */
   driver_return_code_t mmc_set_blocksize ( const CdIo_t *p_cdio,
                                            uint16_t i_blocksize);
@@ -845,7 +848,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
   /**
     Get string name for MMC command
 
-    @param command cdio_mmc_gpcmd_t command value
+    @param command #cdio_mmc_gpcmd_t command value
     @return string name of command
 
   */
@@ -858,7 +861,7 @@ driver_return_code_t mmc_audio_get_volume (CdIo_t *p_cdio,  /*out*/
 #endif /* __cplusplus */
 
 /**
-    The below variables are trickery to force the above enum symbol
+    The following variables are trickery to force the above enum symbol
     values to be recorded in debug symbol tables. They are used to
     allow one to refer to the enumeration value names in the typedefs
     above in a debugger and debugger expressions
@@ -880,7 +883,7 @@ extern cdio_mmc_mode_page_t         debug_cdio_mmc_mode_page;
 #endif /*DO_NOT_WANT_PARANOIA_COMPATIBILITY*/
 
 #endif /* CDIO_MMC_H_ */
-
+
 /*
  * Local variables:
  *  c-file-style: "ruby"

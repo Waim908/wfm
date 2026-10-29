@@ -133,6 +133,11 @@ void freeUIcons();
 void startupMark(const char* label);
 void startupMarkN(const char* label, long value);
 
+// 失败分支专用（实现见 main.c）：不看 WFM_STARTUP_TRACE 开没开，一律往 stderr
+// 写一行 "label failed, GetLastError=..."。用于那些失败就 return 0、进程静默
+// 退出、日志上一行都不留的地方。
+void startupFail(const char* label, DWORD err);
+
 // COM 初始化改到「第一次真正要用时」再做（实现见 main.c）。全项目只有处理
 // .lnk 快捷方式的三处需要它 —— 调 CoCreateInstance 之前先调一次这个。
 void ensureComInitialized(void);

@@ -1,17 +1,47 @@
 EXE_NAME=wfm.exe
 
-# 检测操作系统并选择工具链
+# 检测操作系统并选择工具链（必须放在上面的默认值判定之前）
 UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 
+# ------------------------------------------------------ 架构与工具链选择
+# ARCH:      x86_64 / aarch64（Linux 下默认 clang + x86_64）
+# TOOLCHAIN: clang（llvm-mingw，Linux 默认）/ gcc（mingw-w64，Windows 原生默认）
+# 两者各自配套自己的 libcdio 静态库，不可混用：clang(llvm-mingw) 构建的库
+# 依赖 UCRT 符号（__acrt_iob_func 等），gcc(msvcrt) 工具链里根本没有；
+# gcc 构建的库则用根目录下的 libcdio.a / libiso9660.a（仅 x86_64）。
+# 例子：
+#   make ARCH=aarch64 USE_LIBCDIO=1        # clang 交叉编译 aarch64 版
+#   make ARCH=x86_64 USE_LIBCDIO=0         # clang 编译 x86_64 版
+#   make TOOLCHAIN=gcc                     # gcc 编译 x86_64 版（旧行为）
 ifeq ($(UNAME_S),Linux)
-    # Linux cross-compilation with mingw-w64
-    CC = x86_64-w64-mingw32-gcc
-    RC = x86_64-w64-mingw32-windres
+    TOOLCHAIN ?= clang
+    ARCH ?= x86_64
+else
+    TOOLCHAIN ?= gcc
+    ARCH ?= x86_64
+endif
+
+ifeq ($(TOOLCHAIN)$(ARCH),gccaarch64)
+    $(error gcc 工具链不支持 aarch64，请用 TOOLCHAIN=clang 或改用 llvm-mingw)
+endif
+
+# llvm-mingw 工具链位置，可用 make LLVM_MINGW=... 覆盖
+LLVM_MINGW ?= /home/waim/mingw-toolchain/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64
+
+ifeq ($(UNAME_S),Linux)
+    # Linux 交叉编译到 Windows
+    ifeq ($(TOOLCHAIN),clang)
+        CC = $(LLVM_MINGW)/bin/$(ARCH)-w64-mingw32-clang
+        RC = $(LLVM_MINGW)/bin/$(ARCH)-w64-mingw32-windres
+    else
+        CC = $(ARCH)-w64-mingw32-gcc
+        RC = $(ARCH)-w64-mingw32-windres
+    endif
     RM = rm -f
     MKDIR = mkdir -p
     RM_RF = rm -rf
 else
-    # Windows native compilation
+    # Windows 原生编译
     CC = gcc
     RC = windres
     RM = del
@@ -25,12 +55,14 @@ endif
 # 构建 USE_LIBCDIO=0 与 =1，一旦那次删除没有真正生效（权限、被安全策略
 # 拦截、或 Windows 下 rm 根本不存在），打出的第二个包就是上一个变体的
 # 目标文件与当前变体混合链接的产物。分目录后，切换变体不需要删除任何东西。
+# 目录名同时包含工具链与架构：不同工具链（gcc/clang）、不同架构
+# （x86_64/aarch64）的 .o 互不兼容，绝不能混用。
 ifeq ($(USE_LIBCDIO),1)
     CFG = libcdio
 else
     CFG = base
 endif
-OBJDIR = obj/$(CFG)
+OBJDIR = obj/$(TOOLCHAIN)-$(ARCH)-$(CFG)
 
 INCLUDE_DIR = -I./include
 
@@ -39,13 +71,23 @@ INCLUDE_DIR = -I./include
 # 一起 —— 开 LTO 时报 -Wlto-type-mismatch，不开 LTO 时就是静默的内存错乱。
 # -flto / -ffunction-sections / -fdata-sections + -Wl,--gc-sections：把未被
 # 引用的函数与数据从最终 exe 中剔除（wfm.exe 368KB → 278KB）。
-# -Wextra 用于及早暴露函数签名问题。
-CFLAGS = -O3 -s -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall -Wextra -MMD -MP -flto -ffunction-sections -fdata-sections
+# -Wextra 用于及早暴露函数签名问题。gcc 与 clang 下这些开关行为一致。
+# -s 只放在 LDFLAGS：clang 编译阶段会报「-s unused」警告，gcc 则静默忽略。
+CFLAGS = -O3 -std=c99 -DUNICODE -D_UNICODE -DCOBJMACROS -DWINVER=0x0603 -D_WIN32_WINNT=0x0603 -Wall -Wextra -MMD -MP -flto -ffunction-sections -fdata-sections
 LDFLAGS = -s -flto -Wl,--gc-sections -lcomctl32 -lgdi32 -lole32 -luuid -lcomdlg32 -lgdiplus -lshlwapi -Wl,--subsystem,windows
 
+# libcdio 静态库按工具链/架构配套：
+# clang 用 libcdio-static/<arch>/（llvm-mingw 构建，x86_64 与 aarch64 各一份，
+# 由 agent_workspace/libcdio-static-build/build-libcdio-static.sh 维护）；
+# gcc 用根目录的 libcdio.a / libiso9660.a（mingw-w64 gcc 构建，仅 x86_64）。
+# 链接顺序：iso9660 依赖 cdio，被依赖者放后面。
 ifeq ($(USE_LIBCDIO),1)
     INCLUDE_DIR += -I./include/libcdio
-    LDFLAGS += ./libiso9660.a ./libcdio.a -lwinmm
+    ifeq ($(TOOLCHAIN),gcc)
+        LDFLAGS += ./libiso9660.a ./libcdio.a -lwinmm
+    else
+        LDFLAGS += ./libcdio-static/$(ARCH)/libiso9660.a ./libcdio-static/$(ARCH)/libcdio.a -lwinmm
+    endif
     CFLAGS := -DUSE_LIBCDIO -DUSE_LIBCDIO_STATIC $(CFLAGS)
 endif
 
@@ -58,7 +100,7 @@ endif
 
 # ------------------------------ 同一变体内 CFLAGS 变化时才清该变体的目录
 CURFLAGS := $(CFLAGS) $(INCLUDE_DIR)
-STAMP = .cflags.$(CFG)
+STAMP = .cflags.$(TOOLCHAIN)-$(ARCH)-$(CFG)
 SAVEDFLAGS := $(shell cat $(STAMP) 2>/dev/null)
 
 ifneq ($(CURFLAGS),$(SAVEDFLAGS))
@@ -68,16 +110,18 @@ ifneq ($(CURFLAGS),$(SAVEDFLAGS))
 endif
 
 # --------------------------- 变体切换时强制重新链接
-# wfm.exe 是两种变体共用的输出名，它的时间戳无法表达「我是哪个变体」：
+# wfm.exe 是多种变体共用的输出名，它的时间戳无法表达「我是哪个变体」：
 # 先建 libcdio 再建默认时，wfm.exe 比 obj/base/*.o 都新，make 会认为无需
 # 重链，于是留下一个 libcdio 版的 wfm.exe 而 obj/ 里却是默认版目标文件。
 # 用一个记录「上次产出 wfm.exe 的变体」的小文件做前置条件来消除这种歧义：
 # 它只在变体真正变化时被重写，因此同变体连续构建不会触发多余重链。
+# 工具链与架构切换同样会触发重链。
 VARIANT_STAMP = .variant
 SAVED_VARIANT := $(shell cat $(VARIANT_STAMP) 2>/dev/null)
+CUR_VARIANT = $(TOOLCHAIN)-$(ARCH)-$(CFG)
 
-ifneq ($(CFG),$(SAVED_VARIANT))
-    $(shell echo '$(CFG)' > $(VARIANT_STAMP))
+ifneq ($(CUR_VARIANT),$(SAVED_VARIANT))
+    $(shell echo '$(CUR_VARIANT)' > $(VARIANT_STAMP))
 endif
 
 all: ${EXE_NAME}
@@ -88,7 +132,7 @@ ${EXE_NAME}: ${OBJS} ${VARIANT_STAMP}
 # 兜底规则：万一 ${VARIANT_STAMP} 不存在（首次构建且上面的写入失败），
 # make 也能按需生成它，而不是直接报「无规则可生成目标」。
 ${VARIANT_STAMP}:
-	@echo '$(CFG)' > $@
+	@echo '$(CUR_VARIANT)' > $@
 
 clean:
 	${RM_RF} obj

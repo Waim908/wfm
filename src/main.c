@@ -75,6 +75,27 @@ void updateGuiFont() {
 static DWORD startupTraceT0 = 0;
 static DWORD startupTracePrev = 0;
 static bool  startupTraceOn = false;
+static HANDLE startupOut = INVALID_HANDLE_VALUE;   // 设置了 WFM_STARTUP_LOG 时的输出去向
+static bool  startupOutTried = false;
+
+// 打点的输出去向。默认 stderr，但**经由 explorer / shell 启动时拿不到父进程的 stderr**：
+// wine 对无 console 的 GUI 子进程另发一个 pipe，那些字节根本不会落进启动器的日志文件。
+// 所以再给一个 WFM_STARTUP_LOG=<路径>，非空就用它自己开文件写，和父进程无关。
+static HANDLE startupOutHandle(void) {
+    if (!startupOutTried) {
+        char path[MAX_PATH];
+        DWORD n = 0;
+
+        startupOutTried = true;
+        // 环境变量比 MAX_PATH 长算失败，不猜路径
+        if ((n = GetEnvironmentVariableA("WFM_STARTUP_LOG", path, MAX_PATH)) > 0 && n < MAX_PATH) {
+            startupOut = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        }
+    }
+    if (startupOut != INVALID_HANDLE_VALUE) return startupOut;
+    return GetStdHandle(STD_ERROR_HANDLE);
+}
 
 void startupMark(const char* label) {
     startupMarkN(label, -1);
@@ -83,7 +104,7 @@ void startupMark(const char* label) {
 void startupMarkN(const char* label, long value) {
     if (!startupTraceOn || !label) return;
 
-    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    HANDLE hErr = startupOutHandle();
     if (hErr == NULL || hErr == INVALID_HANDLE_VALUE) return;
 
     DWORD now = GetTickCount();
@@ -105,6 +126,20 @@ void startupMarkN(const char* label, long value) {
     }
     startupTracePrev = now;
 
+    DWORD written = 0;
+    WriteFile(hErr, buf, (DWORD)strlen(buf), &written, NULL);
+}
+
+// 失败分支专用。WinMain 里有几处失败是裸 return 0，进程悄无声息就没了，
+// 日志上连一行都留不下，只能靠打点反推卡在哪个调用。这里不看
+// WFM_STARTUP_TRACE 开没开，一律往 stderr 写一行错误码——失败本来就不该静默。
+void startupFail(const char* label, DWORD err) {
+    HANDLE hErr = startupOutHandle();
+    if (hErr == NULL || hErr == INVALID_HANDLE_VALUE) return;
+
+    char buf[160];
+    sprintf(buf, "[WFM-STARTUP] %s failed, GetLastError=%lu (0x%lx)\n",
+            label, (unsigned long)err, (unsigned long)err);
     DWORD written = 0;
     WriteFile(hErr, buf, (DWORD)strlen(buf), &written, NULL);
 }
@@ -869,7 +904,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     (void)nCmdShow;
     // 启动计时：环境变量非空才启用（见 startupMark）。放在最前面，这样
     // SetProcessDPIAware 自己的耗时也能被量到。
-    startupTraceOn = (GetEnvironmentVariableA("WFM_STARTUP_TRACE", NULL, 0) != 0);
+    // 指定了 WFM_STARTUP_LOG 也算启用——不然只写日志路径却看不到任何打点，太容易踩。
+    startupTraceOn = (GetEnvironmentVariableA("WFM_STARTUP_TRACE", NULL, 0) != 0)
+                  || (GetEnvironmentVariableA("WFM_STARTUP_LOG",   NULL, 0) != 0);
     startupTraceT0 = startupTracePrev = GetTickCount();
     startupMark("WinMain entry");
     SetProcessDPIAware();
@@ -924,8 +961,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     wcx.lpszClassName = mainWndClass;
     wcx.hIconSm = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_MAIN));
 
-    if (!RegisterClassEx(&wcx)) return 0;
-    
+    if (!RegisterClassEx(&wcx)) {
+        startupFail("RegisterClassEx", GetLastError());
+        return 0;
+    }
+
     initFileNodes();
     startupMark("initFileNodes");
 
@@ -934,10 +974,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     GetWindowRect(hwndDesktop, &desktopRect);
     int hwndWidth = (desktopRect.right - desktopRect.left) * 0.8f;
     int hwndHeight = (desktopRect.bottom - desktopRect.top) * 0.8f;
-    
+    // 桌面尺寸是窗口尺寸的唯一来源。这里给 0 的话后面 CreateWindowEx 会拿到
+    // 0x0，窗口在合成器那边等不到 configure，就停在创建调用里不返回了。
+    startupMarkN("  desktop size", hwndWidth);
+
     hwndMain = CreateWindowEx(0, mainWndClass, L"", WS_CLIPCHILDREN | WS_OVERLAPPEDWINDOW, 
                               0, 0, hwndWidth, hwndHeight, NULL, NULL, hInstance, NULL);
-    if (!hwndMain) return 0;
+    if (!hwndMain) {
+        startupFail("CreateWindowEx(main)", GetLastError());
+        return 0;
+    }
     startupMark("CreateWindowEx(main)");
     
     createMainMenu();

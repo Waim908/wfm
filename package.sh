@@ -32,32 +32,49 @@ EOF
 }
 
 
+# 构建一个变体并打包。参数: 架构(x86_64/aarch64) 是否带libcdio(0/1) zip文件名
+# 每次构建后立即打包，wfm.exe 属于当前变体；Makefile 会自动处理变体/架构
+# 切换时的隔离（目标文件按 工具链-架构-变体 分目录存放）。
+build_zip () {
+    local arch="$1" use_libcdio="$2" zipname="$3"
+
+    make USE_LIBCDIO=$use_libcdio ARCH=$arch -j$(nproc)
+    if [ ! -f wfm.exe ]; then
+        echo "build failed: $zipname" >&2
+        exit 1
+    fi
+    if [ "$use_libcdio" = 1 ]; then
+        libcdioSupport="Yes"
+    else
+        libcdioSupport="No"
+    fi
+    vanilla_reademe_txt
+    7z a -tzip "$zipname" "${targetFiles[@]}"
+}
+
+
 echo "Building version ${getVersion}..."
 
 make clean
 
 case $1 in
 	nolibcdio)
-		make USE_LIBCDIO=0 -j$(nproc)
-		libcdioSupport="No"
-		vanilla_reademe_txt
-		7z a -tzip wfm-${getVersion}-nolibcdio.zip "${targetFiles[@]}"
+		build_zip x86_64 0 wfm-${getVersion}-nolibcdio.zip
+	;;
+	aarch64)
+		build_zip aarch64 1 wfm-${getVersion}-aarch64.zip
+	;;
+	aarch64-nolibcdio)
+		build_zip aarch64 0 wfm-${getVersion}-aarch64-nolibcdio.zip
 	;;
 	all)
-		make USE_LIBCDIO=0 -j$(nproc)
-		libcdioSupport="No"
-		vanilla_reademe_txt
-		7z a -tzip wfm-${getVersion}-nolibcdio.zip "${targetFiles[@]}"
-		make USE_LIBCDIO=1 -j$(nproc)
-		libcdioSupport="Yes"
-		vanilla_reademe_txt
-		7z a -tzip wfm-${getVersion}.zip "${targetFiles[@]}"
+		# x86_64 与 aarch64 各打 nolibcdio 与 libcdio 两个包，共四个
+		build_zip x86_64 0 wfm-${getVersion}-nolibcdio.zip
+		build_zip x86_64 1 wfm-${getVersion}.zip
+		build_zip aarch64 0 wfm-${getVersion}-aarch64-nolibcdio.zip
+		build_zip aarch64 1 wfm-${getVersion}-aarch64.zip
 	;;
 	*)
-		make USE_LIBCDIO=1 -j$(nproc)
-		libcdioSupport="Yes"
-		vanilla_reademe_txt
-		7z a -tzip wfm-${getVersion}.zip "${targetFiles[@]}"
+		build_zip x86_64 1 wfm-${getVersion}.zip
 	;;
 esac
-
