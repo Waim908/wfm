@@ -3437,15 +3437,28 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                 case CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
                     // 设过背景图：非选中条目不要实心底色。
-                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而这个值
-                    // 由控件在每次通知前从 infoPtr->clrTextBk 拷过来（customdraw_fill，
-                    // :1063；那个字段归 LVM_SETTEXTBKCOLOR 管，不是 LVM_SETBKCOLOR），
-                    // 所以逐条目改这里就生效。
+                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而它由
+                    // customdraw_fill（:1063）从 infoPtr->clrTextBk 拷来，那个字段由
+                    // LVM_SETTEXTBKCOLOR 直接赋值（:9238），不是 LVM_SETBKCOLOR。
+                    // 默认值已经由 rebuildBackgroundBitmap 设成 CLR_NONE 了，这里只是兜底
+                    // （防止别处把它改回默认），真正不能省的是**选中项要给回实色**：那次
+                    // ETO_OPAQUE 填充同时负责画整行高亮底色（LVS_EX_FULLROWSELECT 下是整行），
+                    // 默认值是 CLR_NONE 的话选中的那一行就完全看不出被选中。
                     // **必须放在下面两个早退之前**：大图标视图和磁盘占用条那两条分支都会提前
-                    // return，放在后面的话它们连"清底色"都轮不到 —— 盘符那一屏整片白底就是这么来的。
-                    // 选中项**不**改：那次填充同时负责画选中高亮，一并关掉就看不出选了谁。
-                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
-                        lvcd->clrTextBk = CLR_NONE;
+                    // return，放在后面的话盘符那一屏连兜底都轮不到。
+                    if (hasBackgroundImage()) {
+                        if (lvcd->nmcd.uItemState & CDIS_SELECTED) {
+                            // 与 Wine prepaint_setup 的取色一致（listview.c:1095-1108）：
+                            // 有焦点用高亮色；无焦点时那边只有 LVS_SHOWSELALWAYS 才给 3D 面，
+                            // 本控件没开那个样式，不补的话选中行会彻底看不出被选中，
+                            // 所以无焦点也铺 3D 面，与资源管理器失焦后的观感一致
+                            lvcd->clrTextBk = (GetFocus() == hwndContentView)
+                                              ? GetSysColor(COLOR_HIGHLIGHT)
+                                              : GetSysColor(COLOR_3DFACE);
+                        }
+                        else {
+                            lvcd->clrTextBk = CLR_NONE;
+                        }
                     }
                     // 大图标视图：完全自绘条目（Wine 默认对非选中项只画一行文件名）
                     if (viewStyle == STYLE_LARGE_ICON) {
@@ -3468,10 +3481,14 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                 }
                 case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
-                    // 子项阶段是**另一次**通知，clrTextBk 已被 customdraw_fill 重新拷回默认值，
-                    // 上面条目阶段改的那一份到不了这里，所以必须再设一次。
-                    if (hasBackgroundImage() && !(lvcd->nmcd.uItemState & CDIS_SELECTED)) {
-                        lvcd->clrTextBk = CLR_NONE;
+                    // 子项阶段是一次单独的通知，但 clrTextBk 不会被重置：customdraw_fill
+                    // 只在条目级调一次（listview.c:4853），子项循环里只更新 nmcd.rc 与
+                    // iSubItem（:4869-4876）。所以条目阶段设的值这里仍然有效，这段是兜底。
+                    if (hasBackgroundImage()) {
+                        lvcd->clrTextBk = (lvcd->nmcd.uItemState & CDIS_SELECTED)
+                                          ? ((GetFocus() == hwndContentView) ? GetSysColor(COLOR_HIGHLIGHT)
+                                                                             : GetSysColor(COLOR_3DFACE))
+                                          : CLR_NONE;
                     }
                     if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
                         && items[idx].driveTotalBytes > 0 && lvcd->iSubItem == COLUMN_SIZE_IDX) {
@@ -4709,7 +4726,7 @@ void rebuildBackgroundBitmap(void) {
     if (!hwndContentView) return;
 
     // 没设图：让控件清掉背景位图（wine 会顺手 DeleteObject 掉上一张，自己不要再删），
-    // 并把背景色恢复成系统窗口色 —— 下面设过 CLR_NONE，不恢复的话列表就不再自绘底色了
+    // 并把两个背景色恢复成系统默认 —— 下面设过 CLR_NONE，不恢复的话列表就不再自绘底色了
     if (!hasBackgroundImage()) {
         LVBKIMAGEW img = {0};
         img.ulFlags = LVBKIF_SOURCE_NONE;
@@ -4717,6 +4734,7 @@ void rebuildBackgroundBitmap(void) {
         // LVM_SETBKIMAGEW，不值得为这点便利赌一次编译选项
         SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img);
         ListView_SetBkColor(hwndContentView, GetSysColor(COLOR_WINDOW));
+        SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_DEFAULT);
         return;
     }
 
@@ -4728,17 +4746,20 @@ void rebuildBackgroundBitmap(void) {
 
     gdiplusInit();
 
+    // 三个句柄都先置空再谈失败：下面任何一步出错都 goto done 统一收拾，done 里靠 hbm
+    // 是否为空判断「这张图没做成」，从而把上一次的位图和 CLR_NONE 一并清掉 —— 图片被删掉
+    // 或换盘符之后要静默退回纯色，不能留着上一张图或者一片没有底色的透明格子。
     GpBitmap* src = NULL;
-    if (GdipCreateBitmapFromFile(backgroundPath, &src) != Ok || !src) return;   // 路径失效：静默退回纯色
-
-    UINT iw = 0, ih = 0;
-    if (GdipGetImageWidth((GpImage*)src, &iw) != Ok) iw = 0;
-    if (GdipGetImageHeight((GpImage*)src, &ih) != Ok) ih = 0;
-    if (!iw || !ih) { GdipDisposeImage((GpImage*)src); return; }
-
     GpBitmap* dst = NULL;
     HBITMAP hbm = NULL;
     GpGraphics* g = NULL;
+    UINT iw = 0, ih = 0;
+
+    if (GdipCreateBitmapFromFile(backgroundPath, &src) != Ok || !src) { src = NULL; goto done; }
+
+    if (GdipGetImageWidth((GpImage*)src, &iw) != Ok) iw = 0;
+    if (GdipGetImageHeight((GpImage*)src, &ih) != Ok) ih = 0;
+    if (!iw || !ih) goto done;
 
     // 先算好铺满客户区的矩形（cover：取两个方向里较大的比例，居中裁切）
     double scaleX = (double)cw / (double)iw;
@@ -4752,9 +4773,11 @@ void rebuildBackgroundBitmap(void) {
     if (GdipCreateBitmapFromScan0(cw, ch, 0, BACKGROUND_PIXEL_FORMAT_ARGB, NULL, &dst) != Ok || !dst) goto done;
     if (GdipGetImageGraphicsContext((GpImage*)dst, &g) != Ok || !g) goto done;
 
-    // 底色取列表当前的背景色：图上没有覆盖到的地方（以后加 contain 之类）也不会露出垃圾
+    // 底色与遮罩色取系统窗口色，**不能**用 ListView_GetBkColor：启用背景图之后那个字段
+    // 已经被设成 CLR_NONE（0xFFFFFFFF），取出来 RGB 全是 0xFF，等于纯白 —— 遮罩会变成
+    // 一层 60% 的白雾，把整张图洗得发白，看起来就像"背景图没生效"。
     {
-        COLORREF bk = ListView_GetBkColor(hwndContentView);
+        COLORREF bk = GetSysColor(COLOR_WINDOW);
         DWORD argb = 0xFF000000u | ((DWORD)GetRValue(bk) << 16)
                                  | ((DWORD)GetGValue(bk) << 8) | (DWORD)GetBValue(bk);
         GdipGraphicsClear(g, argb);
@@ -4791,20 +4814,35 @@ void rebuildBackgroundBitmap(void) {
             hbm = NULL;
         }
         else {
-            // 把背景色切成 CLR_NONE，条目才不再用 ETO_OPAQUE 把格子填成白底
-            // （listview.c:4678 那条 `if (clrTextBk != CLR_NONE)`）—— 否则详细视图整屏都是
-            // 白格子，背景图只在最后一行下方露一条，等于看不见。
-            // 这样做的副作用是列表不再自绘底色：但 CLR_NONE 分支下 LISTVIEW_EraseBkgnd
-            // （:9757）会先转发擦除、紧接着按裁剪区重贴我们这张位图，而位图与客户区 1:1，
-            // 所以滚动/局部失效同样能被重新贴满，不会留残影。
+            // 把两个背景色都切成 CLR_NONE：
+            // - clrBk（LVM_SETBKCOLOR）管擦除。只有它是 CLR_NONE 时 LISTVIEW_EraseBkgnd
+            //   （listview.c:9762）才会走到贴背景位图那条分支，否则整片填窗口白、图根本不出现。
+            // - clrTextBk（LVM_SETTEXTBKCOLOR）管条目填充：LISTVIEW_DrawItemPart 里
+            //   `if (clrTextBk != CLR_NONE) ExtTextOutW(..., ETO_OPAQUE, ...)`（:4677）会把
+            //   每一格的文字区填成白底，详细/列表/小图标视图下整屏都是白格子。
+            //   把它设成**默认值**而不是只改 NM_CUSTOMDRAW 的返回值，这样任何一条绘制路径
+            //   拿到的都是 CLR_NONE，不必依赖我们每个阶段都改一遍。
+            //   代价是选中行也失去了高亮底，所以 NM_CUSTOMDRAW 里给选中项显式补回实色。
             ListView_SetBkColor(hwndContentView, CLR_NONE);
+            SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_NONE);
         }
     }
 
 done:
     if (g) GdipDeleteGraphics(g);
     if (dst) GdipDisposeImage((GpImage*)dst);
-    GdipDisposeImage((GpImage*)src);
+    if (src) GdipDisposeImage((GpImage*)src);
+
+    // hbm 为空 = 这张图没做成（解码失败 / 尺寸异常 / 拿到 HBITMAP 失败）。此时要把控件
+    // 那边一并清干净：删掉上一次的位图、恢复两个背景色，退回纯色底。留着不清的话，
+    // 用户删掉图片或换掉盘符之后会一直看着上一张图，或者看一片没有底色的透明格子。
+    if (!hbm) {
+        LVBKIMAGEW img = {0};
+        img.ulFlags = LVBKIF_SOURCE_NONE;
+        SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img);
+        ListView_SetBkColor(hwndContentView, GetSysColor(COLOR_WINDOW));
+        SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_DEFAULT);
+    }
 }
 
 // 客户区尺寸变了之后调用：BACKGROUND_REBUILD_MS 内连着来就只重合成一次，拖窗口时不必
