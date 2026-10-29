@@ -4,7 +4,7 @@ struct Options {
     wchar_t* title;
     wchar_t* label;
     wchar_t* defaultText;
-    bool selectAll;
+    enum InputSelectMode mode;
 };
 
 static struct Options options = {0};
@@ -61,7 +61,21 @@ INT_PTR CALLBACK InputDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
             if (options.defaultText) SetWindowText(hwndEdit, options.defaultText);
 
             SendMessage(hwndDlg, WM_NEXTDLGCTL, (WPARAM)hwndEdit, TRUE);
-            if (options.selectAll) SendMessage(hwndEdit, EM_SETSEL, 0, -1);
+
+            // 打开时选中哪一段。BASENAME 只在「重命名」用：扩展名不选中，输入新名字时
+            // 它会自动保留（Windows 资源管理器就是这个行为）；全选会把扩展名一起换掉。
+            if (options.mode == INPUT_SELECT_ALL) {
+                SendMessage(hwndEdit, EM_SETSEL, 0, -1);
+            }
+            else if (options.mode == INPUT_SELECT_BASENAME) {
+                const wchar_t* dot = options.defaultText ? wcsrchr(options.defaultText, L'.') : NULL;
+                // 没有扩展名、或者点就在开头（.gitignore 这类）时，点之前没有可留的主名，
+                // 这种情况整个选中。
+                int end = (dot && dot != options.defaultText)
+                        ? (int)(dot - options.defaultText)
+                        : (int)wcslen(options.defaultText ? options.defaultText : L"");
+                if (end > 0) SendMessage(hwndEdit, EM_SETSEL, 0, end);
+            }
             break;
         }
     }
@@ -69,11 +83,11 @@ INT_PTR CALLBACK InputDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
     return (INT_PTR)FALSE;  
 }
 
-wchar_t* InputDialog(wchar_t* title, wchar_t* label, wchar_t* defaultText, bool selectAll) {
+wchar_t* InputDialog(wchar_t* title, wchar_t* label, wchar_t* defaultText, enum InputSelectMode mode) {
     options.title = title;
     options.label = label;
     options.defaultText = defaultText;
-    options.selectAll = selectAll;
+    options.mode = mode;
     result = NULL;
     
     DialogBox(globalHInstance, MAKEINTRESOURCE(IDD_INPUT), hwndMain, &InputDialogProc);
@@ -81,6 +95,6 @@ wchar_t* InputDialog(wchar_t* title, wchar_t* label, wchar_t* defaultText, bool 
     options.title = NULL;
     options.label = NULL;
     options.defaultText = NULL;
-    options.selectAll = false;
+    options.mode = INPUT_SELECT_NONE;
     return result;
 }

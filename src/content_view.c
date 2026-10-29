@@ -4267,7 +4267,7 @@ void onMenuItemDeleteClick() {
 
 void onMenuItemRenameClick() {
     if (numSelectedItems == 1) {
-        wchar_t* result = InputDialog(lc_str.rename, lc_str.enter_new_name, selectedItems[0]->name, true);
+        wchar_t* result = InputDialog(lc_str.rename, lc_str.enter_new_name, selectedItems[0]->name, INPUT_SELECT_BASENAME);
         if (result) {
             wchar_t newFilename[MAX_PATH] = {0};
             getFileNodePath(selectedItems[0]->parent, newFilename);
@@ -4311,7 +4311,7 @@ void onMenuItemNewFolderClick() {
     getFileNodePath(currPathFileNode, path);
     if (!isPathExists(path)) return;
     
-    wchar_t* result = InputDialog(lc_str.new_folder, lc_str.enter_folder_name, NULL, false);
+    wchar_t* result = InputDialog(lc_str.new_folder, lc_str.enter_folder_name, NULL, INPUT_SELECT_NONE);
     if (result) {
         wcscat_s(path, MAX_PATH, L"\\");
         wcscat_s(path, MAX_PATH, result);
@@ -4329,7 +4329,7 @@ void onMenuItemNewFileClick() {
     getFileNodePath(currPathFileNode, path);
     if (!isPathExists(path)) return;
     
-    wchar_t* result = InputDialog(lc_str.new_file, lc_str.enter_file_name, NULL, false);
+    wchar_t* result = InputDialog(lc_str.new_file, lc_str.enter_file_name, NULL, INPUT_SELECT_NONE);
     if (result) {
         wcscat_s(path, MAX_PATH, L"\\");
         wcscat_s(path, MAX_PATH, result);
