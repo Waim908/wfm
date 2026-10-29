@@ -14,6 +14,7 @@ static inline void loadStrings_pt() {
     lc_str.file = L"Arquivo";
     lc_str.folder = L"Pasta";
     lc_str.local_drive = L"Unidade Local";
+    lc_str.cd_drive = L"Unidade de CD";
     lc_str.computer = L"Computador";
     lc_str.desktop = L"Desktop";
     lc_str.documents = L"Documentos";

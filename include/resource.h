@@ -313,7 +313,17 @@ extern struct LC_STR lc_str;
 
 #define STARTS_WITH(a, b) (a[0] == b[0] && a[1] == b[1])
 
+// 先铺英文，再用目标语言覆盖。
+//
+// 语言表是「138 个字段逐个手写赋值」，而 lc_str 是 {0} 初始化的全局结构：漏一个字段
+// 既不报错也不告警，运行时那个字段就是 NULL。已经踩过两次 —— 葡语缺 cd_drive 时
+// getFileInfo 会调 wcscpy_s(dst, 80, NULL)（目标置空、真 Windows 上直接终止进程），
+// 中文缺 msg_extracting_files 时 SetWindowText 收到 NULL、进度标签不更新。
+//
+// 先 loadStrings_en() 再覆盖，漏掉的字段就退化成英文，结构里不会再有 NULL。
+// 这不代替「补上译文」：漏译由 tools/check_locale.py（make check）在提交前报出来。
 static inline void loadLCStrings(wchar_t* localeName) {
+    loadStrings_en();
     if (STARTS_WITH(localeName, L"pt")) {
         loadStrings_pt();
     }
@@ -323,7 +333,6 @@ static inline void loadLCStrings(wchar_t* localeName) {
     else if (STARTS_WITH(localeName, L"zh")) {
         loadStrings_zh();
     }
-    else loadStrings_en();
 }
 
 #undef STARTS_WITH

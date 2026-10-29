@@ -98,6 +98,7 @@ static inline void loadStrings_zh() {
     lc_str.msg_invalid_iso_image_file = L"无效的 ISO 映像文件！";
 
     lc_str.msg_deleting_files = L"正在删除文件，请稍候...";
+    lc_str.msg_extracting_files = L"正在提取文件，请稍候...";
     lc_str.msg_copying_files = L"正在复制文件，请稍候...";
     lc_str.msg_moving_files = L"正在移动文件，请稍候...";
     lc_str.msg_cancel_file_operation = L"是否要取消此操作？";
