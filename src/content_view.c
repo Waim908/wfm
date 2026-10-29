@@ -419,9 +419,14 @@ static void formatDriveSizeText(struct ListItem* item) {
 #define ICON_SLOT_BUDGET_BYTES (2u * 1024u * 1024u)
 #define ICON_SLOT_MIN_COUNT    64
 #define ICON_SLOT_MAX_BYTES    (48u * 1024u * 1024u)
-#define ICON_SOURCE_INIT       8192    // 来源表初始容量
+// 来源表的**初始**容量取小、按需翻倍（增长走 iconStoreGrow，cap 与去重索引一起翻，
+// 重哈希后 id 不变）。原来初始就是 8192，而 struct IconSource 是 48 字节 ——
+// 光来源表就 calloc 393 KB、去重索引再 64 KB，合计约 457 KB：不管会话里只出现几个
+// 扩展名，这笔钱每次启动都要先付。改从 512 起（24 KB + 4 KB），绝大多数会话只付这一次；
+// 真碰上几千个独占项（system32 那种满目录 exe）也只是多几次翻倍与重哈希，稳态容量相同。
+#define ICON_SOURCE_INIT       512
 #define ICON_SOURCE_MAX        65536   // 来源表扩容上限（去重键可寻址的独占项上限）
-#define ICON_KEYMAP_INIT       16384   // 2 的幂；= 2 × ICON_SOURCE_INIT，半装载率
+#define ICON_KEYMAP_INIT       1024    // 2 的幂；= 2 × ICON_SOURCE_INIT，半装载率
 #define ICON_POOL_MAX          8
 #define ICON_SHELL_UNKNOWN     (-1000)  // shellIndex 的「还没查过」哨兵（0 是合法的列表索引）
 
