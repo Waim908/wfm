@@ -155,6 +155,9 @@ static inline void loadStrings_ru() {
     lc_str.refresh = L"Обновить";
     lc_str.temp_folder = L"Временные файлы";
     lc_str.start_menu = L"Главное меню";
+    lc_str.background_image = L"Фоновое изображение...";
+    lc_str.clear_background = L"Очистить фон";
+    lc_str.image_files = L"Файлы изображений";
 }
 
 #endif

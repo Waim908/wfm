@@ -156,6 +156,9 @@ static inline void loadStrings_en() {
     lc_str.refresh = L"Refresh";
     lc_str.temp_folder = L"Temp";
     lc_str.start_menu = L"Start Menu";
+    lc_str.background_image = L"Background Image...";
+    lc_str.clear_background = L"Clear Background";
+    lc_str.image_files = L"Image files";
 }
 
 #endif

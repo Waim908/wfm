@@ -155,6 +155,9 @@ static inline void loadStrings_pt() {
     lc_str.refresh = L"Atualizar";
     lc_str.temp_folder = L"Temporários";
     lc_str.start_menu = L"Menu Iniciar";
+    lc_str.background_image = L"Imagem de Fundo...";
+    lc_str.clear_background = L"Limpar Fundo";
+    lc_str.image_files = L"Arquivos de imagem";
 }
 
 #endif

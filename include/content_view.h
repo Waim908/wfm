@@ -40,6 +40,19 @@ bool refreshFlashBegin(void);
 // 「条目数缓存」一节。普通导航（进/退目录）不调用它，缓存直接命中。
 void markFolderCountsStale(void);
 
+// 内容区背景图片。做法是把「解码 + 缩放 + 遮罩」全部在合成阶段做完，交给列表控件的永远
+// 是一张与客户区同尺寸的成品位图（LVM_SETBKIMAGE）。原因与 wine 侧的限制见
+// content_view.c 的「内容区背景图片」一节。
+//   setBackgroundImage：传路径则应用并写入注册表，传 NULL / 空串则清除。
+//   scheduleBackgroundRebuild：客户区尺寸变了之后调用，去抖后重合成（拖窗口时不必每帧都做）。
+void loadBackgroundSettings(void);
+void setBackgroundImage(const wchar_t* path);
+void scheduleBackgroundRebuild(void);
+void rebuildBackgroundBitmap(void);
+bool hasBackgroundImage(void);
+#define TIMER_BACKGROUND_REBUILD   0x7FF9   // 定时器号段同 content_view.c 里的 TIMER_*
+#define BACKGROUND_REBUILD_MS      200
+
 void onMenuItemUpClick();
 void onMenuItemOpenClick();
 void onMenuItemEditClick();

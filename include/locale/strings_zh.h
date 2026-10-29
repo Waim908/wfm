@@ -154,6 +154,9 @@ static inline void loadStrings_zh() {
     lc_str.refresh = L"刷新";
     lc_str.temp_folder = L"临时文件夹";
     lc_str.start_menu = L"开始菜单";
+    lc_str.background_image = L"背景图片…";
+    lc_str.clear_background = L"清除背景图片";
+    lc_str.image_files = L"图片文件";
 }
 
 #endif

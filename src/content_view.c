@@ -4554,6 +4554,23 @@ GpStatus WINGDIPAPI GdipCreateBitmapFromStream(IStream*, GpBitmap**);
 GpStatus WINGDIPAPI GdipCreateHICONFromBitmap(GpBitmap*, HICON*);
 GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 
+/* 内容区背景图合成用的几个（见「内容区背景图片」一节） */
+typedef void GpGraphics;
+typedef void GpBrush;
+GpStatus WINGDIPAPI GdipCreateBitmapFromFile(GDIPCONST WCHAR*, GpBitmap**);
+GpStatus WINGDIPAPI GdipGetImageWidth(GpImage*, UINT*);
+GpStatus WINGDIPAPI GdipGetImageHeight(GpImage*, UINT*);
+GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(INT, INT, INT, INT, BYTE*, GpBitmap**);
+GpStatus WINGDIPAPI GdipGetImageGraphicsContext(GpImage*, GpGraphics**);
+GpStatus WINGDIPAPI GdipSetInterpolationMode(GpGraphics*, INT);
+GpStatus WINGDIPAPI GdipGraphicsClear(GpGraphics*, DWORD);
+GpStatus WINGDIPAPI GdipDrawImageRectI(GpGraphics*, GpImage*, INT, INT, INT, INT);
+GpStatus WINGDIPAPI GdipCreateSolidBrush(DWORD, GpBrush**);
+GpStatus WINGDIPAPI GdipFillRectangleI(GpGraphics*, GpBrush*, INT, INT, INT, INT);
+GpStatus WINGDIPAPI GdipDeleteBrush(GpBrush*);
+GpStatus WINGDIPAPI GdipDeleteGraphics(GpGraphics*);
+GpStatus WINGDIPAPI GdipCreateHBITMAPFromBitmap(GpBitmap*, HBITMAP*, DWORD);
+
 static ULONG_PTR g_gdiplusToken = 0;
 
 static void initGdiplus(void) {
@@ -4595,6 +4612,194 @@ static HICON createIconFromPngData(const BYTE* data, DWORD dataSize) {
     GdipDisposeImage((GpImage*)pBitmap);
 
     return (status == Ok) ? hIcon : NULL;
+}
+
+// ========== 内容区背景图片 ==========
+//
+// 走 LVM_SETBKIMAGE + LVBKIF_SOURCE_HBITMAP，但**所有视觉变换都在这里做完**。
+// wine 的 LISTVIEW_SetBkImage（dlls/comctl32/listview.c:8099）只认 HBITMAP 这一种来源：
+// LVBKIF_SOURCE_URL 是 FIXME 桩（传路径什么都不会发生），`ulFlags & ~LVBKIF_SOURCE_MASK`
+// 一律 FIXME("unsupported flags")，也就是控件既不缩放、也不平铺、更不会做半透明。
+// 所以自己把原图按填充方式缩放到客户区尺寸、叠好遮罩，交出去的已经是成品。
+//
+// 位图必须**与客户区同尺寸、左上对齐**：它画在 LISTVIEW_DrawBackgroundBitmap
+// （:4588）里，是 BitBlt(dst=(x,y), size=box, src=(x,y))，源坐标直接用了目标坐标。
+// 换成同尺寸位图之后，滚动与局部失效都不用管，控件自己会重贴
+// （LISTVIEW_EraseBkgnd :9757 与 LISTVIEW_FillBkgnd :4626 都会调它）。
+//
+// 所有权：wine 在替换或销毁时会 DeleteObject(infoPtr->hBkBitmap)（:8113 / :8125 /
+// :10536），所以交出去之后**不能再删**。真 Windows 不接管、语义相反；本程序只跑 wine。
+//
+// 缩放必须走 GDI+：wine 没有实现 HALFTONE —— dibdrv/primitives.c:6882 的
+// rop_codes_from_stretch_mode 只认 DELETESCANS / ORSCANS / ANDSCANS，HALFTONE 落到
+// default 就是最近邻，照片缩小会出锯齿。GDI+ 那边 HighQualityBicubic 是真实现的
+// （gdiplus/graphics.c:1048）。
+#define BACKGROUND_REG_PATH L"SOFTWARE\\Winlator\\WFM"
+#define BACKGROUND_PIXEL_FORMAT_ARGB 0x0026200A   // PixelFormat32bppARGB
+#define BACKGROUND_INTERP_HQ_BICUBIC 7            // InterpolationModeHighQualityBicubic
+
+static wchar_t backgroundPath[MAX_PATH] = {0};
+static int backgroundDim = 60;        // 0..100：压在图片上那层遮罩的不透明度
+
+bool hasBackgroundImage(void) {
+    return backgroundPath[0] != L'\0';
+}
+
+static void saveBackgroundSettings(void) {
+    HKEY hkey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, BACKGROUND_REG_PATH, 0, NULL, REG_OPTION_NON_VOLATILE,
+                       KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS) return;
+    RegSetValueEx(hkey, L"BackgroundImage", 0, REG_SZ, (const BYTE*)backgroundPath,
+                  (DWORD)((wcslen(backgroundPath) + 1) * sizeof(wchar_t)));
+    DWORD val = (DWORD)backgroundDim;
+    RegSetValueEx(hkey, L"BackgroundDim", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
+    RegCloseKey(hkey);
+}
+
+void loadBackgroundSettings(void) {
+    backgroundPath[0] = L'\0';
+    backgroundDim = 60;
+
+    HKEY hkey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, BACKGROUND_REG_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) return;
+
+    // REG_SZ 读进定长缓冲：值本身可能正好占满，强制补结束符，别指望系统给
+    wchar_t path[MAX_PATH] = {0};
+    DWORD size = sizeof(path) - sizeof(wchar_t);
+    if (RegQueryValueEx(hkey, L"BackgroundImage", NULL, NULL, (BYTE*)path, &size) == ERROR_SUCCESS) {
+        path[MAX_PATH - 1] = L'\0';
+        wcsncpy(backgroundPath, path, MAX_PATH - 1);
+        backgroundPath[MAX_PATH - 1] = L'\0';
+    }
+    DWORD dim = 60;
+    size = sizeof(dim);
+    if (RegQueryValueEx(hkey, L"BackgroundDim", NULL, NULL, (BYTE*)&dim, &size) == ERROR_SUCCESS) {
+        if (dim <= 100) backgroundDim = (int)dim; else backgroundDim = 60;
+    }
+    RegCloseKey(hkey);
+}
+
+// 合成一张与客户区同尺寸的位图交给列表控件。**只由主线程调用**。
+void rebuildBackgroundBitmap(void) {
+    if (!hwndContentView) return;
+
+    // 没设图：让控件清掉背景位图（wine 会顺手 DeleteObject 掉上一张，自己不要再删），
+    // 并把背景色恢复成系统窗口色 —— 下面设过 CLR_NONE，不恢复的话列表就不再自绘底色了
+    if (!hasBackgroundImage()) {
+        LVBKIMAGEW img = {0};
+        img.ulFlags = LVBKIF_SOURCE_NONE;
+        // 显式发 W 版：LVM_SETBKIMAGE 是 __MINGW_NAME_AW 的别名，靠 -DUNICODE 才指向
+        // LVM_SETBKIMAGEW，不值得为这点便利赌一次编译选项
+        SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img);
+        ListView_SetBkColor(hwndContentView, GetSysColor(COLOR_WINDOW));
+        return;
+    }
+
+    RECT rc;
+    GetClientRect(hwndContentView, &rc);
+    int cw = rc.right - rc.left;
+    int ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0 || cw > 8192 || ch > 8192) return;
+
+    initGdiplus();
+
+    GpBitmap* src = NULL;
+    if (GdipCreateBitmapFromFile(backgroundPath, &src) != Ok || !src) return;   // 路径失效：静默退回纯色
+
+    UINT iw = 0, ih = 0;
+    if (GdipGetImageWidth((GpImage*)src, &iw) != Ok) iw = 0;
+    if (GdipGetImageHeight((GpImage*)src, &ih) != Ok) ih = 0;
+    if (!iw || !ih) { GdipDisposeImage((GpImage*)src); return; }
+
+    GpBitmap* dst = NULL;
+    HBITMAP hbm = NULL;
+    GpGraphics* g = NULL;
+
+    // 先算好铺满客户区的矩形（cover：取两个方向里较大的比例，居中裁切）
+    double scaleX = (double)cw / (double)iw;
+    double scaleY = (double)ch / (double)ih;
+    double scale = (scaleX > scaleY) ? scaleX : scaleY;
+    int dw = (int)((double)iw * scale + 0.5);
+    int dh = (int)((double)ih * scale + 0.5);
+    int dx = (cw - dw) / 2;
+    int dy = (ch - dh) / 2;
+
+    if (GdipCreateBitmapFromScan0(cw, ch, 0, BACKGROUND_PIXEL_FORMAT_ARGB, NULL, &dst) != Ok || !dst) goto done;
+    if (GdipGetImageGraphicsContext((GpImage*)dst, &g) != Ok || !g) goto done;
+
+    // 底色取列表当前的背景色：图上没有覆盖到的地方（以后加 contain 之类）也不会露出垃圾
+    {
+        COLORREF bk = ListView_GetBkColor(hwndContentView);
+        DWORD argb = 0xFF000000u | ((DWORD)GetRValue(bk) << 16)
+                                 | ((DWORD)GetGValue(bk) << 8) | (DWORD)GetBValue(bk);
+        GdipGraphicsClear(g, argb);
+
+        GdipSetInterpolationMode(g, BACKGROUND_INTERP_HQ_BICUBIC);
+        GdipDrawImageRectI(g, (GpImage*)src, dx, dy, dw, dh);
+
+        // 遮罩：颜色就是上面那个底色，只调不透明度。图太花时压住它，文字才读得清。
+        if (backgroundDim > 0) {
+            int a = (backgroundDim > 100) ? 100 : backgroundDim;
+            GpBrush* brush = NULL;
+            DWORD dimArgb = ((DWORD)(a * 255 / 100) << 24) | (argb & 0x00FFFFFFu);
+            if (GdipCreateSolidBrush(dimArgb, &brush) == Ok && brush) {
+                GdipFillRectangleI(g, brush, 0, 0, cw, ch);
+                GdipDeleteBrush(brush);
+            }
+        }
+    }
+
+    GdipDeleteGraphics(g);
+    g = NULL;
+
+    // 得到独立的 32bpp DIB（wine 内部是 CreateDIBSection 再转像素，gdiplus/image.c:1597），
+    // 所以之后释放 GDI+ 位图不会影响它
+    if (GdipCreateHBITMAPFromBitmap(dst, &hbm, 0xFF000000) != Ok || !hbm) goto done;
+
+    {
+        LVBKIMAGEW img = {0};
+        img.ulFlags = LVBKIF_SOURCE_HBITMAP | LVBKIF_STYLE_NORMAL;
+        img.hbm = hbm;
+        // 设不进去时控件没接管这张位图，得自己删，否则每次重建漏一张
+        if (!SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img)) {
+            DeleteObject(hbm);
+            hbm = NULL;
+        }
+        else {
+            // 把背景色切成 CLR_NONE，条目才不再用 ETO_OPAQUE 把格子填成白底
+            // （listview.c:4678 那条 `if (clrTextBk != CLR_NONE)`）—— 否则详细视图整屏都是
+            // 白格子，背景图只在最后一行下方露一条，等于看不见。
+            // 这样做的副作用是列表不再自绘底色：但 CLR_NONE 分支下 LISTVIEW_EraseBkgnd
+            // （:9757）会先转发擦除、紧接着按裁剪区重贴我们这张位图，而位图与客户区 1:1，
+            // 所以滚动/局部失效同样能被重新贴满，不会留残影。
+            ListView_SetBkColor(hwndContentView, CLR_NONE);
+        }
+    }
+
+done:
+    if (g) GdipDeleteGraphics(g);
+    if (dst) GdipDisposeImage((GpImage*)dst);
+    GdipDisposeImage((GpImage*)src);
+}
+
+// 客户区尺寸变了之后调用：BACKGROUND_REBUILD_MS 内连着来就只重合成一次，拖窗口时不必
+// 每帧都做一次高质量缩放。
+void scheduleBackgroundRebuild(void) {
+    if (!hwndMain || !hwndContentView || !hasBackgroundImage()) return;
+    KillTimer(hwndMain, TIMER_BACKGROUND_REBUILD);
+    SetTimer(hwndMain, TIMER_BACKGROUND_REBUILD, BACKGROUND_REBUILD_MS, NULL);
+}
+
+// 设 / 清背景图（NULL 或空串 = 清除）。立刻生效并写注册表。
+void setBackgroundImage(const wchar_t* path) {
+    if (path && path[0]) {
+        wcsncpy(backgroundPath, path, MAX_PATH - 1);
+        backgroundPath[MAX_PATH - 1] = L'\0';
+    }
+    else backgroundPath[0] = L'\0';
+
+    saveBackgroundSettings();
+    rebuildBackgroundBitmap();
 }
 
 // ========== PE icon extraction (bypasses Wine's buggy icon APIs) ==========
