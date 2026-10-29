@@ -188,6 +188,8 @@ struct ListItem {
     // 它同时是结果回主线程时的认领凭据：只有 items[idx].countRequestId 与后台交回来的
     // requestId 相等，才说明这一格还是当初发出去的那一格（见「后台文件夹条目数计数」一节）。
     unsigned countRequestId;
+    // 发出请求的时刻（GetTickCount）。只给兜底对账用：在途太久没回来就当它丢了，重排一次。
+    DWORD countRequestTick;
 };
 
 // 搜索线程持有的只读节点池。
@@ -284,6 +286,7 @@ static void onMenuItemOpenFileLocationClick();
 static void onMenuItemOpenLinkTargetClick();
 static void onMenuItemOpenWithClick();
 static void onMenuItemClearClipboardClick();
+static void onMenuItemRefreshClick();
 static bool isInSearchMode();
 // 解析 lnk 的目标路径（实现与 lnk 图标提取放在一起，见文件末尾）
 static bool resolveLnkTargetPath(const wchar_t* lnkPath, wchar_t* targetPath, int targetCch);
@@ -302,6 +305,9 @@ static struct ContextMenuItem cmiPasteShortcut = {NULL, &onMenuItemPasteShortcut
 static struct ContextMenuItem cmiClearClipboard = {NULL, &onMenuItemClearClipboardClick, NULL, false};
 static struct ContextMenuItem cmiNewFolder = {NULL, &onMenuItemNewFolderClick, NULL, false};
 static struct ContextMenuItem cmiNewFile = {NULL, &onMenuItemNewFileClick, NULL, false};
+// 空白处右键菜单最上面那条「刷新」：与导航栏的刷新按钮同一个动作。
+// 不放进选中项菜单 —— 资源管理器里刷新只出现在空白处右键。
+static struct ContextMenuItem cmiRefresh = {NULL, &onMenuItemRefreshClick, NULL, false};
 #ifdef USE_LIBCDIO
 static struct ContextMenuItem cmiLoadISOImage = {NULL, &onMenuItemLoadISOImageClick, NULL, false};
 static struct ContextMenuItem cmiUnloadISOImage = {NULL, &onMenuItemUnloadISOImageClick, NULL, false};
@@ -1252,18 +1258,20 @@ static void iconRenderInvalidate(void) {
 // 永久缺图标」的隐患。
 // 另有一条与它配套的**代次**（folderCountDropStale）：不算正确性凭据，只为「别把时间花在
 // 已经没人看的目录上」—— 队列里上一批目录的任务连同在途的都会在枚举前被跳过。
-#define FOLDER_COUNT_QUEUE_MAX  64   // 在途请求上限（只有可见行会进来，够用）
+#define FOLDER_COUNT_QUEUE_MAX 128   // 在途请求上限（可见行 + 预取会一起进来，给足余量）
 #define FOLDER_COUNT_DONE_MAX  128
 #define FOLDER_COUNT_IDLE_MS   500
-// 数到这个数就停，显示「9999+ 项」：十万项的目录不该为了一个数字把工作线程占住。
-#define FOLDER_COUNT_CAP      9999
-// 工作线程上限。数条目是「一次系统调用查一个名字」的 I/O 型活（Wine 侧每次 FindNextFile
-// 都要过一趟服务端），单线程时 N 个目录的耗时就是 N 条串起来的和 —— 一屏 20 个目录就是
-// 「从上往下一个个慢慢跳出来」。多线程并行等待能把这段耗时按线程数摊开。
-// 上限 4：再多也只是和图标渲染线程、UI 线程抢 CPU，而真正受限的是 I/O 等待。
-#define FOLDER_COUNT_WORKERS   4
+// 数到这个数就停，显示「999+ 项」：十万项的目录不该为了一个数字把工作线程占住。
+// 999 而不是 9999：这个数字只是「一格里的条目数」的参考值，而 Wine 那边**每个条目都要
+// 一次 stat**（见 countItemsInFolder 的说明），上限差十倍就是耗时差十倍。
+#define FOLDER_COUNT_CAP       999
+// 工作线程上限。数条目的成本主体是「每个条目一次 stat」（不是等 I/O 睡大觉），所以在核数
+// 允许的范围内多开几条能实打实摊开耗时；再多就只是和图标渲染线程、UI 线程抢 CPU 了。
+#define FOLDER_COUNT_WORKERS   6
 // 查过了但枚举失败（权限 / 路径过长）：记成这个值，别再反复排队
 #define CHILD_ITEM_COUNT_FAILED (-2)
+// 数到一半发现换过目录 / 刷新过：这条结果直接作废，不入完成队列
+#define FOLDER_COUNT_ABORTED   (-3)
 
 struct FolderCountJob {
     unsigned requestId;
@@ -1297,11 +1305,23 @@ static volatile LONG folderCountGeneration = 1;
 static unsigned folderCountRequestSeq = 0;
 // 已投递但还没处理的结果通知。多条结果只投一条消息，省掉每个目录一次 PostMessage。
 static volatile LONG folderCountPostPending = 0;
+// 兜底对账定时器是否已挂（见 folderCountReconcile）。
+static bool folderCountTimerPending = false;
+// 兜底对账的步长 / 在途多久算丢
+#define FOLDER_COUNT_WATCHDOG_MS  300
+#define FOLDER_COUNT_STUCK_MS     1200
+// 定时器号段同 TIMER_ICON_*（Wine 的列表控件自己用 (UINT_PTR)infoPtr，号段要留开）
+#define TIMER_FOLDER_COUNT        0x7FFC
 
 // 数一个目录里的条目数（后台线程唯一做的事）。**只读**，不递归。
 // 过滤规则必须与 buildChildNodes 一致（跳过 . / ..，按 g_showHiddenFiles 决定是否含隐藏项），
 // 否则这一格显示的项数会和列表里的行数对不上。
-static int countItemsInFolder(const wchar_t* dir) {
+//
+// generation 是发起时的代次：换目录 / 刷新会把它抬掉，这里每 64 个名字回头看一眼，抬过就
+// 立刻收手。**这条对大目录是决定性的**：一个几万项目的目录要几万次 FindNextFile，刷新之后
+// 那几条在途的旧任务如果还慢慢跑完，新目录那一屏的条目数就得排在它们后面等好几秒 ——
+// 表现为「刷新后文件多的目录干脆不显示数量」。
+static int countItemsInFolder(const wchar_t* dir, unsigned generation) {
     if (!dir || !dir[0]) return -1;
 
     size_t len = wcslen(dir);
@@ -1317,7 +1337,15 @@ static int countItemsInFolder(const wchar_t* dir) {
     if (handle == INVALID_HANDLE_VALUE) return -1;
 
     int count = 0;
+    unsigned scanned = 0;
     do {
+        // 每 64 个名字查一次代次（判空指针以外的活都在这一支里，所以放循环最前面，
+        // 不会被下面两处 continue 跳过）。另外用 scanned 而不是 count：被过滤掉的项
+        // 也占一次 FindNextFile，同样要计入检查间隔。
+        if ((++scanned & 63) == 0 && generation != (unsigned)folderCountGeneration) {
+            FindClose(handle);
+            return FOLDER_COUNT_ABORTED;
+        }
         if (wfd.cFileName[0] == L'.' && (wfd.cFileName[1] == L'\0' ||
             (wfd.cFileName[1] == L'.' && wfd.cFileName[2] == L'\0'))) continue;
         if (!g_showHiddenFiles && (wfd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
@@ -1362,7 +1390,13 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
         // 那一格已经不在了，没有人在等这个结果。
         if (job.generation != (unsigned)folderCountGeneration) continue;
 
-        int count = countItemsInFolder(job.path);
+        int count = countItemsInFolder(job.path, job.generation);
+
+        // 数到一半被代次打断（用户换目录 / 刷新过），或者数完这期间又换过：结果已经没人要，
+        // 直接丢。入队后再由 pump 按 requestId 认领也行，但那样每个旧任务都要多占一次
+        // 完成队列和一次 PostMessage，大目录刷新时这些空转很可观。
+        if (count == FOLDER_COUNT_ABORTED) continue;
+        if (job.generation != (unsigned)folderCountGeneration) continue;
 
         // 结果入队。**满了就等，绝不丢弃** —— 丢掉的那条对应的 countRequestId 就再也清不掉，
         // 那一格从此不会再排队（永久空白）。同 iconRenderTask 的规则。
@@ -1397,15 +1431,18 @@ static DWORD WINAPI folderCountTask(LPVOID param) {
     return 0;
 }
 
-// 要几条工作线程：按核数折半、夹在 1..FOLDER_COUNT_WORKERS。
-// 真机上目录枚举的时间几乎全花在等 I/O（每次 FindNextFile 都是一趟服务端往返），
-// 所以并行度能直接换成速度；但也不能把核占满 —— 图标渲染线程和 UI 线程都要跑。
+// 要几条工作线程。目录枚举的成本主体是「每个条目一次 stat」（见 countItemsInFolder 的说明），
+// 属于系统调用型负载，多开几条能实打实地摊开；但也不能把核占满 —— 图标渲染线程与 UI 线程
+// 都要跑。按核数分档：8 核及以上 6 条，4~7 核 3 条，2~3 核 2 条，单核 1 条。
 static int folderCountWorkerTarget(void) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     int cores = (int)si.dwNumberOfProcessors;
-    int n = cores / 2;
-    if (n < 1) n = 1;
+    int n;
+    if (cores >= 8)      n = 6;
+    else if (cores >= 4) n = 3;
+    else if (cores >= 2) n = 2;
+    else                 n = 1;
     if (n > FOLDER_COUNT_WORKERS) n = FOLDER_COUNT_WORKERS;
     return n;
 }
@@ -1464,27 +1501,62 @@ static void folderCountDropStale(void) {
     LeaveCriticalSection(&folderCountLock);
 }
 
+// 把 node->childItemCount 写进「大小」列的文本。
+// loadItemData（首次格式化）与 folderCountPump（数字回来之后**当场**补上）都用它：后者
+// 不能再指望「下一次绘制顺手重新格式化」那条链 —— 链上少走一环，数字就随机不出现，
+// 表现正是「刷新后有的格子数字消失，再刷新或点一下才回来」。
+static void formatFolderCountText(struct ListItem* item) {
+    if (!item || !item->node) return;
+    int count = item->node->childItemCount;
+    if (count < 0) return;      // 还没数 / 数失败：保持空白
+    if (count >= FOLDER_COUNT_CAP)
+        swprintfTrunc(item->formattedSize, 64, L"%d+ %ls", count, lc_str.items);
+    else
+        swprintfTrunc(item->formattedSize, 64, L"%d %ls", count, lc_str.items);
+}
+
+// 让某一行的**整行宽度**失效重画。不用 ListView_RedrawItems：它失效的是控件自己算出来的
+// 行矩形，而条目数长在「大小」列上 —— 这里按客户区宽度铺一条带子，少依赖一层。
+static void invalidateItemRow(int idx) {
+    RECT itemRc, clientRc;
+    if (!hwndContentView || idx < 0) return;
+    if (!ListView_GetItemRect(hwndContentView, idx, &itemRc, LVIR_BOUNDS)) return;
+    if (!GetClientRect(hwndContentView, &clientRc)) return;
+    RECT band = { clientRc.left, itemRc.top, clientRc.right, itemRc.bottom };
+    InvalidateRect(hwndContentView, &band, FALSE);
+}
+
+static void folderCountStartWatchdog(void);
+static void folderCountReconcile(void);
+
 // 给第 idx 项（目录）排一次计数。**只由主线程调用**（要写 items[idx].countRequestId）。
-// 已经有结果 / 已有在途请求 / 队列满 → 什么都不做，下一次 loadItemData 会再来（自愈）。
-static void folderCountRequest(int idx) {
-    if (!items || idx < 0 || idx >= numItems) return;
+// 返回 false = 队列满了、这次没排上，调用方必须保持 loaded=false 让下一次绘制再来。
+//
+// 「下次重试」以前是靠注释里的「下一次 loadItemData 会再来（自愈）」糊过去的，那句是错的：
+// loadItemData 只在 loaded==false 时才会被调用，而它无论如何都会把 loaded 置 true。于是
+// 队列一满，被丢掉的那些格子就**永久空着** —— 正好是大目录、刚刷新完之后最容易撞上的情况
+// （一屏的请求涌进来，工作线程还卡在上一批大目录里）。现在把「没排上」如实回报调用方。
+static bool folderCountRequest(int idx) {
+    if (!items || idx < 0 || idx >= numItems) return true;
     struct ListItem* item = &items[idx];
     struct FileNode* node = item->node;
-    if (!node || node->type != TYPE_DIR) return;
-    if (node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN || item->countRequestId != 0) return;
+    if (!node || node->type != TYPE_DIR) return true;
+    // 已经有结果 / 已有在途请求：不需要再排
+    if (node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN || item->countRequestId != 0) return true;
 
     wchar_t path[MAX_PATH] = {0};
     getFileNodePath(node, path);
-    if (path[0] == L'\0') return;
+    if (path[0] == L'\0') return true;
 
     folderCountStart();
-    if (folderCountWorkerCount <= 0) return;
+    // 线程起不来（内存紧张）：别让调用方一直重试，就当这条查不了
+    if (folderCountWorkerCount <= 0) return true;
 
     unsigned requestId = ++folderCountRequestSeq;
     if (requestId == 0) requestId = ++folderCountRequestSeq;    // 跳过保留值 0
 
     EnterCriticalSection(&folderCountLock);
-    if (folderCountJobCount >= FOLDER_COUNT_QUEUE_MAX) { LeaveCriticalSection(&folderCountLock); return; }
+    if (folderCountJobCount >= FOLDER_COUNT_QUEUE_MAX) { LeaveCriticalSection(&folderCountLock); return false; }
     struct FolderCountJob* j = &folderCountJobs[folderCountJobTail];
     memset(j, 0, sizeof(*j));
     j->requestId = requestId;
@@ -1498,10 +1570,15 @@ static void folderCountRequest(int idx) {
     // 「本格有在途请求」的标记必须与入队放在同一临界区：否则后台可能在标记盖上之前就完成，
     // 主线程随即把结果吃掉 —— 而标记随后才盖上，那一格就再也不会排队了。
     item->countRequestId = requestId;
+    item->countRequestTick = GetTickCount();
     // SetEvent 也放在锁里：工作线程的「判空 → ResetEvent」在同一把锁内完成，两边不会
     // 交错成「先复位、后置位被吃掉」的丢唤醒。
     SetEvent(folderCountWake);
     LeaveCriticalSection(&folderCountLock);
+
+    // 挂上兜底对账：结果万一丢了（换目录打断 / 队列满 / 认领失败），300ms 后会重新排。
+    folderCountStartWatchdog();
+    return true;
 }
 
 // 接管后台数好的结果：写回 FileNode → 让那一行重新格式化 → 重画。**只由主线程调用**。
@@ -1512,7 +1589,6 @@ static void folderCountPump(void) {
     // 抽走；在这之后入队的，那时闸门已经是 0，工作线程必然重新投递。两边都不会漏。
     InterlockedExchange(&folderCountPostPending, 0);
 
-    int firstRedraw = -1, lastRedraw = -1;
     for (;;) {
         struct FolderCountDone done;
         EnterCriticalSection(&folderCountLock);
@@ -1529,21 +1605,76 @@ static void folderCountPump(void) {
         if (!node || node->type != TYPE_DIR) continue;
 
         items[done.idx].countRequestId = 0;
+        items[done.idx].countRequestTick = 0;
         if (done.count < 0) {
             node->childItemCount = CHILD_ITEM_COUNT_FAILED;   // 查过了、没结果，不再重试
             continue;
         }
         node->childItemCount = done.count;
-        // 让这一行下次取显示信息时重新格式化（loadItemData 会读到刚写回的 childItemCount）。
-        // 代价只是一行的重算：图标是缓存命中，时间/大小都是纯计算。
-        items[done.idx].loaded = false;
-        if (firstRedraw < 0) firstRedraw = done.idx;
-        lastRedraw = done.idx;
+        // **当场把文本算好、当场失效那一行**。旧写法只把 loaded 置回 false、指望「下一次
+        // 绘制顺手重新格式化」再靠 ListView_RedrawItems 触发重画 —— 这条链上任何一环没走到
+        // （消息和绘制谁先谁后、行矩形算得准不准、RedrawItems 失效到哪一列），屏幕上就是
+        // 「数字算出来了却不显示，再刷新或点一下才回来」。现在两步都自己做，不依赖时机。
+        formatFolderCountText(&items[done.idx]);
+        items[done.idx].loaded = false;   // 类型名/日期等仍让下次绘制补一遍（都是缓存命中）
+        invalidateItemRow(done.idx);
+    }
+}
+
+// 兜底对账：把「该有数字却没有」的可见行重新排一遍，**不依赖用户再点一次刷新**。
+//
+// 为什么需要它：一格要显示数字，得走过「请求入队 → 工作线程数完 → 结果入队 → 主线程认领
+// → 写回节点 → 画到屏上」这一长串，任何一环丢一次，那一格就永久空着 —— 而丢的时机与
+// 消息/绘制的先后有关，所以表现出来是**随机**的（有的格子出来了，有的没有，再刷新或点一下
+// 才回来）。与其去追每一种丢法，不如按**状态**兜底：只要一行还是「条目数未知」，就保证
+// 它迟早会被重新排上。
+//
+//   · 有在途标记但超过 FOLDER_COUNT_STUCK_MS 没回来 → 认定丢了，清标记重排
+//     （队列里那条即便后来回来，也会因为 requestId 不符被丢掉，不会写错数字）
+//   · 没有在途标记 → 直接重排
+// 只在还有没数出来的行时继续挂定时器，全部就绪就停；一轮只看可见区，代价与目录规模无关。
+static void folderCountReconcile(void) {
+    if (viewStyle != STYLE_DETAILS || !items || numItems <= 0) return;
+    if (folderCountWorkerCount <= 0) return;
+
+    int first = 0, last = 0;
+    visibleItemRange(&first, &last);
+    if (first < 0) first = 0;
+    if (last > numItems) last = numItems;
+
+    DWORD now = GetTickCount();
+    bool pending = false;
+    for (int i = first; i < last; i++) {
+        struct ListItem* item = &items[i];
+        if (!item->node || item->node->type != TYPE_DIR) continue;
+        if (item->node->childItemCount != CHILD_ITEM_COUNT_UNKNOWN) continue;
+
+        if (item->countRequestId != 0) {
+            if (now - item->countRequestTick < FOLDER_COUNT_STUCK_MS) { pending = true; continue; }
+            item->countRequestId = 0;      // 在途太久：当它丢了
+            item->countRequestTick = 0;
+        }
+        if (!folderCountRequest(i)) { pending = true; break; }   // 队列满：下一轮再来
+        // 排上之后仍然「无在途标记且数字未知」＝这一格根本排不进去（路径拼不出来，
+        // 见 folderCountRequest 的空路径分支）。标成失败即止，否则这一行每 300ms
+        // 都会把它重试一次，定时器永远停不下来。
+        if (item->countRequestId == 0 &&
+            item->node->childItemCount == CHILD_ITEM_COUNT_UNKNOWN) {
+            item->node->childItemCount = CHILD_ITEM_COUNT_FAILED;
+            continue;
+        }
+        pending = true;
     }
 
-    // RedrawItems 不擦背景（所以不闪），一次 pump 只重画一条连续区间，不需要再限流。
-    if (firstRedraw >= 0 && hwndContentView)
-        ListView_RedrawItems(hwndContentView, firstRedraw, lastRedraw);
+    if (pending) folderCountStartWatchdog();
+}
+
+// 惰性挂上对账定时器（已经在挂就不重复挂）。**只由主线程调用**。
+static void folderCountStartWatchdog(void) {
+    if (folderCountTimerPending || !hwndContentView) return;
+    if (SetTimer(hwndContentView, TIMER_FOLDER_COUNT, FOLDER_COUNT_WATCHDOG_MS, NULL)) {
+        folderCountTimerPending = true;
+    }
 }
 
 // 解析并登记条目对应的图标来源，返回图标 id（0 = 失败）。
@@ -2389,9 +2520,14 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     // lastScrollTick 已经过期，scheduleIconFill 会真的把消息投出去）；TIMER_ICON_PREFETCH
     // 是邻域预取的下一趟。定时器 id 不匹配就原样落给列表控件处理。
     if (msg == WM_TIMER && (wParam == TIMER_ICON_FILL || wParam == TIMER_ICON_PREFETCH ||
-                            wParam == TIMER_ICON_SCROLL)) {
+                            wParam == TIMER_ICON_SCROLL || wParam == TIMER_FOLDER_COUNT)) {
         KillTimer(hwnd, (UINT_PTR)wParam);
-        if (wParam == TIMER_ICON_FILL) {
+        if (wParam == TIMER_FOLDER_COUNT) {
+            // 条目数对账：把还空着的可见行重新排一遍，见 folderCountReconcile
+            folderCountTimerPending = false;
+            folderCountReconcile();
+        }
+        else if (wParam == TIMER_ICON_FILL) {
             iconFillTimerPending = false;
             iconFillDispatchTick = GetTickCount();
             scheduleIconFill();
@@ -2841,6 +2977,14 @@ static void addContextMenuSeparator(HMENU hMenu) {
     InsertMenuItem(hMenu, -1, TRUE, &item);
 }
 
+// 右键菜单里的「刷新」。动作与导航栏那个刷新按钮完全一致：重新枚举当前目录
+// （buildChildNodes）再重画内容区（refreshContentView），见 main.c 的 navigateRefresh。
+// 单独包一层而不是直接把 navigateRefresh 塞进 cmItem->proc，是为了保持「菜单回调」
+// 这一层的写法统一（其余菜单项也都是 onMenuItemXxxClick）。
+static void onMenuItemRefreshClick() {
+    navigateRefreshWithFeedback();
+}
+
 static void createContextMenu(enum ContextMenuType type) {
     HMENU hMenu = CreatePopupMenu();
     hContextMenu = hMenu;
@@ -2851,6 +2995,10 @@ static void createContextMenu(enum ContextMenuType type) {
     // 「清空剪贴板」在三种菜单形态里都出现，文字统一在这儿挂上
     // （addContextMenuItem 见到 text 为 NULL 会静默跳过这一项）
     cmiClearClipboard.text = lc_str.clear_clipboard;
+    cmiRefresh.text = lc_str.refresh;
+    // 搜索结果不是目录枚举出来的，刷新对它没有意义（navigateRefresh 里那一步会被
+    // refreshContentView 的「搜索进行中」判据挡掉）—— 置灰，别给一个点了没反应的项
+    cmiRefresh.disabled = isInSearchMode();
 
     if (type == MENU_SINGLE || type == MENU_MULTIPLE) {
         if (type == MENU_SINGLE) {
@@ -2899,8 +3047,10 @@ static void createContextMenu(enum ContextMenuType type) {
         addContextMenuItem(hMenu, id++, &cmiClearClipboard, false);
     }
     else {
-        // 空白处右键：剪贴板为空时「粘贴」置灰；有内容时在菜单项上
-        // 直接标出操作类型 / 条目数 / 源目录，让用户知道要粘贴的是什么
+        // 空白处右键：最上面是「刷新」（位置同资源管理器），下面接剪贴板那一组。
+        // 剪贴板为空时「粘贴」置灰；有内容时在菜单项上直接标出操作类型 / 条目数 / 源目录
+        addContextMenuItem(hMenu, id++, &cmiRefresh, true);
+
         bool hasClip = clipboardHasItems();
         static wchar_t pasteText[MAX_PATH + 192] = {0};
         if (hasClip) {
@@ -2983,6 +3133,9 @@ static HBRUSH getUiBrush(HBRUSH* slot, COLORREF color) {
 static void loadItemData(struct ListItem* item, int idx) {
     if (!item || !item->node || item->loaded) return;
     struct FileNode* node = item->node;
+    // 条目数这次没排上队（队列满）：这一格必须保持 loaded=false，让下一次绘制重新走一遍
+    // —— 图标与大小都是缓存命中，重走一遍只是几次纯计算，比永久空着一格划算得多。
+    bool countDeferred = false;
 
     // 图标与类型名都由自建图标库一次性给出：resolveIconId 内部按「路径 / 扩展名 /
     // 固定标识」去重，命中已登记项时连 shell 都不碰，所以这里的代价与目录规模无关。
@@ -2999,14 +3152,9 @@ static void loadItemData(struct ListItem* item, int idx) {
         // 绝不能在这里同步枚举目录：本函数的调用点有两个在绘制帧上（itemIconReady /
         // iconFillRangeInner），详见「后台文件夹条目数计数」一节。
         // 只有详细信息视图有「大小」这一列，图标/列表视图不必白白去枚举目录。
-        if (node->childItemCount >= 0) {
-            if (node->childItemCount >= FOLDER_COUNT_CAP)
-                swprintfTrunc(item->formattedSize, 64, L"%d+ %ls", node->childItemCount, lc_str.items);
-            else
-                swprintfTrunc(item->formattedSize, 64, L"%d %ls", node->childItemCount, lc_str.items);
-        }
-        else if (viewStyle == STYLE_DETAILS) {
-            folderCountRequest(idx);
+        formatFolderCountText(item);
+        if (node->childItemCount < 0 && viewStyle == STYLE_DETAILS) {
+            countDeferred = !folderCountRequest(idx);
         }
     }
     else if (node->type == TYPE_DRIVE) {
@@ -3034,7 +3182,7 @@ static void loadItemData(struct ListItem* item, int idx) {
         }
     }
 
-    item->loaded = true;
+    item->loaded = !countDeferred;
 }
 
 // 大图标视图条目自绘。Wine 的 ListView 默认只给非选中项画一行截断的文件名
@@ -6974,6 +7122,28 @@ static void scheduleIconFill(void) {
     // 投递失败必须把闸复位：这个闸是「同一时刻只挂一条」的唯一凭据，一旦卡在 true，
     // 之后所有补齐调度都会被它挡掉，整个图标子系统就再也不动了。
     if (!PostMessage(hwndContentView, MSG_ICON_FILL, 0, 0)) iconFillPosted = false;
+}
+
+// 「刷新」的视觉反馈：把内容区清空并立刻画一帧。
+//
+// 为什么要这个：小目录重建只要几毫秒（170 项时整个 refreshContentView 不到 10ms），
+// 屏幕上前后两帧一模一样，用户点完「刷新」会觉得没反应。资源管理器是靠「先清空再重画」
+// 那一下闪烁传达「刷新过了」的，这里照做：条目数置 0 → UpdateWindow 逼一次绘制 →
+// 调用方隔 REFRESH_FLASH_MS 再重建。
+//
+// 只对**小目录**表演（<= REFRESH_FLASH_MAX_ITEMS）：大目录重建本身就要上百毫秒，屏幕上
+// 自然看得出来，再加一次空白只会显得卡。
+//
+// 注意这只是「把行藏起来」，items[] / FileNode 一概不动 —— 那 70ms 里后台的图标补齐、
+// 条目数对账定时器都可能触发，它们读的必须还是有效数据（真正的释放与重建在调用方那边
+// 整体推迟，见 main.c 的 navigateRefresh）。
+bool refreshFlashBegin(void) {
+    if (!hwndContentView || !items || numItems <= 0) return false;
+    if (numItems > REFRESH_FLASH_MAX_ITEMS) return false;
+
+    ListView_SetItemCountEx(hwndContentView, 0, 0);
+    UpdateWindow(hwndContentView);   // 同步画一帧：这一步才是「闪」的那一帧
+    return true;
 }
 
 void refreshContentView() {

@@ -292,6 +292,8 @@ struct LC_STR {
     wchar_t* drive_usage_bar_graph;
     wchar_t* drive_usage_bar_total;
     wchar_t* drive_usage_bar_none;
+    // 空白处右键菜单里的「刷新」：和导航栏那个刷新按钮同一个动作
+    wchar_t* refresh;
     // 侧边栏两个固定入口的名字：%TEMP% 与开始菜单目录
     wchar_t* temp_folder;
     wchar_t* start_menu;

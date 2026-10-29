@@ -362,7 +362,7 @@ LRESULT CALLBACK NavbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 SetFocus(hwndContentView);
             }
             else if (hwndControl == hwndRefreshButton) {
-                navigateRefresh();
+                navigateRefreshWithFeedback();
                 SetFocus(hwndContentView);
             }
             else if (hwndControl == hwndSearchButton) {

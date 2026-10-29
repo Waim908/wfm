@@ -64,6 +64,8 @@ void navigateToFileNode(struct FileNode* node);
 void navigateToPath(wchar_t* path);
 void navigateUp();
 void navigateRefresh();
+// 显式「刷新」（工具栏按钮 / 右键菜单）：小目录会先空一帧再重建，给一点视觉反馈
+void navigateRefreshWithFeedback();
 void openFileNode(struct FileNode* node);
 // 剪贴板内容变化（复制/剪切/粘贴完成）后由 file_actions 调用，
 // 负责同步状态栏指示、工具栏粘贴按钮和编辑菜单的可用状态

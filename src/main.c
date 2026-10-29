@@ -494,8 +494,23 @@ void resizeControls() {
     SetWindowPos(hwndContentView, NULL, contentViewX, navbarRect.bottom, rect.right - contentViewX, treeviewHeight, SWP_NOZORDER);  
 }
 
+// 「刷新」的闪一下（定义与说明见下面的 navigateRefresh）。放在这里是因为 MainWndProc
+// 的 WM_TIMER 也要用到它们。
+static bool refreshFlashPending = false;
+static void navigateRefreshNow(void);
+
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) { 
+        case WM_TIMER: {
+            // 「刷新」那一下闪完之后的真正重建（见 navigateRefresh）
+            if (wParam == TIMER_REFRESH_FLASH) {
+                KillTimer(hwnd, TIMER_REFRESH_FLASH);
+                refreshFlashPending = false;
+                navigateRefreshNow();
+                return 0;
+            }
+            break;
+        }
         case WM_SIZE: {
             resizeControls();
             break;
@@ -602,22 +617,53 @@ void navigateUp() {
     }
 }
 
+// 「刷新」要不要先表演一下（小目录点下去屏幕上什么都没变，像是没反应）。
+// 见 content_view.c 的 refreshFlashBegin：它把内容区清空并立刻画一帧，返回 true 表示
+// 这一帧已经画完、真正的重建应当等 REFRESH_FLASH_MS 之后再做。
+// 期间 items[] 与 FileNode 树**都还是原样**（只是控件暂时不显示行）—— 所以那 70ms 里
+// 图标补齐、条目数对账这些定时器读到的东西仍然有效。这也正是「整段重建一起推迟」而不是
+// 「只推迟 refreshContentView」的原因：buildChildNodes 会先释放旧节点。
+// 导航用的刷新：不表演，直接重建（换目录时内容本来就会整屏换掉，再空一帧只是多等 70ms）。
 void navigateRefresh() {
-    if (currPathFileNode) {
-        buildChildNodes(currPathFileNode, false);
-        // 从这一刻起内容区才第一次有真东西。setViewStyle 用它判断「启动首次应用样式」
-        // （那时 children 还是空的）与「运行期切视图」（必须刷新），见 content_view.c。
-        hasNavigatedContent = true;
+    navigateRefreshNow();
+}
 
-        // S15：标题栏显示完整路径（原来只有最后一级目录名，用户无从判断所在位置）。
-        // 「此电脑」「书签」等虚拟节点没有文件系统路径，退回显示节点名。
-        wchar_t fullPath[MAX_PATH] = {0};
-        getFileNodePath(currPathFileNode, fullPath);
-        SetWindowText(hwndMain, fullPath[0] != L'\0' ? fullPath : currPathFileNode->name);
+// 显式「刷新」（工具栏按钮 / 右键菜单里的刷新）：小目录重建太快、屏幕上看不出变化，
+// 先空一帧再重建 —— 就是资源管理器那种闪一下。
+void navigateRefreshWithFeedback() {
+    if (!currPathFileNode) return;
 
-        updateAddrButtons();
-        refreshContentView();
+    if (!refreshFlashPending && refreshFlashBegin()) {
+        refreshFlashPending = true;
+        if (SetTimer(hwndMain, TIMER_REFRESH_FLASH, REFRESH_FLASH_MS, NULL)) return;
+        refreshFlashPending = false;      // 定时器挂不上：别把内容留在空白状态
     }
+    navigateRefreshNow();
+}
+
+static void navigateRefreshNow() {
+    if (refreshFlashPending) {
+        KillTimer(hwndMain, TIMER_REFRESH_FLASH);
+        refreshFlashPending = false;
+    }
+    // 当前目录为空（还没初始化 / 刚被清掉）就什么都不做。这个判断原来在外层
+    // navigateRefresh 里，拆成两段之后三个入口（直接刷新、带反馈刷新、闪完的定时器）
+    // 都走这里，所以必须在最里面守一次，否则下面两处都会解引用空指针。
+    if (!currPathFileNode) return;
+
+    buildChildNodes(currPathFileNode, false);
+    // 从这一刻起内容区才第一次有真东西。setViewStyle 用它判断「启动首次应用样式」
+    // （那时 children 还是空的）与「运行期切视图」（必须刷新），见 content_view.c。
+    hasNavigatedContent = true;
+
+    // S15：标题栏显示完整路径（原来只有最后一级目录名，用户无从判断所在位置）。
+    // 「此电脑」「书签」等虚拟节点没有文件系统路径，退回显示节点名。
+    wchar_t fullPath[MAX_PATH] = {0};
+    getFileNodePath(currPathFileNode, fullPath);
+    SetWindowText(hwndMain, fullPath[0] != L'\0' ? fullPath : currPathFileNode->name);
+
+    updateAddrButtons();
+    refreshContentView();
 }
 
 void openFileNode(struct FileNode* node) {

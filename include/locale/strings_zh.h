@@ -150,6 +150,7 @@ static inline void loadStrings_zh() {
     lc_str.drive_usage_bar_total = L"仅总容量";
     lc_str.drive_usage_bar_none = L"不显示";
     lc_str.drive_usage_bar = L"磁盘占用显示";
+    lc_str.refresh = L"刷新";
     lc_str.temp_folder = L"临时文件夹";
     lc_str.start_menu = L"开始菜单";
 }

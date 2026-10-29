@@ -27,6 +27,14 @@ void refreshContentView();
 void setViewStyle(enum ViewStyle newViewStyle);
 void searchFor(wchar_t* keyword);
 
+// 「刷新」的视觉反馈（见 main.c 的 navigateRefresh）：把内容区清空并**立刻**画一帧，
+// 让用户看到「刷新过了」。目录太大时返回 false —— 那种目录重建本身就要上百毫秒，屏幕上
+// 自然看得出来，不需要额外表演。返回值 true 表示调用方应当隔 REFRESH_FLASH_MS 再重建。
+bool refreshFlashBegin(void);
+#define TIMER_REFRESH_FLASH        0x7FFA   // 定时器号段同 content_view.c 里的 TIMER_*
+#define REFRESH_FLASH_MS           70
+#define REFRESH_FLASH_MAX_ITEMS    400      // 超过这么多条目就不表演了
+
 void onMenuItemUpClick();
 void onMenuItemOpenClick();
 void onMenuItemEditClick();

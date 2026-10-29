@@ -153,6 +153,7 @@ static inline void loadStrings_en() {
     lc_str.drive_usage_bar_total = L"Total Size Only";
     lc_str.drive_usage_bar_none = L"Hidden";
     lc_str.drive_usage_bar = L"Drive Usage Display";
+    lc_str.refresh = L"Refresh";
     lc_str.temp_folder = L"Temp";
     lc_str.start_menu = L"Start Menu";
 }
