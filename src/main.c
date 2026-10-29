@@ -69,8 +69,11 @@ void updateGuiFont() {
 // bool 判断，正常启动一行都不输出、不多花一次 GetTickCount。
 //
 // 用法：WFM_STARTUP_TRACE=1 wine wfm 2>&1 | grep WFM-STARTUP
+//       WFM_STARTUP_LOG='C:\wfm.log' wine wfm     # 改用文件（GUI 子进程拿不到父进程 stderr）
 //       +N ms  = 距上一个打点的增量（就是这一段自己花的时间）
 //       t=N ms = 距 WinMain 开头的累计值
+//
+// 日志文件的语义：**每次启动覆盖，同一时刻只允许一个实例写**。原因见 startupOutHandle。
 // ---------------------------------------------------------------------------
 static DWORD startupTraceT0 = 0;
 static DWORD startupTracePrev = 0;
@@ -81,6 +84,15 @@ static bool  startupOutTried = false;
 // 打点的输出去向。默认 stderr，但**经由 explorer / shell 启动时拿不到父进程的 stderr**：
 // wine 对无 console 的 GUI 子进程另发一个 pipe，那些字节根本不会落进启动器的日志文件。
 // 所以再给一个 WFM_STARTUP_LOG=<路径>，非空就用它自己开文件写，和父进程无关。
+//
+// 打开方式有两个约束，都是踩过的：
+//   · CREATE_ALWAYS（每次启动覆盖）。原来用 OPEN_ALWAYS + FILE_APPEND_DATA 一路追加，
+//     跑几次以后文件里就是好几个进程的记录首尾相接，而每段的 t= 都是从自己进程的
+//     t=0 重新算的 —— 混在一起只会误导。诊断日志就该「一次启动一段」。
+//   · 共享只给 FILE_SHARE_READ（同一时刻只允许一个写者）。原来还给了 FILE_SHARE_WRITE，
+//     于是开两个窗口时第二个实例也能打开同一个文件，两个句柄各自推进自己的文件指针，
+//     两个进程的行交错在一起，谁也读不出来。现在第二个实例拿到的是共享冲突、打不开，
+//     于是退回 stderr（见函数末尾的回退）—— 不崩、也不碰第一份日志。
 static HANDLE startupOutHandle(void) {
     if (!startupOutTried) {
         char path[MAX_PATH];
@@ -89,8 +101,8 @@ static HANDLE startupOutHandle(void) {
         startupOutTried = true;
         // 环境变量比 MAX_PATH 长算失败，不猜路径
         if ((n = GetEnvironmentVariableA("WFM_STARTUP_LOG", path, MAX_PATH)) > 0 && n < MAX_PATH) {
-            startupOut = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                     NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            startupOut = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ,
+                                     NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         }
     }
     if (startupOut != INVALID_HANDLE_VALUE) return startupOut;
