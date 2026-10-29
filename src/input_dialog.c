@@ -35,6 +35,13 @@ INT_PTR CALLBACK InputDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
                 EndDialog(hwndDlg, LOWORD(wParam));
                 return (INT_PTR)TRUE;
             }
+            else if (LOWORD(wParam) == IDC_BTN_CLEAR_EDIT) {
+                // 清空输入框并把焦点交回去：重命名长文件名时「整个换掉」比划着删快
+                HWND hwndEdit = GetDlgItem(hwndDlg, IDC_EDIT);
+                SetWindowText(hwndEdit, L"");
+                SendMessage(hwndDlg, WM_NEXTDLGCTL, (WPARAM)hwndEdit, TRUE);
+                return (INT_PTR)TRUE;
+            }
             break;
         }
         case WM_INITDIALOG: {

@@ -110,6 +110,8 @@
 // MessageBox 的宽度只按「正文 + 按钮」算，标题比它宽时会被截成省略号。
 #define IDD_CONFIRM_EXIT 280
 #define IDC_CONFIRM_TEXT 281
+// 输入对话框（重命名 / 新建文件夹 / 新建文件）编辑框右端的「清空」按钮
+#define IDC_BTN_CLEAR_EDIT 282
 
 #define ICON_UP          0
 #define ICON_COPY        1
