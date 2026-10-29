@@ -44,12 +44,29 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 #define IMG_CLASS_NAME          L"WFMImageViewer"
 #define IMG_PIXEL_FORMAT_ARGB   0x0026200A   // PixelFormat32bppARGB
 #define IMG_INTERP_HQ_BICUBIC   7            // InterpolationModeHighQualityBicubic
+#define IMG_INTERP_BILINEAR     3            // InterpolationModeBilinear（滚轮预览用）
 #define IMG_BG_RGB              RGB(24, 24, 24)
 // 降采样缓存的边长上限。一张 32bpp 位图的大小是 w*h*4，2560 就是 26 MB；
 // 再大对「在窗口里看图」没有意义，只会白吃内存。
 #define IMG_MAX_DIM             2560
 #define IMG_MAX_ZOOM            8.0
 #define IMG_MAX_FILES           4096
+
+// 底部按钮条高度。图像区域是「客户区减去这一条」。
+#define IMG_BAR_H               36
+#define IMG_BTN_W               40
+#define IMG_BTN_H               26
+#define IMG_BTN_GAP             6
+// 滚轮停下多久之后才做高质量重采样。滚动过程中先用旧缓存拉伸预览，手感才跟得上。
+#define IMG_ZOOM_DELAY_MS       140
+#define IMG_TIMER_ZOOM          1
+
+#define IMG_ID_PREV             4001
+#define IMG_ID_NEXT             4002
+#define IMG_ID_ZOOM_OUT         4003
+#define IMG_ID_ZOOM_IN          4004
+#define IMG_ID_FIT              4005
+#define IMG_ID_CLOSE            4006
 
 static HWND hwndViewer = NULL;
 
@@ -62,6 +79,14 @@ static int imgPanX = 0, imgPanY = 0; // 相对「居中显示」位置的偏移
 
 static wchar_t imgPath[MAX_PATH] = {0};
 static wchar_t imgDir[MAX_PATH] = {0};
+
+// 底部按钮条
+static HWND imgBtnPrev = NULL, imgBtnNext = NULL;
+static HWND imgBtnZoomOut = NULL, imgBtnZoomIn = NULL;
+static HWND imgBtnFit = NULL, imgBtnClose = NULL;
+
+// 定义在后面（挨着窗口过程），viewerLoad 会用到
+static void viewerUpdateButtons(void);
 
 // 同目录里的图片名，供左右键翻页
 static wchar_t** siblingNames = NULL;
@@ -110,35 +135,54 @@ static void viewerFreeSiblings(void) {
     siblingIndex = -1;
 }
 
-// 按当前窗口尺寸与缩放比例重做降采样缓存
-static void viewerRebuildScaled(void) {
-    if (!hwndViewer || !imgSrc) return;
-
+// 图像区域 = 客户区减去底部按钮条
+static void viewerImageArea(int* cw, int* ch) {
     RECT rc;
     GetClientRect(hwndViewer, &rc);
-    int cw = rc.right - rc.left;
-    int ch = rc.bottom - rc.top;
-    if (cw < 1 || ch < 1) return;
+    *cw = rc.right - rc.left;
+    *ch = rc.bottom - rc.top - IMG_BAR_H;
+    if (*cw < 1) *cw = 1;
+    if (*ch < 1) *ch = 1;
+}
 
-    // 适应窗口的比例（取两个方向里较小的那个，整张图都放进窗口）
+// 当前该显示多大：适应窗口的比例 × imgZoom，再受 IMG_MAX_DIM 封顶。
+// 绘制和重采样都用它，保证两边算出来的尺寸永远一致。
+static void viewerTargetSize(int* dw, int* dh) {
+    *dw = 1;
+    *dh = 1;
+    if (!imgSrcW || !imgSrcH) return;
+
+    int cw = 0, ch = 0;
+    viewerImageArea(&cw, &ch);
+
     double fitX = (double)cw / (double)imgSrcW;
     double fitY = (double)ch / (double)imgSrcH;
     double s = ((fitX < fitY) ? fitX : fitY) * imgZoom;
 
-    int dw = (int)((double)imgSrcW * s + 0.5);
-    int dh = (int)((double)imgSrcH * s + 0.5);
-    if (dw < 1) dw = 1;
-    if (dh < 1) dh = 1;
+    int w = (int)((double)imgSrcW * s + 0.5);
+    int h = (int)((double)imgSrcH * s + 0.5);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
     // 超上限就等比缩下来：宁可少放大，也不要为了一张缓存吃掉几十 MB
-    if (dw > IMG_MAX_DIM || dh > IMG_MAX_DIM) {
-        int biggest = (dw > dh) ? dw : dh;
+    if (w > IMG_MAX_DIM || h > IMG_MAX_DIM) {
+        int biggest = (w > h) ? w : h;
         double k = (double)IMG_MAX_DIM / (double)biggest;
-        dw = (int)((double)dw * k);
-        dh = (int)((double)dh * k);
-        if (dw < 1) dw = 1;
-        if (dh < 1) dh = 1;
+        w = (int)((double)w * k);
+        h = (int)((double)h * k);
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
     }
+    *dw = w;
+    *dh = h;
+}
 
+// 按目标尺寸重做降采样缓存。高质量重采样只在这里做 —— 绘制时永远是「有缓存就贴」，
+// 所以滚轮连滚也不会每格都跑一次 bicubic。
+static void viewerRebuildScaled(void) {
+    if (!hwndViewer || !imgSrc) return;
+
+    int dw = 0, dh = 0;
+    viewerTargetSize(&dw, &dh);
     if (dw == imgScaledW && dh == imgScaledH && imgScaled) return;   // 尺寸没变，缓存还能用
 
     viewerFreeScaled();
@@ -259,9 +303,13 @@ static bool viewerLoad(const wchar_t* fullPath) {
 
     imgZoom = 1.0;
     imgPanX = imgPanY = 0;
-    viewerRebuildScaled();
+    viewerRebuildScaled();     // 换图时直接做一次高质量重采样
     viewerUpdateTitle();
-    if (hwndViewer) InvalidateRect(hwndViewer, NULL, TRUE);
+    viewerUpdateButtons();
+    if (hwndViewer) {
+        KillTimer(hwndViewer, IMG_TIMER_ZOOM);
+        InvalidateRect(hwndViewer, NULL, TRUE);
+    }
     return true;
 }
 
@@ -278,15 +326,54 @@ static void viewerStep(int delta) {
     }
 }
 
+// 高质量重采样推迟到「停止操作 140ms 之后」。期间绘制用的是旧缓存的拉伸预览，
+// 所以连滚滚轮不会有每格一次的 bicubic 卡顿。
+static void viewerArmZoomRebuild(void) {
+    if (!hwndViewer) return;
+    KillTimer(hwndViewer, IMG_TIMER_ZOOM);
+    SetTimer(hwndViewer, IMG_TIMER_ZOOM, IMG_ZOOM_DELAY_MS, NULL);
+}
+
 static void viewerZoomBy(double factor) {
     double z = imgZoom * factor;
     if (z < 1.0) z = 1.0;
     if (z > IMG_MAX_ZOOM) z = IMG_MAX_ZOOM;
     if (z == imgZoom) return;
     imgZoom = z;
-    viewerRebuildScaled();
     viewerUpdateTitle();
-    InvalidateRect(hwndViewer, NULL, TRUE);
+    InvalidateRect(hwndViewer, NULL, FALSE);   // 先用旧缓存拉伸预览
+    viewerArmZoomRebuild();
+}
+
+// 底部按钮条：全部居中排在客户区最下一条里
+static void viewerLayoutButtons(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    HWND btns[6] = { imgBtnPrev, imgBtnNext, imgBtnZoomOut, imgBtnZoomIn, imgBtnFit, imgBtnClose };
+    const int n = 6;
+    int total = n * IMG_BTN_W + (n - 1) * IMG_BTN_GAP;
+    int x = (rc.right - total) / 2;
+    if (x < 4) x = 4;
+    int y = rc.bottom - IMG_BAR_H + (IMG_BAR_H - IMG_BTN_H) / 2;
+    for (int i = 0; i < n; i++) {
+        if (btns[i]) SetWindowPos(btns[i], NULL, x, y, IMG_BTN_W, IMG_BTN_H, SWP_NOZORDER);
+        x += IMG_BTN_W + IMG_BTN_GAP;
+    }
+}
+
+static HWND viewerCreateButton(HWND parent, const wchar_t* text, int id) {
+    HWND b = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                             0, 0, IMG_BTN_W, IMG_BTN_H, parent, (HMENU)(INT_PTR)id,
+                             globalHInstance, NULL);
+    if (b && hGuiFont) SendMessageW(b, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+    return b;
+}
+
+// 翻页按钮在没有同目录图片时置灰，避免点了没反应
+static void viewerUpdateButtons(void) {
+    BOOL multi = (siblingCount > 1) ? TRUE : FALSE;
+    if (imgBtnPrev) EnableWindow(imgBtnPrev, multi);
+    if (imgBtnNext) EnableWindow(imgBtnNext, multi);
 }
 
 static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -295,6 +382,49 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     static int panStartX = 0, panStartY = 0;
 
     switch (msg) {
+        case WM_CREATE:
+            imgBtnPrev    = viewerCreateButton(hwnd, L"\u25C0", IMG_ID_PREV);
+            imgBtnNext    = viewerCreateButton(hwnd, L"\u25B6", IMG_ID_NEXT);
+            imgBtnZoomOut = viewerCreateButton(hwnd, L"\u2212", IMG_ID_ZOOM_OUT);
+            imgBtnZoomIn  = viewerCreateButton(hwnd, L"+",      IMG_ID_ZOOM_IN);
+            imgBtnFit     = viewerCreateButton(hwnd, L"100%",   IMG_ID_FIT);
+            imgBtnClose   = viewerCreateButton(hwnd, L"\u00D7", IMG_ID_CLOSE);
+            viewerUpdateButtons();
+            viewerLayoutButtons(hwnd);
+            return 0;
+
+        case WM_COMMAND: {
+            if (HIWORD(wParam) != BN_CLICKED) break;
+            switch (LOWORD(wParam)) {
+                case IMG_ID_PREV:     viewerStep(-1); break;
+                case IMG_ID_NEXT:     viewerStep(1);  break;
+                case IMG_ID_ZOOM_OUT: viewerZoomBy(0.8); break;
+                case IMG_ID_ZOOM_IN:  viewerZoomBy(1.25); break;
+                case IMG_ID_FIT:
+                    imgZoom = 1.0;
+                    imgPanX = imgPanY = 0;
+                    viewerRebuildScaled();
+                    viewerUpdateTitle();
+                    InvalidateRect(hwnd, NULL, TRUE);
+                    break;
+                case IMG_ID_CLOSE:
+                    DestroyWindow(hwnd);
+                    return 0;
+            }
+            // 点完按钮把焦点还给窗口，否则方向键翻页和 Esc 关闭就失效了（焦点停在按钮上）
+            SetFocus(hwnd);
+            return 0;
+        }
+
+        case WM_TIMER:
+            if (wParam == IMG_TIMER_ZOOM) {
+                KillTimer(hwnd, IMG_TIMER_ZOOM);
+                viewerRebuildScaled();          // 这一刻才做高质量重采样
+                InvalidateRect(hwnd, NULL, TRUE);
+                return 0;
+            }
+            break;
+
         case WM_ERASEBKGND:
             return 1;      // 背景由 WM_PAINT 一次画完，避免闪烁
 
@@ -307,13 +437,22 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             HBRUSH bg = CreateSolidBrush(IMG_BG_RGB);
             if (bg) { FillRect(hdc, &rc, bg); DeleteObject(bg); }
 
-            if (imgScaled && imgScaledW > 0 && imgScaledH > 0) {
+            if (imgScaled) {
+                int dw = 0, dh = 0;
+                viewerTargetSize(&dw, &dh);
+                int cw = rc.right - rc.left;
+                int ch = rc.bottom - rc.top - IMG_BAR_H;
+                if (ch < 1) ch = 1;
+
                 GpGraphics* g = NULL;
                 if (GdipCreateFromHDC(hdc, &g) == GpOk && g) {
-                    int x = (rc.right - imgScaledW) / 2 + imgPanX;
-                    int y = (rc.bottom - imgScaledH) / 2 + imgPanY;
-                    // 缓存就是按显示尺寸做的，这里是 1:1 贴，不再重采样
-                    GdipDrawImageRectI(g, (GpImage*)imgScaled, x, y, imgScaledW, imgScaledH);
+                    // 缓存尺寸与目标一致时这是 1:1 贴；滚轮刚动、缓存还没重做时，这里把
+                    // 旧缓存拉伸成临时预览（bilinear，够快），等去抖定时器到了再换成
+                    // 高质量重采样的结果 —— 这样连滚不会每格都卡一下。
+                    GdipSetInterpolationMode(g, IMG_INTERP_BILINEAR);
+                    int x = (cw - dw) / 2 + imgPanX;
+                    int y = (ch - dh) / 2 + imgPanY;
+                    GdipDrawImageRectI(g, (GpImage*)imgScaled, x, y, dw, dh);
                     GdipDeleteGraphics(g);
                 }
             }
@@ -322,12 +461,13 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
 
         case WM_SIZE:
-            // 窗口尺寸变了：适应比例跟着变，缓存必须重做
+            viewerLayoutButtons(hwnd);
             if (imgSrc) {
-                bool wasFit = (imgZoom <= 1.0001);
-                if (wasFit) { imgPanX = imgPanY = 0; }
-                viewerRebuildScaled();
+                // 适应窗口时保持居中；放大后保留用户的平移位置
+                if (imgZoom <= 1.0001) { imgPanX = imgPanY = 0; }
                 viewerUpdateTitle();
+                InvalidateRect(hwnd, NULL, FALSE);   // 先拉伸预览
+                viewerArmZoomRebuild();              // 尺寸稳定后再高质量重做
             }
             return 0;
 
@@ -396,8 +536,10 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return DLGC_WANTARROWS | DLGC_WANTCHARS;
 
         case WM_DESTROY:
+            KillTimer(hwnd, IMG_TIMER_ZOOM);
             viewerFreeSource();
             viewerFreeSiblings();
+            imgBtnPrev = imgBtnNext = imgBtnZoomOut = imgBtnZoomIn = imgBtnFit = imgBtnClose = NULL;
             hwndViewer = NULL;
             return 0;
     }
