@@ -31,15 +31,30 @@ static void updateTreeItemsDeep(HTREEITEM parentItem, struct FileNode* parentNod
         if (getFileNodePath(parentNode, parentPath)) wcscat_s(parentPath, MAX_PATH, L"\\");
         wchar_t path[MAX_PATH] = {0};
 
-        HIMAGELIST himlBig, himlSmall;
-        Shell_GetImageLists(&himlBig, &himlSmall);
-        TreeView_SetImageList(hwndTreeview, himlSmall, TVSIL_NORMAL);
+        // 这里**不再**重挂图像列表：updateTreeItems 在建树前已经用 Shell_GetImageLists
+        // 拿同一份 shell 小图标列表挂上了（同一节里那段长注释解释过为什么用
+        // Shell_GetImageLists 而不是绕 PIDL），展开节点走的也是这条路径。
+        // TreeView_SetImageList 会让控件按新列表把整棵树重排重画一遍，白做。
+
+        // 目录图标只取一次：树里只放目录（buildChildNodes(node, true)），而 TYPE_DIR 那条
+        // 分支用的是 SHGFI_USEFILEATTRIBUTES + FILE_ATTRIBUTE_DIRECTORY，图标与路径无关，
+        // 每个目录拿到的 iIcon 都一样。旧实现每插一个子项就 SHGetFileInfo 一次，展开一个
+        // 几百个子目录的节点就是几百次 shell 调用去换同一个数字。
+        // 其它类型（驱动器）的图标与路径有关，仍然逐项取。
+        int dirIcon = -1;
 
         struct FileNode* node = parentNode->children;
         do {
             swprintf_s(path, MAX_PATH, L"%ls%ls", parentPath, node->name);
 
-            int iconIndex = getTreeIcon(path, node->type);
+            int iconIndex;
+            if (node->type == TYPE_DIR) {
+                if (dirIcon < 0) dirIcon = getTreeIcon(path, TYPE_DIR);
+                iconIndex = dirIcon;
+            }
+            else {
+                iconIndex = getTreeIcon(path, node->type);
+            }
 
             bool isExpandable = node->hasChildDirs;
             // 用户、文档、临时目录、开始菜单都是「点一下就导航」的叶子项，不给展开/折叠按钮
