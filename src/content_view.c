@@ -93,6 +93,9 @@ static bool preScrollFromTimer;      // 这次调用来自「押后期间的重�
 static DWORD lastScrollTick;
 static bool iconFillTimerPending;      // 已经挂了一个「等滚动静默」的定时器
 static bool iconPrefetchTimerPending;  // 已经挂了一个预取定时器
+// 「这一次绘制是背景图重贴触发的整屏重画」。整屏重画会让绘制路径对整屏可见项逐个要图标，
+// 目标区域还没渲过时等于每帧都要渲一整屏 —— 帧时间被拉长，滚动就一顿一顿的（见 WM_PAINT）。
+static bool bgScrollRefresh;
 static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工（0 = 允许预取）
 // 不用 1 这种小号：Wine 的 listview 内部也用 SetTimer（滚动条按住时的连续滚动，
 // 见 comctl32/listview.c:4079，它的 id 是 (UINT_PTR)infoPtr），号段留开更省心。
@@ -2624,7 +2627,20 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         // （.dll 这类共享项一个 id 点亮整屏，通常个位数到十几个），又不会让拖动变粘。
         DWORD now = GetTickCount();
         bool scrollDriven = inScrollMessage || (now - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS);
-        if (scrollDriven) {
+        if (bgScrollRefresh) {
+            // 这一帧是「背景图重贴」带出来的整屏重画（滚动前我们标脏了整块客户区）。
+            // 整屏重画会让绘制路径对**整屏**可见项逐个要图标：池里已就绪的是免费命中，
+            // 但目标区域还没渲过时，就等于每帧都要就地渲一整屏 —— 额度瞬间打到上限、
+            // 时间上限也吃满，帧时间从几毫秒变成二三十毫秒，滚动起来就是一顿一顿的。
+            // 而它「划几下之后就不抖」，正是因为那一片图标都进池了。
+            //
+            // 所以这类绘制只给最低额度：这一帧最多点亮几个来源，剩下的留给滚动静默后的
+            // 补齐与邻域预取。帧时间是平的，代价是新露出的行可能空一两帧。
+            bgScrollRefresh = false;
+            iconPaintRenderBudget = 2;
+            iconPaintRenderDeadline = now + 6;
+        }
+        else if (scrollDriven) {
             int quota = visibleIconSpan();
             if (quota < ICON_PAINT_RENDER_MIN) quota = ICON_PAINT_RENDER_MIN;
             if (quota > ICON_PAINT_RENDER_CAP) quota = ICON_PAINT_RENDER_CAP;
@@ -2840,6 +2856,9 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         wParam == VK_RIGHT || wParam == VK_PRIOR || wParam == VK_NEXT ||
                         wParam == VK_HOME  || wParam == VK_END)));
     if (mayScroll && !preScrolled && hasBackgroundImage()) {
+        // 标成「这一帧是背景重贴带出来的整屏重画」：WM_PAINT 里据此把图标渲染额度压到最低，
+        // 否则整屏重画会在每次滚动时都把额度打满（详见 WM_PAINT 处）。
+        bgScrollRefresh = true;
         InvalidateRect(hwnd, NULL, TRUE);
     }
     // preScrolled：这条滚动已经在 preScrollHandleVScroll 里处理过了（它自己发过滚动消息：
@@ -7098,7 +7117,10 @@ static void preScrollApply(UINT code) {
     // 于是滚完整屏背景都错位。事先标脏，它末尾那次 UpdateWindow 就会整屏重画，
     // 背景按客户区坐标重贴、行画在新位置，一次画对，没有中间帧。
     // 这条路径绕过了 ContentViewWndProc 的消息转发（直接调 OrigWndProc），那边兜不住。
-    if (hasBackgroundImage()) InvalidateRect(hwndContentView, NULL, TRUE);
+    if (hasBackgroundImage()) {
+        bgScrollRefresh = true;      // 同上：这一帧只贴背景，不就地渲图标
+        InvalidateRect(hwndContentView, NULL, TRUE);
+    }
     OrigWndProc(hwndContentView, WM_VSCROLL, MAKEWPARAM(code, 0), 0);
     inScrollMessage = false;
     inPreScroll = false;
