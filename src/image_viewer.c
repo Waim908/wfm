@@ -15,9 +15,13 @@ extern HWND hwndMain;
 // 渲染走 GDI+ 直接画到窗口 DC：不用内存 DC / 双缓冲 —— 项目里已有结论，Wine 的
 // GL 合成下那条路会不显示（见 content_view.c 里 LVS_EX_DOUBLEBUFFER 那段注释）。
 //
-// 缩放的关键是**别每帧重采样**：解码一次原图，按当前显示尺寸预先做一张降采样缓
-// 存（imgScaled），绘制时只是把它 1:1 贴到窗口上。只有换图 / 改窗口大小 / 缩放时
-// 才重做缓存。
+// 缩放的关键是**别每帧重采样**：解码一次原图，再按当前显示尺寸预先做一张降采样缓
+// 存（imgScaled），绘制时直接贴。只有换图 / 改窗口大小 / 缩放时才重做缓存。
+//
+// 两条绘制路径，按「显示尺寸 vs 原始像素」分：
+//   缩小 / 照片放大 —— 用缓存 + 双线性拉伸，缩小靠 bicubic 缓存保证画质；
+//   像素图放大（显示尺寸 >= 原始像素）—— 丢掉缓存，直接拿原图 + 最近邻，一个原始像素
+//   就是一块纯色方块。混用会让像素画糊成一团，见 viewerCrisp 的注释。
 // ---------------------------------------------------------------------------
 
 // GDI+ flat API（只声明本文件用到的部分）。这些是 gdiplus.dll 的导出名，写错只会在
@@ -57,6 +61,7 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 #define IMG_PIXEL_FORMAT_ARGB   0x0026200A   // PixelFormat32bppARGB
 #define IMG_INTERP_HQ_BICUBIC   7            // InterpolationModeHighQualityBicubic
 #define IMG_INTERP_BILINEAR     3            // InterpolationModeBilinear（滚轮预览用）
+#define IMG_INTERP_NEAREST      5            // InterpolationModeNearestNeighbor（像素图放大）
 #define IMG_UNIT_PIXEL          2            // UnitPixel（GdipDrawImageRectRect 的源矩形单位）
 #define IMG_BG_RGB              RGB(24, 24, 24)    // 图像区底色
 #define IMG_BAR_RGB             RGB(16, 16, 16)    // 底部按钮条，比图像区更深一档
@@ -71,6 +76,16 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 // 从 2560 直接缩到 200 每格都要把整张源图遍历一遍，滚轮连续缩小时就明显跟不上；
 // 从 720 缩到 200 快一个数量级，而这个尺寸下肉眼看不出差别。
 #define IMG_THUMB_DIM           720
+
+// 像素图何时改用最近邻：显示尺寸至少是原始像素的这么多倍。1x 到 2x 之间仍走平滑插值 ——
+// 那个区间里双线性的柔和过渡看不出来，却不会把边缘切出锯齿；超过 2x 平滑插值就成了
+// 一片糊，这时候只有最近邻还能看清每个像素。
+#define IMG_CRISP_ZOOM          2.0
+
+// 窗口客户区占屏幕工作区的比例。**与图片无关**：同一台设备上每张图都开在一样大的窗口里，
+// 翻页时窗口不跳，也不会因为一张极端长图开出一条细长窗。按屏幕分辨率算，手机/平板上就是
+// 「几乎占满」的效果。嫌大嫌小自己拖边框。
+#define IMG_WIN_SCALE           0.85
 
 // 底部按钮条高度。图像区域是「客户区减去这一条」。
 // 44 而不是 36：按钮 26 高，上下各留 9 的空白，看着才不像贴边。
@@ -93,7 +108,10 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 static HWND hwndViewer = NULL;
 
 static GpBitmap* imgSrc = NULL;      // 解码后的原图
-static UINT imgSrcW = 0, imgSrcH = 0;
+static UINT imgSrcW = 0, imgSrcH = 0;   // **原始**像素尺寸（标题显示、比例计算都用它）
+// imgSrc 这张位图的实际尺寸。超过 IMG_MAX_DIM 的图解码后会被缩下来，于是它小于 imgSrcW/H。
+// 绘制靠它判断「该不该用最近邻放大」（见 viewerCrisp）。
+static int imgSrcBmpW = 0, imgSrcBmpH = 0;
 static GpBitmap* imgScaled = NULL;   // 按显示尺寸降采样好的缓存
 static int imgScaledW = 0, imgScaledH = 0;
 // mipmap 一级：换图时从 imgSrc 缩出来的一张小的，缩小预览用它当采样源（见 IMG_THUMB_DIM）
@@ -104,11 +122,6 @@ static int imgPanX = 0, imgPanY = 0; // 相对「居中显示」位置的偏移
 // 上一帧图像实际占的矩形（客户区坐标）。拖动平移时用它算新旧位置的并集，只失效这两块，
 // 不必整屏重绘 —— 放大到 2560 宽之后再拖动，这一下省的是整屏的填色和重画。
 static RECT imgLastPaint = {0};
-
-// 用户自己拖过窗口边框 / 移动过窗口之后就置上：之后换图不再按图片比例去改窗口大小，
-// 免得刚摆好的窗口位置被抢走。程序自己 SetWindowPos 不会触发 WM_EXITSIZEMOVE，所以
-// 这个标志只认真正的手动调整。
-static bool viewerUserSized = false;
 
 static wchar_t imgPath[MAX_PATH] = {0};
 static wchar_t imgDir[MAX_PATH] = {0};
@@ -176,6 +189,7 @@ static void viewerFreeSource(void) {
         imgSrc = NULL;
     }
     imgSrcW = imgSrcH = 0;
+    imgSrcBmpW = imgSrcBmpH = 0;
 }
 
 // 从 imgSrc 缩出一张边长不超过 IMG_THUMB_DIM 的小图，供缩小预览当采样源。
@@ -273,6 +287,15 @@ static void viewerCacheSize(int* dw, int* dh) {
     }
 }
 
+// 这里该用最近邻吗：显示尺寸至少是原始像素的 IMG_CRISP_ZOOM 倍，且源图没被 IMG_MAX_DIM
+// 缩过。放大到这个程度，双线性 / 双三次已经把每个原始像素抹成一片渐变，像素画（图标、
+// 精灵图、截图、像素风插画）整张糊成一团 —— 只有最近邻还是一像素一块纯色方块。
+// 不满足时（1x~2x、或者大照片）继续走平滑插值：那个尺度下平滑更好看，也不出锯齿。
+static bool viewerCrisp(int dw) {
+    return imgSrc && imgSrcBmpW > 0 && imgSrcBmpW == (int)imgSrcW
+           && (double)dw >= (double)imgSrcBmpW * IMG_CRISP_ZOOM;
+}
+
 // 把平移量夹在合法范围内：图比可视区大时，边缘不能被拖进可视区里面（那样会拖出一片
 // 空白，看起来像图丢了）；比可视区小时一律居中（pan 归零），因为本来就没有可拖的余地。
 // 放大 / 缩小之后也要再夹一次 —— 缩放改变了可拖范围。
@@ -296,68 +319,20 @@ static void viewerClampPan(void) {
     }
 }
 
-// 按图片比例定窗口大小：竖图开竖窗、横图开横窗，最大不超过屏幕可用区域的 90%。
-// 客户区高度要额外加回底栏那一条 —— 图像区 = 客户区减底栏，要让图正好 1:1 放得下，
-// 客户区就得比图高多出 IMG_BAR_H。
-// 只在用户没手动调过窗口时调用（见 viewerUserSized）。
-static void viewerFitWindowToImage(void) {
-    if (!hwndViewer || !imgSrcW || !imgSrcH) return;
-
-    // 取**窗口所在显示器**的工作区（rcWork 已经扣掉任务栏），而不是主屏：
-    // SPI_GETWORKAREA 只认主显示器，窗口被挪到副屏时会拿错尺寸，多屏下直接算歪。
-    RECT work = {0};
-    MONITORINFO mi = {0};
-    mi.cbSize = sizeof(mi);
-    HMONITOR mon = MonitorFromWindow(hwndViewer, MONITOR_DEFAULTTONEAREST);
-    if (mon && GetMonitorInfoW(mon, &mi)) work = mi.rcWork;
-    else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) return;
-
-    int workW = work.right - work.left;
-    int workH = work.bottom - work.top;
-    if (workW < 200 || workH < 200) return;
-
-    int maxClientW = (int)((double)workW * 0.9);
-    int maxClientH = (int)((double)workH * 0.9);
-    if (maxClientH < IMG_BAR_H + 160) maxClientH = IMG_BAR_H + 160;
-
-    // 先按原始像素算，超出屏幕就等比缩；小图不放大（1:1 看最清楚）
-    double k = 1.0;
-    if ((double)imgSrcW > (double)maxClientW) k = (double)maxClientW / (double)imgSrcW;
-    double maxImgH = (double)(maxClientH - IMG_BAR_H);
-    if ((double)imgSrcH * k > maxImgH) k = maxImgH / (double)imgSrcH;
-    if (k > 1.0) k = 1.0;
-
-    int imgW = (int)((double)imgSrcW * k + 0.5);
-    int imgH = (int)((double)imgSrcH * k + 0.5);
-    // 太小的图（图标之类）给个保底客户区，否则窗口只有一百多像素宽，按钮排不下
-    if (imgW < 320) imgW = 320;
-    if (imgH < 240) imgH = 240;
-
-    RECT rc = {0, 0, imgW, imgH + IMG_BAR_H};
-    if (!AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE)) return;
-    int winW = rc.right - rc.left;
-    int winH = rc.bottom - rc.top;
-    // 和 WM_GETMINMAXINFO 里的最小跟踪尺寸对齐：SetWindowPos 不受跟踪下限约束，
-    // 这里不兜一下的话会开出一个比「用户能拖到的下限」还小的窗口。
-    if (winW < 420) winW = 420;
-    if (winH < 320) winH = 320;
-
-    int x = work.left + (workW - winW) / 2;
-    int y = work.top + (workH - winH) / 2;
-    if (x < work.left) x = work.left;
-    if (y < work.top) y = work.top;
-    if (x + winW > work.right) x = work.right - winW;
-    if (y + winH > work.bottom) y = work.bottom - winH;
-
-    SetWindowPos(hwndViewer, NULL, x, y, winW, winH, SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
 // 按目标尺寸重做降采样缓存。高质量重采样只在这里做 —— 绘制时永远是「有缓存就贴」，
 // 所以滚轮连滚也不会每格都跑一次 bicubic。
 static void viewerRebuildScaled(void) {
     if (!hwndViewer || !imgSrc) return;
 
     int dw = 0, dh = 0;
+    viewerDisplaySize(&dw, &dh);
+    // 像素图放大：干脆不做缓存。缓存的定义是「按显示尺寸重采样一张」，放大时它比原图更大
+    // 也更糊，白占内存（放大的缓存能到 20MB 以上）；绘制直接拿原图 + 最近邻反而清楚。
+    if (viewerCrisp(dw)) {
+        viewerFreeScaled();
+        return;
+    }
+
     viewerCacheSize(&dw, &dh);       // 缓存受 IMG_MAX_DIM 封顶，与显示尺寸分开算
     if (dw == imgScaledW && dh == imgScaledH && imgScaled) return;   // 尺寸没变，缓存还能用
 
@@ -496,6 +471,15 @@ static bool viewerLoad(const wchar_t* fullPath) {
     // 长宽比不变，所以算出来的目标尺寸仍然对，而标题不会被改成 2560x1920 那种谎话。
     imgSrcW = w;
     imgSrcH = h;
+    // 位图的实际尺寸（被 IMG_MAX_DIM 缩过就小于原始尺寸）。绘制用它与 dw 比较来决定
+    // 「放大时该用最近邻还是平滑插值」，见 viewerCrisp。
+    {
+        UINT bw = 0, bh = 0;
+        if (GdipGetImageWidth((GpImage*)prepared, &bw) == GpOk && bw) imgSrcBmpW = (int)bw;
+        else imgSrcBmpW = (int)w;
+        if (GdipGetImageHeight((GpImage*)prepared, &bh) == GpOk && bh) imgSrcBmpH = (int)bh;
+        else imgSrcBmpH = (int)h;
+    }
     viewerBuildThumb();        // 缩小预览的采样源，与窗口尺寸无关，换图时做一次
 
     wcsncpy(imgPath, fullPath, MAX_PATH - 1);
@@ -517,9 +501,8 @@ static bool viewerLoad(const wchar_t* fullPath) {
 
     imgZoom = 1.0;
     imgPanX = imgPanY = 0;
-    // 用户没手动调过窗口，就按这张图的比例和屏幕大小重开一次；调过就保持他摆好的样子。
-    // 放在重采样之前：窗口尺寸一变，降采样缓存的目标尺寸也跟着变，先定窗口再算缓存。
-    if (!viewerUserSized) viewerFitWindowToImage();
+    // 这里**不再动窗口**：窗口大小只由屏幕决定（见 IMG_WIN_SCALE），与图片无关。
+    // 翻页时窗口不跳，用户摆好的位置也不会被抢走。
     viewerRebuildScaled();     // 换图时直接做一次高质量重采样
     viewerUpdateTitle();
     viewerUpdateButtons();
@@ -741,7 +724,8 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 }
             }
 
-            if (imgScaled) {
+            // imgSrc 在、imgScaled 可能就是空的（像素图放大时不做缓存，见 viewerRebuildScaled）
+            if (imgSrc) {
                 int dw = 0, dh = 0;
                 viewerDisplaySize(&dw, &dh);
                 int cw = rc.right - rc.left;
@@ -760,12 +744,19 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 // 底栏上面去，把按钮盖住；拖到底部时尤其明显。
                 IntersectClipRect(hdc, rc.left, rc.top, rc.right, rc.top + ch);
 
-                // 选采样源。放大的时候缓存本来就不够大，只能用缓存；缩得很小时改用缩略图 ——
+                // 选采样源。像素图放大时直接用原图（缓存那份是插值出来的，放大只会更糊）；
+                // 其余放大的时候缓存本来就不够大，只能用缓存；缩得很小时改用缩略图 ——
                 // 从 2560 缩到 200 每格都要遍历整张源图，滚轮连续缩小就明显跟不上；从 720
                 // 缩到 200 快一个数量级，而这个尺寸下画质看不出差别。
+                bool crisp = viewerCrisp(dw);
                 GpBitmap* src = imgScaled;
                 int sw = imgScaledW, sh = imgScaledH;
-                if (imgThumb && imgThumbW * 4 <= sw * 3 && dw <= imgThumbW) {
+                if (crisp) {
+                    src = imgSrc;
+                    sw = imgSrcBmpW;
+                    sh = imgSrcBmpH;
+                }
+                else if (imgThumb && imgThumbW * 4 <= sw * 3 && dw <= imgThumbW) {
                     src = imgThumb;
                     sw = imgThumbW;
                     sh = imgThumbH;
@@ -796,7 +787,10 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                         if (vis.right > vis.left && vis.bottom > vis.top) {
                             double kx = (double)sw / (double)dw;
                             double ky = (double)sh / (double)dh;
-                            GdipSetInterpolationMode(g, IMG_INTERP_BILINEAR);
+                            // 像素图放大必须最近邻：双线性会把每个原始像素抹成渐变，放大后
+                            // 整张糊成一片（Wine 的 resample_bitmap_pixel 对 NearestNeighbor
+                            // 是 floor(x+0.5) 单点取样，一个原始像素就是一个纯色方块）。
+                            GdipSetInterpolationMode(g, crisp ? IMG_INTERP_NEAREST : IMG_INTERP_BILINEAR);
                             GdipDrawImageRectRect(g, (GpImage*)src,
                                                   (REAL)vis.left, (REAL)vis.top,
                                                   (REAL)(vis.right - vis.left),
@@ -826,12 +820,6 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 InvalidateRect(hwnd, NULL, FALSE);   // 先拉伸预览
                 viewerArmZoomRebuild();              // 尺寸稳定后再高质量重做
             }
-            return 0;
-
-        case WM_EXITSIZEMOVE:
-            // 只有用户自己拖过边框 / 移动过窗口才会到这里（程序 SetWindowPos 不会）。
-            // 记下来之后换图就不再按图片比例改窗口大小，别把用户摆好的窗口抢走。
-            viewerUserSized = true;
             return 0;
 
         case WM_MOUSEWHEEL: {
@@ -928,7 +916,6 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (imgBrushBg)      { DeleteObject(imgBrushBg);      imgBrushBg = NULL; }
             if (imgBrushBar)     { DeleteObject(imgBrushBar);     imgBrushBar = NULL; }
             if (imgBrushBarLine) { DeleteObject(imgBrushBarLine); imgBrushBarLine = NULL; }
-            viewerUserSized = false;   // 下次开窗口重新按图片适配
             hwndViewer = NULL;
             return 0;
     }
@@ -949,8 +936,8 @@ void openImageViewer(const wchar_t* path) {
         wc.lpszClassName = IMG_CLASS_NAME;
         RegisterClassExW(&wc);
 
-        // 先按「工作区 60%」建出来，但**不显示**：真正的尺寸要等解码完、按图片比例算
-        // （viewerFitWindowToImage）。先显示再改尺寸，用户会看到窗口跳一下。
+        // 窗口大小只跟**屏幕**有关：客户区取工作区的 IMG_WIN_SCALE，与图片无关。这样同一台
+        // 设备上每张图都开在一样大的窗口里，翻页不跳，极端长图也不会开出一条细长窗。
         // 工作区取主窗口所在显示器 —— 主窗口在副屏时查看器也跟着过去。
         RECT work = {0, 0, 900, 700};
         MONITORINFO mi = {0};
@@ -963,12 +950,26 @@ void openImageViewer(const wchar_t* path) {
         }
         int workW = work.right - work.left;
         int workH = work.bottom - work.top;
-        int cw = (int)((double)workW * 0.6);
-        int ch = (int)((double)workH * 0.6);
-        if (cw < 320) cw = 320;
-        if (ch < 240) ch = 240;
 
+        int cw = (int)((double)workW * IMG_WIN_SCALE);
+        int ch = (int)((double)workH * IMG_WIN_SCALE);
+        // 边框 + 标题栏要一起塞进工作区：先量一次窗口比客户区大出多少，再把客户区夹回去。
+        // 直接按客户区尺寸建窗、事后不看外框的话，窄屏（手机竖屏）上窗口会顶出屏幕外。
         RECT rc = {0, 0, cw, ch};
+        AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+        int extraW = (rc.right - rc.left) - cw;
+        int extraH = (rc.bottom - rc.top) - ch;
+        if (extraW < 0) extraW = 0;
+        if (extraH < 0) extraH = 0;
+        // 保底客户区。底栏 6 个按钮排得下、图像区还有地方看，这个尺寸就够；
+        // 外框约 416x319，与 WM_GETMINMAXINFO 的最小跟踪尺寸 420x320 对齐。
+        // 顺序是先抬下限再压上限：屏幕真的比保底尺寸还小时，以「不顶出屏幕」为准。
+        if (cw < 400) cw = 400;
+        if (ch < 280) ch = 280;
+        if (cw > workW - extraW) cw = workW - extraW;
+        if (ch > workH - extraH) ch = workH - extraH;
+
+        rc.left = 0; rc.top = 0; rc.right = cw; rc.bottom = ch;
         AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
@@ -977,6 +978,8 @@ void openImageViewer(const wchar_t* path) {
         int y = work.top + (workH - h) / 2;
         if (x < work.left) x = work.left;
         if (y < work.top) y = work.top;
+        if (x + w > work.right) x = work.right - w;
+        if (y + h > work.bottom) y = work.bottom - h;
 
         hwndViewer = CreateWindowExW(0, IMG_CLASS_NAME, L"", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                      x, y, w, h, hwndMain, NULL, globalHInstance, NULL);
@@ -993,7 +996,8 @@ void openImageViewer(const wchar_t* path) {
         MessageBoxW(hwndMain, lc_str.msg_open_image_failed, lc_str.alert, MB_OK | MB_ICONWARNING);
         return;
     }
-    // 新建的窗口到这一刻才显示：此时尺寸、位置、第一帧内容都已经按图片定好了
+    // 新建的窗口到这一刻才显示：创建时窗口是隐藏的，等第一帧内容准备好再露出来，
+    // 用户不会看到窗口先弹出来再刷图。
     if (created) {
         ShowWindow(hwndViewer, SW_SHOW);
         UpdateWindow(hwndViewer);
