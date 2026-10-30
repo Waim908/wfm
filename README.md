@@ -15,6 +15,8 @@
 
 ![Screenshot](wfm4.png)
 
+![Screenshot](wfm5.png)
+
 # 注册表结构
 
 所有配置都在 `HKEY_CURRENT_USER\Software\Winlator\WFM` 下，不写 HKLM，不需要管理员权限。
@@ -150,6 +152,7 @@ Windows Registry Editor Version 5.00
 20. 跨窗口文件复制
 21. 可以显示lnk文件图标了
 22. 文件夹可以显示日期和项目数量了
+23. 加入了简单的内置图片查看器
 
 相较于原版wfm
 
