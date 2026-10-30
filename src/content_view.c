@@ -2823,19 +2823,29 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     // 滚动消息全程插旗：scroll_list() 处理过程中就会同步 UpdateWindow，那次绘制会重入进来，
     // 必须能被认出是「滚动驱动的绘制」（见 getIconSlotForPaint 与 WM_PAINT 处的额度）。
     if (scrollMsg) inScrollMessage = true;
+    // 有背景图时，**滚动之前**就把整块客户区标脏并带擦除。
+    // 原因：背景图（LVM_SETBKIMAGE）是贴在控件表面上的位图，而 Wine 的 scroll_list 走
+    // ScrollWindowEx(整块 rcList)：像素连同背景图一起被平移，之后只重画新露出的那一条，
+    // 于是滚过之后整屏背景都错位。事先标脏整屏，scroll_list 末尾那次 UpdateWindow 就会
+    // 整屏重画一遍 —— LISTVIEW_FillBkgnd 按客户区坐标重贴背景图、行画在新位置上，一次画对。
+    // 放到滚动之后补画是不行的：那时错位画面已经上过屏，中间那一帧就是用户看到的抖动。
+    // ScrollWindowEx 只往更新区里加露出部分，不会清掉已有的脏区，所以这个假设是稳的。
+    //
+    // 只认真正会滚的消息：WM_KEYDOWN 里大多数键（Ctrl 组合、字母跳转）不滚动，给它们
+    // 标脏整屏等于让每次按键都多画一帧。
+    bool mayScroll = (msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_MOUSEWHEEL ||
+                      msg == WM_MOUSEHWHEEL || msg == LVM_SCROLL ||
+                      (msg == WM_KEYDOWN &&
+                       (wParam == VK_UP    || wParam == VK_DOWN  || wParam == VK_LEFT ||
+                        wParam == VK_RIGHT || wParam == VK_PRIOR || wParam == VK_NEXT ||
+                        wParam == VK_HOME  || wParam == VK_END)));
+    if (mayScroll && !preScrolled && hasBackgroundImage()) {
+        InvalidateRect(hwnd, NULL, TRUE);
+    }
     // preScrolled：这条滚动已经在 preScrollHandleVScroll 里处理过了（它自己发过滚动消息：
     // 渲染好目标窗口之后才把滚动交给控件）。
     LRESULT result = preScrolled ? 0 : OrigWndProc(hwnd, msg, wParam, lParam);
     if (scrollMsg) inScrollMessage = false;
-
-    // 背景图（LVM_SETBKIMAGE）是贴在控件表面上的位图，而 Wine 的 scroll_list 走的是
-    // ScrollWindowEx(整块 rcList)：像素连同背景图一起被平移，之后只补画新露出的那一条。
-    // 于是结果就是「背景跟着列表一起滚、滚到哪错到哪」，行数越多滚得越远越明显。
-    // 这里把整块客户区标脏并带擦除，让 LISTVIEW_EraseBkgnd 按客户区坐标重贴一次背景图
-    // （clrBk 已是 CLR_NONE，那条分支正好做这件事）。没有背景图时一次都不进来。
-    if (scrollMsg && !preScrolled && hasBackgroundImage()) {
-        InvalidateRect(hwnd, NULL, TRUE);
-    }
 
     // 滚完之后对**新的**可见区再做一遍上面那件事。滚动前那一次扫的是旧范围，而快速拖动时
     // 新滚进来的项可能根本没被这一帧画到（控件只重绘脏区），它的槽时间戳就显得很旧 ——
@@ -7083,13 +7093,15 @@ static void preScrollApply(UINT code) {
     preScrollCancelRetry();
     inPreScroll = true;
     inScrollMessage = true;      // 这次绘制算「滚动驱动」：准许绘制路径就地渲染兜底
+    // 滚之前标脏整屏（理由同 ContentViewWndProc 里那一处）：scroll_list 的
+    // ScrollWindowEx 会把像素连同贴在控件表面的背景图一起平移，只重画新露出的那一条，
+    // 于是滚完整屏背景都错位。事先标脏，它末尾那次 UpdateWindow 就会整屏重画，
+    // 背景按客户区坐标重贴、行画在新位置，一次画对，没有中间帧。
+    // 这条路径绕过了 ContentViewWndProc 的消息转发（直接调 OrigWndProc），那边兜不住。
+    if (hasBackgroundImage()) InvalidateRect(hwndContentView, NULL, TRUE);
     OrigWndProc(hwndContentView, WM_VSCROLL, MAKEWPARAM(code, 0), 0);
     inScrollMessage = false;
     inPreScroll = false;
-    // 背景图是贴在控件表面上的位图，Wine 的 scroll_list 用 ScrollWindowEx 把像素连同它一起
-    // 平移，只补画新露出的那一条 —— 滚过之后整屏背景都错位了，看着像背景跟着列表在滚。
-    // 这条路径绕过了 ContentViewWndProc 的消息转发（直接调 OrigWndProc），所以那边兜不住。
-    if (hasBackgroundImage()) InvalidateRect(hwndContentView, NULL, TRUE);
 }
 
 // 返回 true = 这条 WM_VSCROLL 已经处理完（已经滚过，或者正押着）。false = 照常交给控件。
