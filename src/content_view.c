@@ -93,9 +93,6 @@ static bool preScrollFromTimer;      // 这次调用来自「押后期间的重�
 static DWORD lastScrollTick;
 static bool iconFillTimerPending;      // 已经挂了一个「等滚动静默」的定时器
 static bool iconPrefetchTimerPending;  // 已经挂了一个预取定时器
-// 「这一次绘制是背景图重贴触发的整屏重画」。整屏重画会让绘制路径对整屏可见项逐个要图标，
-// 目标区域还没渲过时等于每帧都要渲一整屏 —— 帧时间被拉长，滚动就一顿一顿的（见 WM_PAINT）。
-static bool bgScrollRefresh;
 static int iconPrefetchDoneSize;       // 该图标尺寸的池已预取收工（0 = 允许预取）
 // 不用 1 这种小号：Wine 的 listview 内部也用 SetTimer（滚动条按住时的连续滚动，
 // 见 comctl32/listview.c:4079，它的 id 是 (UINT_PTR)infoPtr），号段留开更省心。
@@ -1647,10 +1644,7 @@ static void invalidateItemRow(int idx) {
     if (!ListView_GetItemRect(hwndContentView, idx, &itemRc, LVIR_BOUNDS)) return;
     if (!GetClientRect(hwndContentView, &clientRc)) return;
     RECT band = { clientRc.left, itemRc.top, clientRc.right, itemRc.bottom };
-    // 不擦背景是因为「擦」会闪。但设了背景图之后，条目本身不再是实心底色
-    // （见 NM_CUSTOMDRAW 里把 clrTextBk 设成 CLR_NONE 那段），不擦就会把旧文字留在
-    // 新文字下面变成残影，所以这种情况下必须擦 —— 擦一次恰好会把背景图按裁剪区重贴。
-    InvalidateRect(hwndContentView, &band, hasBackgroundImage());
+    InvalidateRect(hwndContentView, &band, FALSE);
 }
 
 static void folderCountStartWatchdog(void);
@@ -2643,20 +2637,7 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         // （.dll 这类共享项一个 id 点亮整屏，通常个位数到十几个），又不会让拖动变粘。
         DWORD now = GetTickCount();
         bool scrollDriven = inScrollMessage || (now - lastScrollTick <= ICON_SCROLL_PAINT_WINDOW_MS);
-        if (bgScrollRefresh) {
-            // 这一帧是「背景图重贴」带出来的整屏重画（滚动前我们标脏了整块客户区）。
-            // 整屏重画会让绘制路径对**整屏**可见项逐个要图标：池里已就绪的是免费命中，
-            // 但目标区域还没渲过时，就等于每帧都要就地渲一整屏 —— 额度瞬间打到上限、
-            // 时间上限也吃满，帧时间从几毫秒变成二三十毫秒，滚动起来就是一顿一顿的。
-            // 而它「划几下之后就不抖」，正是因为那一片图标都进池了。
-            //
-            // 所以这类绘制只给最低额度：这一帧最多点亮几个来源，剩下的留给滚动静默后的
-            // 补齐与邻域预取。帧时间是平的，代价是新露出的行可能空一两帧。
-            bgScrollRefresh = false;
-            iconPaintRenderBudget = 2;
-            iconPaintRenderDeadline = now + 6;
-        }
-        else if (scrollDriven) {
+        if (scrollDriven) {
             int quota = visibleIconSpan();
             if (quota < ICON_PAINT_RENDER_MIN) quota = ICON_PAINT_RENDER_MIN;
             if (quota > ICON_PAINT_RENDER_CAP) quota = ICON_PAINT_RENDER_CAP;
@@ -2855,28 +2836,6 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     // 滚动消息全程插旗：scroll_list() 处理过程中就会同步 UpdateWindow，那次绘制会重入进来，
     // 必须能被认出是「滚动驱动的绘制」（见 getIconSlotForPaint 与 WM_PAINT 处的额度）。
     if (scrollMsg) inScrollMessage = true;
-    // 有背景图时，**滚动之前**就把整块客户区标脏并带擦除。
-    // 原因：背景图（LVM_SETBKIMAGE）是贴在控件表面上的位图，而 Wine 的 scroll_list 走
-    // ScrollWindowEx(整块 rcList)：像素连同背景图一起被平移，之后只重画新露出的那一条，
-    // 于是滚过之后整屏背景都错位。事先标脏整屏，scroll_list 末尾那次 UpdateWindow 就会
-    // 整屏重画一遍 —— LISTVIEW_FillBkgnd 按客户区坐标重贴背景图、行画在新位置上，一次画对。
-    // 放到滚动之后补画是不行的：那时错位画面已经上过屏，中间那一帧就是用户看到的抖动。
-    // ScrollWindowEx 只往更新区里加露出部分，不会清掉已有的脏区，所以这个假设是稳的。
-    //
-    // 只认真正会滚的消息：WM_KEYDOWN 里大多数键（Ctrl 组合、字母跳转）不滚动，给它们
-    // 标脏整屏等于让每次按键都多画一帧。
-    bool mayScroll = (msg == WM_VSCROLL || msg == WM_HSCROLL || msg == WM_MOUSEWHEEL ||
-                      msg == WM_MOUSEHWHEEL || msg == LVM_SCROLL ||
-                      (msg == WM_KEYDOWN &&
-                       (wParam == VK_UP    || wParam == VK_DOWN  || wParam == VK_LEFT ||
-                        wParam == VK_RIGHT || wParam == VK_PRIOR || wParam == VK_NEXT ||
-                        wParam == VK_HOME  || wParam == VK_END)));
-    if (mayScroll && !preScrolled && hasBackgroundImage()) {
-        // 标成「这一帧是背景重贴带出来的整屏重画」：WM_PAINT 里据此把图标渲染额度压到最低，
-        // 否则整屏重画会在每次滚动时都把额度打满（详见 WM_PAINT 处）。
-        bgScrollRefresh = true;
-        InvalidateRect(hwnd, NULL, TRUE);
-    }
     // preScrolled：这条滚动已经在 preScrollHandleVScroll 里处理过了（它自己发过滚动消息：
     // 渲染好目标窗口之后才把滚动交给控件）。
     LRESULT result = preScrolled ? 0 : OrigWndProc(hwnd, msg, wParam, lParam);
@@ -3490,30 +3449,6 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                     return CDRF_NOTIFYITEMDRAW;
                 case CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
-                    // 设过背景图：非选中条目不要实心底色。
-                    // 填充判据是 listview.c:4677 的 `nmlvcd->clrTextBk != CLR_NONE`，而它由
-                    // customdraw_fill（:1063）从 infoPtr->clrTextBk 拷来，那个字段由
-                    // LVM_SETTEXTBKCOLOR 直接赋值（:9238），不是 LVM_SETBKCOLOR。
-                    // 默认值已经由 rebuildBackgroundBitmap 设成 CLR_NONE 了，这里只是兜底
-                    // （防止别处把它改回默认），真正不能省的是**选中项要给回实色**：那次
-                    // ETO_OPAQUE 填充同时负责画整行高亮底色（LVS_EX_FULLROWSELECT 下是整行），
-                    // 默认值是 CLR_NONE 的话选中的那一行就完全看不出被选中。
-                    // **必须放在下面两个早退之前**：大图标视图和磁盘占用条那两条分支都会提前
-                    // return，放在后面的话盘符那一屏连兜底都轮不到。
-                    if (hasBackgroundImage()) {
-                        if (lvcd->nmcd.uItemState & CDIS_SELECTED) {
-                            // 与 Wine prepaint_setup 的取色一致（listview.c:1095-1108）：
-                            // 有焦点用高亮色；无焦点时那边只有 LVS_SHOWSELALWAYS 才给 3D 面，
-                            // 本控件没开那个样式，不补的话选中行会彻底看不出被选中，
-                            // 所以无焦点也铺 3D 面，与资源管理器失焦后的观感一致
-                            lvcd->clrTextBk = (GetFocus() == hwndContentView)
-                                              ? GetSysColor(COLOR_HIGHLIGHT)
-                                              : GetSysColor(COLOR_3DFACE);
-                        }
-                        else {
-                            lvcd->clrTextBk = CLR_NONE;
-                        }
-                    }
                     // 大图标视图：完全自绘条目（Wine 默认对非选中项只画一行文件名）
                     if (viewStyle == STYLE_LARGE_ICON) {
                         if (idx >= 0 && idx < numItems && items[idx].node) {
@@ -3535,15 +3470,6 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                 }
                 case CDDS_SUBITEM | CDDS_ITEMPREPAINT: {
                     int idx = (int)lvcd->nmcd.dwItemSpec;
-                    // 子项阶段是一次单独的通知，但 clrTextBk 不会被重置：customdraw_fill
-                    // 只在条目级调一次（listview.c:4853），子项循环里只更新 nmcd.rc 与
-                    // iSubItem（:4869-4876）。所以条目阶段设的值这里仍然有效，这段是兜底。
-                    if (hasBackgroundImage()) {
-                        lvcd->clrTextBk = (lvcd->nmcd.uItemState & CDIS_SELECTED)
-                                          ? ((GetFocus() == hwndContentView) ? GetSysColor(COLOR_HIGHLIGHT)
-                                                                             : GetSysColor(COLOR_3DFACE))
-                                          : CLR_NONE;
-                    }
                     if (idx >= 0 && idx < numItems && items[idx].node->type == TYPE_DRIVE
                         && items[idx].driveTotalBytes > 0 && lvcd->iSubItem == COLUMN_SIZE_IDX) {
                         
@@ -3575,12 +3501,7 @@ LRESULT contentViewNotify(NMHDR* nmhdr) {
                         }
                         else {
                             // Background bar: light gray for free space
-                            // 设了背景图就不铺这层浅灰：它是一块不透明的实心矩形，铺上去
-                            // 这个格子照样是「白底」，背景图穿不出来。已用部分那几条
-                            // 彩色长度条仍然画，信息不丢。
-                            if (!hasBackgroundImage()) {
-                                FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
-                            }
+                            FillRect(hdc, &rc, getUiBrush(&brushDriveFree, RGB(230, 235, 240)));
 
                             // Used space bar
                             double usedPct = (double)(item->driveTotalBytes - item->driveFreeBytes)
@@ -4085,8 +4006,7 @@ void setViewStyle(enum ViewStyle newViewStyle) {
         }
         else {
             ListView_Arrange(hwndContentView, LVA_DEFAULT);
-            // 有背景图时必须擦：条目不再有实心底色，不擦会留旧位置的重影
-            InvalidateRect(hwndContentView, NULL, hasBackgroundImage());
+            InvalidateRect(hwndContentView, NULL, FALSE);
         }
     }
 
@@ -4650,23 +4570,6 @@ GpStatus WINGDIPAPI GdipCreateBitmapFromStream(IStream*, GpBitmap**);
 GpStatus WINGDIPAPI GdipCreateHICONFromBitmap(GpBitmap*, HICON*);
 GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 
-/* 内容区背景图合成用的几个（见「内容区背景图片」一节） */
-typedef void GpGraphics;
-typedef void GpBrush;
-GpStatus WINGDIPAPI GdipCreateBitmapFromFile(GDIPCONST WCHAR*, GpBitmap**);
-GpStatus WINGDIPAPI GdipGetImageWidth(GpImage*, UINT*);
-GpStatus WINGDIPAPI GdipGetImageHeight(GpImage*, UINT*);
-GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(INT, INT, INT, INT, BYTE*, GpBitmap**);
-GpStatus WINGDIPAPI GdipGetImageGraphicsContext(GpImage*, GpGraphics**);
-GpStatus WINGDIPAPI GdipSetInterpolationMode(GpGraphics*, INT);
-GpStatus WINGDIPAPI GdipGraphicsClear(GpGraphics*, DWORD);
-GpStatus WINGDIPAPI GdipDrawImageRectI(GpGraphics*, GpImage*, INT, INT, INT, INT);
-GpStatus WINGDIPAPI GdipCreateSolidFill(DWORD, GpBrush**);
-GpStatus WINGDIPAPI GdipFillRectangleI(GpGraphics*, GpBrush*, INT, INT, INT, INT);
-GpStatus WINGDIPAPI GdipDeleteBrush(GpBrush*);
-GpStatus WINGDIPAPI GdipDeleteGraphics(GpGraphics*);
-GpStatus WINGDIPAPI GdipCreateHBITMAPFromBitmap(GpBitmap*, HBITMAP*, DWORD);
-
 static ULONG_PTR g_gdiplusToken = 0;
 
 void gdiplusInit(void) {
@@ -4708,215 +4611,6 @@ static HICON createIconFromPngData(const BYTE* data, DWORD dataSize) {
     GdipDisposeImage((GpImage*)pBitmap);
 
     return (status == Ok) ? hIcon : NULL;
-}
-
-// ========== 内容区背景图片 ==========
-//
-// 走 LVM_SETBKIMAGE + LVBKIF_SOURCE_HBITMAP，但**所有视觉变换都在这里做完**。
-// wine 的 LISTVIEW_SetBkImage（dlls/comctl32/listview.c:8099）只认 HBITMAP 这一种来源：
-// LVBKIF_SOURCE_URL 是 FIXME 桩（传路径什么都不会发生），`ulFlags & ~LVBKIF_SOURCE_MASK`
-// 一律 FIXME("unsupported flags")，也就是控件既不缩放、也不平铺、更不会做半透明。
-// 所以自己把原图按填充方式缩放到客户区尺寸、叠好遮罩，交出去的已经是成品。
-//
-// 位图必须**与客户区同尺寸、左上对齐**：它画在 LISTVIEW_DrawBackgroundBitmap
-// （:4588）里，是 BitBlt(dst=(x,y), size=box, src=(x,y))，源坐标直接用了目标坐标。
-// 换成同尺寸位图之后，滚动与局部失效都不用管，控件自己会重贴
-// （LISTVIEW_EraseBkgnd :9757 与 LISTVIEW_FillBkgnd :4626 都会调它）。
-//
-// 所有权：wine 在替换或销毁时会 DeleteObject(infoPtr->hBkBitmap)（:8113 / :8125 /
-// :10536），所以交出去之后**不能再删**。真 Windows 不接管、语义相反；本程序只跑 wine。
-//
-// 缩放必须走 GDI+：wine 没有实现 HALFTONE —— dibdrv/primitives.c:6882 的
-// rop_codes_from_stretch_mode 只认 DELETESCANS / ORSCANS / ANDSCANS，HALFTONE 落到
-// default 就是最近邻，照片缩小会出锯齿。GDI+ 那边 HighQualityBicubic 是真实现的
-// （gdiplus/graphics.c:1048）。
-#define BACKGROUND_REG_PATH L"SOFTWARE\\Winlator\\WFM"
-#define BACKGROUND_PIXEL_FORMAT_ARGB 0x0026200A   // PixelFormat32bppARGB
-#define BACKGROUND_INTERP_HQ_BICUBIC 7            // InterpolationModeHighQualityBicubic
-
-static wchar_t backgroundPath[MAX_PATH] = {0};
-static int backgroundDim = 60;        // 0..100：压在图片上那层遮罩的不透明度
-
-bool hasBackgroundImage(void) {
-    return backgroundPath[0] != L'\0';
-}
-
-static void saveBackgroundSettings(void) {
-    HKEY hkey;
-    if (RegCreateKeyEx(HKEY_CURRENT_USER, BACKGROUND_REG_PATH, 0, NULL, REG_OPTION_NON_VOLATILE,
-                       KEY_WRITE, NULL, &hkey, NULL) != ERROR_SUCCESS) return;
-    RegSetValueEx(hkey, L"BackgroundImage", 0, REG_SZ, (const BYTE*)backgroundPath,
-                  (DWORD)((wcslen(backgroundPath) + 1) * sizeof(wchar_t)));
-    DWORD val = (DWORD)backgroundDim;
-    RegSetValueEx(hkey, L"BackgroundDim", 0, REG_DWORD, (BYTE*)&val, sizeof(val));
-    RegCloseKey(hkey);
-}
-
-void loadBackgroundSettings(void) {
-    backgroundPath[0] = L'\0';
-    backgroundDim = 60;
-
-    HKEY hkey;
-    if (RegOpenKeyEx(HKEY_CURRENT_USER, BACKGROUND_REG_PATH, 0, KEY_READ, &hkey) != ERROR_SUCCESS) return;
-
-    // REG_SZ 读进定长缓冲：值本身可能正好占满，强制补结束符，别指望系统给
-    wchar_t path[MAX_PATH] = {0};
-    DWORD size = sizeof(path) - sizeof(wchar_t);
-    if (RegQueryValueEx(hkey, L"BackgroundImage", NULL, NULL, (BYTE*)path, &size) == ERROR_SUCCESS) {
-        path[MAX_PATH - 1] = L'\0';
-        wcsncpy(backgroundPath, path, MAX_PATH - 1);
-        backgroundPath[MAX_PATH - 1] = L'\0';
-    }
-    DWORD dim = 60;
-    size = sizeof(dim);
-    if (RegQueryValueEx(hkey, L"BackgroundDim", NULL, NULL, (BYTE*)&dim, &size) == ERROR_SUCCESS) {
-        if (dim <= 100) backgroundDim = (int)dim; else backgroundDim = 60;
-    }
-    RegCloseKey(hkey);
-}
-
-// 合成一张与客户区同尺寸的位图交给列表控件。**只由主线程调用**。
-void rebuildBackgroundBitmap(void) {
-    if (!hwndContentView) return;
-
-    // 没设图：让控件清掉背景位图（wine 会顺手 DeleteObject 掉上一张，自己不要再删），
-    // 并把两个背景色恢复成系统默认 —— 下面设过 CLR_NONE，不恢复的话列表就不再自绘底色了
-    if (!hasBackgroundImage()) {
-        LVBKIMAGEW img = {0};
-        img.ulFlags = LVBKIF_SOURCE_NONE;
-        // 显式发 W 版：LVM_SETBKIMAGE 是 __MINGW_NAME_AW 的别名，靠 -DUNICODE 才指向
-        // LVM_SETBKIMAGEW，不值得为这点便利赌一次编译选项
-        SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img);
-        ListView_SetBkColor(hwndContentView, GetSysColor(COLOR_WINDOW));
-        SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_DEFAULT);
-        return;
-    }
-
-    RECT rc;
-    GetClientRect(hwndContentView, &rc);
-    int cw = rc.right - rc.left;
-    int ch = rc.bottom - rc.top;
-    if (cw <= 0 || ch <= 0 || cw > 8192 || ch > 8192) return;
-
-    gdiplusInit();
-
-    // 三个句柄都先置空再谈失败：下面任何一步出错都 goto done 统一收拾，done 里靠 hbm
-    // 是否为空判断「这张图没做成」，从而把上一次的位图和 CLR_NONE 一并清掉 —— 图片被删掉
-    // 或换盘符之后要静默退回纯色，不能留着上一张图或者一片没有底色的透明格子。
-    GpBitmap* src = NULL;
-    GpBitmap* dst = NULL;
-    HBITMAP hbm = NULL;
-    GpGraphics* g = NULL;
-    UINT iw = 0, ih = 0;
-
-    if (GdipCreateBitmapFromFile(backgroundPath, &src) != Ok || !src) { src = NULL; goto done; }
-
-    if (GdipGetImageWidth((GpImage*)src, &iw) != Ok) iw = 0;
-    if (GdipGetImageHeight((GpImage*)src, &ih) != Ok) ih = 0;
-    if (!iw || !ih) goto done;
-
-    // 先算好铺满客户区的矩形（cover：取两个方向里较大的比例，居中裁切）
-    double scaleX = (double)cw / (double)iw;
-    double scaleY = (double)ch / (double)ih;
-    double scale = (scaleX > scaleY) ? scaleX : scaleY;
-    int dw = (int)((double)iw * scale + 0.5);
-    int dh = (int)((double)ih * scale + 0.5);
-    int dx = (cw - dw) / 2;
-    int dy = (ch - dh) / 2;
-
-    if (GdipCreateBitmapFromScan0(cw, ch, 0, BACKGROUND_PIXEL_FORMAT_ARGB, NULL, &dst) != Ok || !dst) goto done;
-    if (GdipGetImageGraphicsContext((GpImage*)dst, &g) != Ok || !g) goto done;
-
-    // 底色与遮罩色取系统窗口色，**不能**用 ListView_GetBkColor：启用背景图之后那个字段
-    // 已经被设成 CLR_NONE（0xFFFFFFFF），取出来 RGB 全是 0xFF，等于纯白 —— 遮罩会变成
-    // 一层 60% 的白雾，把整张图洗得发白，看起来就像"背景图没生效"。
-    {
-        COLORREF bk = GetSysColor(COLOR_WINDOW);
-        DWORD argb = 0xFF000000u | ((DWORD)GetRValue(bk) << 16)
-                                 | ((DWORD)GetGValue(bk) << 8) | (DWORD)GetBValue(bk);
-        GdipGraphicsClear(g, argb);
-
-        GdipSetInterpolationMode(g, BACKGROUND_INTERP_HQ_BICUBIC);
-        GdipDrawImageRectI(g, (GpImage*)src, dx, dy, dw, dh);
-
-        // 遮罩：颜色就是上面那个底色，只调不透明度。图太花时压住它，文字才读得清。
-        if (backgroundDim > 0) {
-            int a = (backgroundDim > 100) ? 100 : backgroundDim;
-            GpBrush* brush = NULL;
-            DWORD dimArgb = ((DWORD)(a * 255 / 100) << 24) | (argb & 0x00FFFFFFu);
-            if (GdipCreateSolidFill(dimArgb, &brush) == Ok && brush) {
-                GdipFillRectangleI(g, brush, 0, 0, cw, ch);
-                GdipDeleteBrush(brush);
-            }
-        }
-    }
-
-    GdipDeleteGraphics(g);
-    g = NULL;
-
-    // 得到独立的 32bpp DIB（wine 内部是 CreateDIBSection 再转像素，gdiplus/image.c:1597），
-    // 所以之后释放 GDI+ 位图不会影响它
-    if (GdipCreateHBITMAPFromBitmap(dst, &hbm, 0xFF000000) != Ok || !hbm) goto done;
-
-    {
-        LVBKIMAGEW img = {0};
-        img.ulFlags = LVBKIF_SOURCE_HBITMAP | LVBKIF_STYLE_NORMAL;
-        img.hbm = hbm;
-        // 设不进去时控件没接管这张位图，得自己删，否则每次重建漏一张
-        if (!SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img)) {
-            DeleteObject(hbm);
-            hbm = NULL;
-        }
-        else {
-            // 把两个背景色都切成 CLR_NONE：
-            // - clrBk（LVM_SETBKCOLOR）管擦除。只有它是 CLR_NONE 时 LISTVIEW_EraseBkgnd
-            //   （listview.c:9762）才会走到贴背景位图那条分支，否则整片填窗口白、图根本不出现。
-            // - clrTextBk（LVM_SETTEXTBKCOLOR）管条目填充：LISTVIEW_DrawItemPart 里
-            //   `if (clrTextBk != CLR_NONE) ExtTextOutW(..., ETO_OPAQUE, ...)`（:4677）会把
-            //   每一格的文字区填成白底，详细/列表/小图标视图下整屏都是白格子。
-            //   把它设成**默认值**而不是只改 NM_CUSTOMDRAW 的返回值，这样任何一条绘制路径
-            //   拿到的都是 CLR_NONE，不必依赖我们每个阶段都改一遍。
-            //   代价是选中行也失去了高亮底，所以 NM_CUSTOMDRAW 里给选中项显式补回实色。
-            ListView_SetBkColor(hwndContentView, CLR_NONE);
-            SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_NONE);
-        }
-    }
-
-done:
-    if (g) GdipDeleteGraphics(g);
-    if (dst) GdipDisposeImage((GpImage*)dst);
-    if (src) GdipDisposeImage((GpImage*)src);
-
-    // hbm 为空 = 这张图没做成（解码失败 / 尺寸异常 / 拿到 HBITMAP 失败）。此时要把控件
-    // 那边一并清干净：删掉上一次的位图、恢复两个背景色，退回纯色底。留着不清的话，
-    // 用户删掉图片或换掉盘符之后会一直看着上一张图，或者看一片没有底色的透明格子。
-    if (!hbm) {
-        LVBKIMAGEW img = {0};
-        img.ulFlags = LVBKIF_SOURCE_NONE;
-        SendMessageW(hwndContentView, LVM_SETBKIMAGEW, 0, (LPARAM)&img);
-        ListView_SetBkColor(hwndContentView, GetSysColor(COLOR_WINDOW));
-        SendMessageW(hwndContentView, LVM_SETTEXTBKCOLOR, 0, (LPARAM)CLR_DEFAULT);
-    }
-}
-
-// 客户区尺寸变了之后调用：BACKGROUND_REBUILD_MS 内连着来就只重合成一次，拖窗口时不必
-// 每帧都做一次高质量缩放。
-void scheduleBackgroundRebuild(void) {
-    if (!hwndMain || !hwndContentView || !hasBackgroundImage()) return;
-    KillTimer(hwndMain, TIMER_BACKGROUND_REBUILD);
-    SetTimer(hwndMain, TIMER_BACKGROUND_REBUILD, BACKGROUND_REBUILD_MS, NULL);
-}
-
-// 设 / 清背景图（NULL 或空串 = 清除）。立刻生效并写注册表。
-void setBackgroundImage(const wchar_t* path) {
-    if (path && path[0]) {
-        wcsncpy(backgroundPath, path, MAX_PATH - 1);
-        backgroundPath[MAX_PATH - 1] = L'\0';
-    }
-    else backgroundPath[0] = L'\0';
-
-    saveBackgroundSettings();
-    rebuildBackgroundBitmap();
 }
 
 // ========== PE icon extraction (bypasses Wine's buggy icon APIs) ==========
@@ -7128,15 +6822,6 @@ static void preScrollApply(UINT code) {
     preScrollCancelRetry();
     inPreScroll = true;
     inScrollMessage = true;      // 这次绘制算「滚动驱动」：准许绘制路径就地渲染兜底
-    // 滚之前标脏整屏（理由同 ContentViewWndProc 里那一处）：scroll_list 的
-    // ScrollWindowEx 会把像素连同贴在控件表面的背景图一起平移，只重画新露出的那一条，
-    // 于是滚完整屏背景都错位。事先标脏，它末尾那次 UpdateWindow 就会整屏重画，
-    // 背景按客户区坐标重贴、行画在新位置，一次画对，没有中间帧。
-    // 这条路径绕过了 ContentViewWndProc 的消息转发（直接调 OrigWndProc），那边兜不住。
-    if (hasBackgroundImage()) {
-        bgScrollRefresh = true;      // 同上：这一帧只贴背景，不就地渲图标
-        InvalidateRect(hwndContentView, NULL, TRUE);
-    }
     OrigWndProc(hwndContentView, WM_VSCROLL, MAKEWPARAM(code, 0), 0);
     inScrollMessage = false;
     inPreScroll = false;
@@ -7440,8 +7125,7 @@ static bool iconFillStep(void) {
     // 覆盖「补齐先于首次绘制完成」这种一次都没重画过的情形。
     if (iconPaintMissed) {
         iconPaintMissed = false;
-        // 同上：有背景图时条目没有实心底色，不擦会留残影
-        InvalidateRect(hwndContentView, NULL, hasBackgroundImage());
+        InvalidateRect(hwndContentView, NULL, FALSE);
     }
     scheduleIconPrefetch();    // 可见区搞定了，再用空档预取邻域
     return false;

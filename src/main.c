@@ -455,10 +455,6 @@ static void openNewWindow() {
 #define MSG_DEFERRED_EXIT_CONFIRM (WM_APP + 0x100)
 static bool exitConfirmPending = false;
 
-// 定义在文件后半段（挨着 MainWndProc），这里先声明：命令分派在这个函数里
-static void updateBackgroundMenuState(void);
-static void chooseBackgroundImage(void);
-
 void mainMenuCommand(WPARAM wParam) {
     switch (LOWORD(wParam)) {
         case ID_EDIT_CUT:
@@ -506,13 +502,6 @@ void mainMenuCommand(WPARAM wParam) {
         case ID_VIEW_CLEAR_ICON_CACHE:
             clearIconCaches();
             navigateRefresh();
-            break;
-        case ID_VIEW_BACKGROUND_IMAGE:
-            chooseBackgroundImage();
-            break;
-        case ID_VIEW_BACKGROUND_CLEAR:
-            setBackgroundImage(NULL);
-            updateBackgroundMenuState();
             break;
         case ID_VIEW_SHOW_HIDDEN:
             toggleShowHidden();
@@ -606,42 +595,6 @@ void resizeControls() {
 static bool refreshFlashPending = false;
 static void navigateRefreshNow(void);
 
-// 「清除背景图片」在没有背景图时置灰，别让用户点了没反应还以为是坏的
-static void updateBackgroundMenuState(void) {
-    if (!hMenuView) return;
-    EnableMenuItem(hMenuView, ID_VIEW_BACKGROUND_CLEAR,
-                   hasBackgroundImage() ? MF_ENABLED : MF_GRAYED);
-}
-
-// 选一张图片做内容区背景。只负责挑路径，格式支持范围由 GDI+ 的解码器决定。
-static void chooseBackgroundImage(void) {
-    // 过滤串是「标签\0通配\0通配\0\0」，标签要跟界面语言走。这里用 wcscpy_s/wcscat_s 拼
-    // 而不是 swprintf：格式串里要塞 NUL，printf 家族处理不了内嵌 NUL。
-    wchar_t filter[192] = {0};
-    wcscpy_s(filter, 192, lc_str.image_files);
-    wcscat_s(filter, 192, L" (*.jpg;*.jpeg;*.png;*.bmp;*.gif)");
-    {
-        size_t len = wcslen(filter) + 1;      // 跳过标签自己的结束符
-        wcscpy_s(filter + len, 192 - len, L"*.jpg;*.jpeg;*.png;*.bmp;*.gif");
-        len += wcslen(filter + len) + 1;
-        wcscpy_s(filter + len, 192 - len, L"*.*");
-    }
-
-    wchar_t file[MAX_PATH] = {0};
-    OPENFILENAMEW ofn = {0};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hwndMain;
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = file;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = lc_str.background_image;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&ofn)) return;
-
-    setBackgroundImage(file);
-    updateBackgroundMenuState();
-}
-
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) { 
         case WM_TIMER: {
@@ -652,19 +605,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 navigateRefreshNow();
                 return 0;
             }
-            // 背景图：客户区尺寸稳定下来之后重合成（见 scheduleBackgroundRebuild）
-            if (wParam == TIMER_BACKGROUND_REBUILD) {
-                KillTimer(hwnd, TIMER_BACKGROUND_REBUILD);
-                rebuildBackgroundBitmap();
-                return 0;
-            }
             break;
         }
         case WM_SIZE: {
             resizeControls();
-            // 尺寸变了背景位图就和客户区对不上了（LVM_SETBKIMAGE 是 1:1 贴图），
-            // 去抖后重合成一张
-            scheduleBackgroundRebuild();
             break;
         }   
         case WM_COMMAND: {
@@ -1002,9 +946,6 @@ static void createMainMenu() {
     AppendMenu(hmView, MF_POPUP, (UINT_PTR)hmDetailsView, lc_str.details_view);
 
     AppendMenu(hmView, MF_STRING, ID_VIEW_CLEAR_ICON_CACHE, lc_str.clear_icon_cache);
-    AppendMenu(hmView, MF_SEPARATOR, 0, NULL);
-    AppendMenu(hmView, MF_STRING, ID_VIEW_BACKGROUND_IMAGE, lc_str.background_image);
-    AppendMenu(hmView, MF_STRING, ID_VIEW_BACKGROUND_CLEAR, lc_str.clear_background);
 #ifdef USE_LIBCDIO
     HMENU hmMount = CreatePopupMenu();
     AppendMenu(hmMount, MF_STRING, ID_MOUNT_LOCATE_ISO, lc_str.locate_iso);
@@ -1033,7 +974,6 @@ static void createMainMenu() {
     AppendMenu(hmMain, MF_POPUP, (UINT_PTR)hmHelp, lc_str.help);
     
     SetMenu(hwndMain, hmMain);
-    updateBackgroundMenuState();
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow) {
@@ -1078,8 +1018,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     
     loadBookmarks();
     loadAutoOpenBookmark();
-    // 背景图的路径与遮罩强度（只读注册表，真正的合成要等窗口建好、知道客户区多大）
-    loadBackgroundSettings();
     startupMark("bookmarks + settings");
 
     NONCLIENTMETRICS ncm = {0};
@@ -1176,15 +1114,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         openAutoOpenBookmark();
     }
     startupMark("navigate: enum + icons");
-
-    // 设过背景图就在首帧之前合成一次。两件事要先做：
-    //   ① 客户区尺寸要等布局算完才准 —— 子控件是在 CreateWindowEx 之后才建的，那一次
-    //      WM_SIZE 里它们还不存在，所以这里补一次布局，否则拿到 0x0 会直接返回，
-    //      图片要等 ShowWindow 之后那次 WM_SIZE 触发去抖，晚 200ms 才出现；
-    //   ② 一次高质量缩放对开了这个功能的用户是可接受的启动代价，放到 ShowWindow 之后
-    //      反而会出现「先没背景、过一下跳出来」。
-    resizeControls();
-    if (hasBackgroundImage()) rebuildBackgroundBitmap();
 
     ShowWindow(hwndMain, SW_SHOW);
     startupMark("ShowWindow");

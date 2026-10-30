@@ -76,9 +76,6 @@
 #define ID_VIEW_FOLDER_TOP     322
 #define ID_VIEW_FOLDER_BOTTOM  323
 #define ID_VIEW_FOLDER_PLAIN   324
-// 内容区背景图片：选图 / 清除
-#define ID_VIEW_BACKGROUND_IMAGE 327
-#define ID_VIEW_BACKGROUND_CLEAR 328
 
 // 大图标视图设置。两组内部各段连续，供 CheckMenuRadioItem 使用
 #define ID_VIEW_ICONSIZE_32    330
@@ -312,10 +309,6 @@ struct LC_STR {
     // 侧边栏两个固定入口的名字：%TEMP% 与开始菜单目录
     wchar_t* temp_folder;
     wchar_t* start_menu;
-    // 内容区背景图片：菜单两项 + 选图对话框里的文件类型
-    wchar_t* background_image;
-    wchar_t* clear_background;
-    wchar_t* image_files;
     // 内置图片查看器：解码失败时的提示
     wchar_t* msg_open_image_failed;
 };
