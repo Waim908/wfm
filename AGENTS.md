@@ -32,6 +32,13 @@
 - 列表与图标绘制有一批 Wine 侧的硬约束（不要开 `LVS_EX_DOUBLEBUFFER`、虚拟列表不能物化、
   排序比较器不许碰图标与文件系统、绘制帧上不能同步枚举目录）。这些在 `src/content_view.c`
   对应小节的注释里写了成因，改动前先读那一节，不要只看结论。
+- **内容区背景图片不要做**。`LVM_SETBKIMAGE` 把位图贴在**控件表面**上，而 `scroll_list` 走
+  `ScrollWindowEx(整块 rcList)`：滚动时像素连同背景图一起被平移，之后只重画新露出的那一条，
+  于是滚过之后整屏背景都错位。要修只能在滚动时整屏重画，而整屏重画与滚动自带的那次绘制
+  之间**必然隔一帧**，表现为抖动。已经否掉的路（都回过源码）：滚动前标脏整屏、把图标渲染
+  额度压到最低、`WM_SETREDRAW(FALSE)`（wine 会清掉 `WS_VISIBLE`，`win32u/defwnd.c:2563`，
+  子窗口滚动中整个消失）、`LockWindowUpdate`（partial stub，`win32u/dce.c:2011`，
+  完全不阻止绘制）。要视觉定制就只做纯色底（`LVM_SETBKCOLOR`），不要碰图片。
 
 ## 性能
 
