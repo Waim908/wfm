@@ -313,6 +313,7 @@ INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM l
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_DEV_NAME), lc_str.app_dev_name);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_MOD_NAME), lc_str.app_mod_name);
             SetWindowText(GetDlgItem(hwndDlg, IDC_APP_URL), lc_str.app_url);
+            SetWindowText(GetDlgItem(hwndDlg, IDC_APP_EXTRA), lc_str.app_extra);
             return (INT_PTR)TRUE;
         }
         case WM_CTLCOLORSTATIC: {
