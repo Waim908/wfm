@@ -32,6 +32,13 @@
 - 列表与图标绘制有一批 Wine 侧的硬约束（不要开 `LVS_EX_DOUBLEBUFFER`、虚拟列表不能物化、
   排序比较器不许碰图标与文件系统、绘制帧上不能同步枚举目录）。这些在 `src/content_view.c`
   对应小节的注释里写了成因，改动前先读那一节，不要只看结论。
+- **图片解码只有 bmp / gif / ico / jpeg / png / tiff**。`dlls/windowscodecs` 下就是
+  `bmpdecode.c`、`pngformat.c`、`libjpeg.c`、`ungif.c`、`icoformat.c`、`libtiff.c` 这几个解码器。
+  不要往 `isImageFileName` 里加 webp / heic / avif —— 列上解不了的格式，只会让这些文件被当成
+  图片、双击进来再报「无法打开」。
+- **改窗口标题（`SetWindowText`）在 wine 下要过一次合成器**，几十毫秒级。任何「每帧 / 每格
+  / 每次滚动」路径上都不要调它：标题里带进度、百分比这类会频繁变化的量时，改到去抖定时器里
+  更新。列表侧改标题的开销见「性能」一节里 `refresh: entry` 那条。
 - **内容区背景图片不要做**。`LVM_SETBKIMAGE` 把位图贴在**控件表面**上，而 `scroll_list` 走
   `ScrollWindowEx(整块 rcList)`：滚动时像素连同背景图一起被平移，之后只重画新露出的那一条，
   于是滚过之后整屏背景都错位。要修只能在滚动时整屏重画，而整屏重画与滚动自带的那次绘制
