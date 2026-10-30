@@ -86,6 +86,11 @@ static int imgPanX = 0, imgPanY = 0; // 相对「居中显示」位置的偏移
 // 不必整屏重绘 —— 放大到 2560 宽之后再拖动，这一下省的是整屏的填色和重画。
 static RECT imgLastPaint = {0};
 
+// 用户自己拖过窗口边框 / 移动过窗口之后就置上：之后换图不再按图片比例去改窗口大小，
+// 免得刚摆好的窗口位置被抢走。程序自己 SetWindowPos 不会触发 WM_EXITSIZEMOVE，所以
+// 这个标志只认真正的手动调整。
+static bool viewerUserSized = false;
+
 static wchar_t imgPath[MAX_PATH] = {0};
 static wchar_t imgDir[MAX_PATH] = {0};
 
@@ -223,6 +228,62 @@ static void viewerClampPan(void) {
         if (imgPanY > maxPan) imgPanY = maxPan;
         if (imgPanY < -maxPan) imgPanY = -maxPan;
     }
+}
+
+// 按图片比例定窗口大小：竖图开竖窗、横图开横窗，最大不超过屏幕可用区域的 90%。
+// 客户区高度要额外加回底栏那一条 —— 图像区 = 客户区减底栏，要让图正好 1:1 放得下，
+// 客户区就得比图高多出 IMG_BAR_H。
+// 只在用户没手动调过窗口时调用（见 viewerUserSized）。
+static void viewerFitWindowToImage(void) {
+    if (!hwndViewer || !imgSrcW || !imgSrcH) return;
+
+    // 取**窗口所在显示器**的工作区（rcWork 已经扣掉任务栏），而不是主屏：
+    // SPI_GETWORKAREA 只认主显示器，窗口被挪到副屏时会拿错尺寸，多屏下直接算歪。
+    RECT work = {0};
+    MONITORINFO mi = {0};
+    mi.cbSize = sizeof(mi);
+    HMONITOR mon = MonitorFromWindow(hwndViewer, MONITOR_DEFAULTTONEAREST);
+    if (mon && GetMonitorInfoW(mon, &mi)) work = mi.rcWork;
+    else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) return;
+
+    int workW = work.right - work.left;
+    int workH = work.bottom - work.top;
+    if (workW < 200 || workH < 200) return;
+
+    int maxClientW = (int)((double)workW * 0.9);
+    int maxClientH = (int)((double)workH * 0.9);
+    if (maxClientH < IMG_BAR_H + 160) maxClientH = IMG_BAR_H + 160;
+
+    // 先按原始像素算，超出屏幕就等比缩；小图不放大（1:1 看最清楚）
+    double k = 1.0;
+    if ((double)imgSrcW > (double)maxClientW) k = (double)maxClientW / (double)imgSrcW;
+    double maxImgH = (double)(maxClientH - IMG_BAR_H);
+    if ((double)imgSrcH * k > maxImgH) k = maxImgH / (double)imgSrcH;
+    if (k > 1.0) k = 1.0;
+
+    int imgW = (int)((double)imgSrcW * k + 0.5);
+    int imgH = (int)((double)imgSrcH * k + 0.5);
+    // 太小的图（图标之类）给个保底客户区，否则窗口只有一百多像素宽，按钮排不下
+    if (imgW < 320) imgW = 320;
+    if (imgH < 240) imgH = 240;
+
+    RECT rc = {0, 0, imgW, imgH + IMG_BAR_H};
+    if (!AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE)) return;
+    int winW = rc.right - rc.left;
+    int winH = rc.bottom - rc.top;
+    // 和 WM_GETMINMAXINFO 里的最小跟踪尺寸对齐：SetWindowPos 不受跟踪下限约束，
+    // 这里不兜一下的话会开出一个比「用户能拖到的下限」还小的窗口。
+    if (winW < 420) winW = 420;
+    if (winH < 320) winH = 320;
+
+    int x = work.left + (workW - winW) / 2;
+    int y = work.top + (workH - winH) / 2;
+    if (x < work.left) x = work.left;
+    if (y < work.top) y = work.top;
+    if (x + winW > work.right) x = work.right - winW;
+    if (y + winH > work.bottom) y = work.bottom - winH;
+
+    SetWindowPos(hwndViewer, NULL, x, y, winW, winH, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // 按目标尺寸重做降采样缓存。高质量重采样只在这里做 —— 绘制时永远是「有缓存就贴」，
@@ -389,6 +450,9 @@ static bool viewerLoad(const wchar_t* fullPath) {
 
     imgZoom = 1.0;
     imgPanX = imgPanY = 0;
+    // 用户没手动调过窗口，就按这张图的比例和屏幕大小重开一次；调过就保持他摆好的样子。
+    // 放在重采样之前：窗口尺寸一变，降采样缓存的目标尺寸也跟着变，先定窗口再算缓存。
+    if (!viewerUserSized) viewerFitWindowToImage();
     viewerRebuildScaled();     // 换图时直接做一次高质量重采样
     viewerUpdateTitle();
     viewerUpdateButtons();
@@ -663,6 +727,12 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             return 0;
 
+        case WM_EXITSIZEMOVE:
+            // 只有用户自己拖过边框 / 移动过窗口才会到这里（程序 SetWindowPos 不会）。
+            // 记下来之后换图就不再按图片比例改窗口大小，别把用户摆好的窗口抢走。
+            viewerUserSized = true;
+            return 0;
+
         case WM_MOUSEWHEEL: {
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             if (delta > 0) viewerZoomBy(1.25);
@@ -734,7 +804,9 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     viewerZoomBy(0.8);
                     return 0;
                 case '0':
-                    imgZoom = 1.0;      // 回到适应窗口
+                    // 只复位缩放与平移，不动窗口大小：窗口尺寸是「打开这张图时」定下的，
+                    // 按 0 的意思是「回到适应窗口的缩放」，不是「重开一次窗口」。
+                    imgZoom = 1.0;
                     imgPanX = imgPanY = 0;
                     viewerRebuildScaled();
                     viewerUpdateTitle();
@@ -755,6 +827,7 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (imgBrushBg)      { DeleteObject(imgBrushBg);      imgBrushBg = NULL; }
             if (imgBrushBar)     { DeleteObject(imgBrushBar);     imgBrushBar = NULL; }
             if (imgBrushBarLine) { DeleteObject(imgBrushBarLine); imgBrushBarLine = NULL; }
+            viewerUserSized = false;   // 下次开窗口重新按图片适配
             hwndViewer = NULL;
             return 0;
     }
@@ -764,6 +837,7 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 void openImageViewer(const wchar_t* path) {
     if (!path || !path[0]) return;
 
+    bool created = false;
     if (!hwndViewer) {
         WNDCLASSEXW wc = {0};
         wc.cbSize = sizeof(wc);
@@ -774,26 +848,39 @@ void openImageViewer(const wchar_t* path) {
         wc.lpszClassName = IMG_CLASS_NAME;
         RegisterClassExW(&wc);
 
-        RECT rc = {0, 0, 900, 700};
+        // 先按「工作区 60%」建出来，但**不显示**：真正的尺寸要等解码完、按图片比例算
+        // （viewerFitWindowToImage）。先显示再改尺寸，用户会看到窗口跳一下。
+        // 工作区取主窗口所在显示器 —— 主窗口在副屏时查看器也跟着过去。
+        RECT work = {0, 0, 900, 700};
+        MONITORINFO mi = {0};
+        mi.cbSize = sizeof(mi);
+        HMONITOR mon = MonitorFromWindow(hwndMain ? hwndMain : GetDesktopWindow(),
+                                         MONITOR_DEFAULTTONEAREST);
+        if (mon && GetMonitorInfoW(mon, &mi)) work = mi.rcWork;
+        else if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+            work.left = 0; work.top = 0; work.right = 900; work.bottom = 700;
+        }
+        int workW = work.right - work.left;
+        int workH = work.bottom - work.top;
+        int cw = (int)((double)workW * 0.6);
+        int ch = (int)((double)workH * 0.6);
+        if (cw < 320) cw = 320;
+        if (ch < 240) ch = 240;
+
+        RECT rc = {0, 0, cw, ch};
         AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
 
-        // 居中到主窗口（主窗口可能被移动过，别固定死在屏幕中央）
-        RECT mainRc = {0};
-        int x = 0, y = 0;
-        if (hwndMain && GetWindowRect(hwndMain, &mainRc)) {
-            x = mainRc.left + ((mainRc.right - mainRc.left) - w) / 2;
-            y = mainRc.top + ((mainRc.bottom - mainRc.top) - h) / 2;
-        }
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
+        int x = work.left + (workW - w) / 2;
+        int y = work.top + (workH - h) / 2;
+        if (x < work.left) x = work.left;
+        if (y < work.top) y = work.top;
 
         hwndViewer = CreateWindowExW(0, IMG_CLASS_NAME, L"", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                      x, y, w, h, hwndMain, NULL, globalHInstance, NULL);
         if (!hwndViewer) return;
-        ShowWindow(hwndViewer, SW_SHOW);
-        UpdateWindow(hwndViewer);
+        created = true;
     }
 
     if (!viewerLoad(path)) {
@@ -804,6 +891,11 @@ void openImageViewer(const wchar_t* path) {
         }
         MessageBoxW(hwndMain, lc_str.msg_open_image_failed, lc_str.alert, MB_OK | MB_ICONWARNING);
         return;
+    }
+    // 新建的窗口到这一刻才显示：此时尺寸、位置、第一帧内容都已经按图片定好了
+    if (created) {
+        ShowWindow(hwndViewer, SW_SHOW);
+        UpdateWindow(hwndViewer);
     }
     // 查看器是最小化的就恢复出来：SetForegroundWindow 不会把最小化的窗口还原，
     // 那样用户双击另一张图只会看到任务栏闪一下，窗口还在最小化状态里。
