@@ -11,6 +11,8 @@
 #define IDC_APP_DEV_NAME 111
 #define IDC_APP_MOD_NAME 123
 #define IDC_APP_URL 124
+// 关于对话框最后一行，可留空；留空时只占位不显示内容
+#define IDC_APP_EXTRA 128
 #define IDD_FILE_ACTION 112
 #define IDC_PRELOADER 113
 #define IDI_SEARCH 114
@@ -154,8 +156,14 @@ void ensureComInitialized(void);
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5-mod.2.9"
+#define APP_VERSION L"1.5-mod.3.0"
 #define APP_DEV_NAME L"BrunoSX"
+
+// 关于对话框最后一行显示的附加说明。默认留空，需要时可以在这里填一段文字，
+// 或在编译时用 -DAPP_EXTRA=L"..." 覆盖。
+#ifndef APP_EXTRA
+#define APP_EXTRA L"Halloween Edition~"
+#endif
 
 #ifndef RESOURCE_H
 #define RESOURCE_H
@@ -166,6 +174,8 @@ struct LC_STR {
     wchar_t* app_dev_name;
     wchar_t* app_mod_name;
     wchar_t* app_url;
+    // 关于对话框最后一行，可以为空
+    wchar_t* app_extra;
     wchar_t* application;
     wchar_t* shortcut;
     wchar_t* file;
