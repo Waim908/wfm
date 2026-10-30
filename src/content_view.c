@@ -3956,6 +3956,12 @@ static void saveViewStyle(void);
 // 「是否已经导航过」区分，而不是把这次调用删掉。
 bool hasNavigatedContent = false;
 
+// 当前视图样式。给状态栏右下角那排切换按钮取高亮用（它们不维护自己的副本，
+// 免得两个地方各记一份、迟早对不上）。
+enum ViewStyle getViewStyle(void) {
+    return viewStyle;
+}
+
 void setViewStyle(enum ViewStyle newViewStyle) {
     LONG_PTR wndstyle = GetWindowLongPtr(hwndContentView, GWL_STYLE);
     wndstyle &= ~LVS_TYPEMASK;
@@ -4018,6 +4024,8 @@ void setViewStyle(enum ViewStyle newViewStyle) {
     updateIconViewMenuCheckmarks();
     // 同理：「详细信息视图」父项（磁盘占用显示）也要按新视图刷新可用状态。
     updateDriveBarMenuCheckmarks();
+    // 状态栏右下角那排按钮的高亮要跟着走（菜单切换、快捷键切换都会到这儿）
+    refreshStatusbarViewButtons();
 }
 
 static void saveViewStyle(void) {

@@ -57,6 +57,9 @@ void updateGuiFont() {
         InvalidateRect(hwndNavbar, NULL, TRUE);
         SendMessage(hwndNavbar, WM_SIZE, 0, 0);
     }
+
+    // 字体变了状态栏高度可能跟着变，右下角那排视图按钮要重新贴过去
+    layoutStatusbarViewButtons();
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +591,9 @@ void resizeControls() {
     
     int contentViewX = treeviewRect.right + sizebarWidth;
     SetWindowPos(hwndContentView, NULL, contentViewX, navbarRect.bottom, rect.right - contentViewX, treeviewHeight, SWP_NOZORDER);  
+
+    // 状态栏右端那排视图按钮是状态栏的兄弟窗口，状态栏位置变了就要重新摆
+    layoutStatusbarViewButtons();
 }
 
 // 「刷新」的闪一下（定义与说明见下面的 navigateRefresh）。放在这里是因为 MainWndProc

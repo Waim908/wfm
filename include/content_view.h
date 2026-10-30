@@ -25,6 +25,8 @@ void createContentView();
 void clearContentView();
 void refreshContentView();
 void setViewStyle(enum ViewStyle newViewStyle);
+// 当前视图样式（状态栏右下角的切换按钮靠它决定高亮哪个）
+enum ViewStyle getViewStyle(void);
 void searchFor(wchar_t* keyword);
 
 // 「刷新」的视觉反馈（见 main.c 的 navigateRefresh）：把内容区清空并**立刻**画一帧，
