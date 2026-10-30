@@ -1057,6 +1057,10 @@ static BYTE* renderIconPixelsOffThread(const struct IconRenderJob* job) {
 
 static DWORD WINAPI iconRenderTask(LPVOID param) {
     (void)param;
+    // 图标渲染是后台活：渲染出来是给「下一帧或补齐后的重画」用的，不是这一帧必须等的东西。
+    // 与主线程同级时，滚动中大目录的一批解码会把绘制挤掉（每帧多卡十几毫秒）。
+    // 降到 below normal，主线程的绘制先跑，渲染跟着补。
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     for (;;) {
         if (InterlockedCompareExchange(&iconRenderStop, 0, 0)) break;
 
@@ -1466,8 +1470,20 @@ static int countItemsInFolder(const wchar_t* dir, unsigned generation) {
 
 static DWORD WINAPI folderCountTask(LPVOID param) {
     (void)param;
+    // 纯后台线程，降到最低优先级：条目数是「过一会儿自己冒出来的数字」，而主线程在画界面。
+    // 两边同级时，核少的机器上主线程的绘制会被这几条 FindFirstFile 循环挤掉 ——
+    // 表现就是「进大目录后第一次滚动一顿一顿，滚一遍就好了」（滚完那些目录也数完了）。
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
     for (;;) {
         if (InterlockedCompareExchange(&folderCountStop, 0, 0)) break;
+
+        // 正在滚动就主动让路（lastScrollTick 由主线程在每条滚动消息里更新）。
+        // 优先级只是「抢的时候让」，这里直接停手：滚动期间用户不会去看条目数，
+        // 停手 120ms 后自动恢复，换来的是滚动时不再有后台满核枚举。
+        if (GetTickCount() - lastScrollTick < 120) {
+            WaitForSingleObject(folderCountWake, 40);
+            continue;
+        }
 
         struct FolderCountJob job;
         bool have = false;
