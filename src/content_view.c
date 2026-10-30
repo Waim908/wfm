@@ -2828,6 +2828,15 @@ LRESULT CALLBACK ContentViewWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     LRESULT result = preScrolled ? 0 : OrigWndProc(hwnd, msg, wParam, lParam);
     if (scrollMsg) inScrollMessage = false;
 
+    // 背景图（LVM_SETBKIMAGE）是贴在控件表面上的位图，而 Wine 的 scroll_list 走的是
+    // ScrollWindowEx(整块 rcList)：像素连同背景图一起被平移，之后只补画新露出的那一条。
+    // 于是结果就是「背景跟着列表一起滚、滚到哪错到哪」，行数越多滚得越远越明显。
+    // 这里把整块客户区标脏并带擦除，让 LISTVIEW_EraseBkgnd 按客户区坐标重贴一次背景图
+    // （clrBk 已是 CLR_NONE，那条分支正好做这件事）。没有背景图时一次都不进来。
+    if (scrollMsg && !preScrolled && hasBackgroundImage()) {
+        InvalidateRect(hwnd, NULL, TRUE);
+    }
+
     // 滚完之后对**新的**可见区再做一遍上面那件事。滚动前那一次扫的是旧范围，而快速拖动时
     // 新滚进来的项可能根本没被这一帧画到（控件只重绘脏区），它的槽时间戳就显得很旧 ——
     // 池满时被挑作 LRU 受害者顶掉，下一帧那一格就是空白、补齐再渲回来 = 「闪一下」。
@@ -7077,6 +7086,10 @@ static void preScrollApply(UINT code) {
     OrigWndProc(hwndContentView, WM_VSCROLL, MAKEWPARAM(code, 0), 0);
     inScrollMessage = false;
     inPreScroll = false;
+    // 背景图是贴在控件表面上的位图，Wine 的 scroll_list 用 ScrollWindowEx 把像素连同它一起
+    // 平移，只补画新露出的那一条 —— 滚过之后整屏背景都错位了，看着像背景跟着列表在滚。
+    // 这条路径绕过了 ContentViewWndProc 的消息转发（直接调 OrigWndProc），所以那边兜不住。
+    if (hasBackgroundImage()) InvalidateRect(hwndContentView, NULL, TRUE);
 }
 
 // 返回 true = 这条 WM_VSCROLL 已经处理完（已经滚过，或者正押着）。false = 照常交给控件。
