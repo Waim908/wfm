@@ -26,6 +26,9 @@ typedef int GpStatus;
 typedef void GpBitmap;
 typedef void GpImage;
 typedef void GpGraphics;
+typedef float REAL;
+typedef void GpImageAttributes;
+typedef BOOL (CALLBACK *DrawImageAbort)(void*);
 #define WINGDIPAPI __stdcall
 #define GDIPCONST const
 enum { GpOk = 0 };
@@ -37,6 +40,14 @@ GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(INT, INT, INT, INT, BYTE*, GpBitma
 GpStatus WINGDIPAPI GdipGetImageGraphicsContext(GpImage*, GpGraphics**);
 GpStatus WINGDIPAPI GdipSetInterpolationMode(GpGraphics*, INT);
 GpStatus WINGDIPAPI GdipDrawImageRectI(GpGraphics*, GpImage*, INT, INT, INT, INT);
+// 带源矩形的那一版：只把源图的一块画到目标矩形里。绘制放大后的画面时用它，
+// 免得每帧把整张源图拷一遍。参数是 REAL（float），不是为了省字节 —— 中途转成
+// 整数会让平移时每帧的取整误差不一致，画面跟着抖。
+GpStatus WINGDIPAPI GdipDrawImageRectRect(GpGraphics*, GpImage*,
+                                          REAL, REAL, REAL, REAL,
+                                          REAL, REAL, REAL, REAL,
+                                          INT, GDIPCONST GpImageAttributes*,
+                                          DrawImageAbort, void*);
 GpStatus WINGDIPAPI GdipDrawImageI(GpGraphics*, GpImage*, INT, INT);
 GpStatus WINGDIPAPI GdipCreateFromHDC(HDC, GpGraphics**);
 GpStatus WINGDIPAPI GdipDeleteGraphics(GpGraphics*);
@@ -46,6 +57,7 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 #define IMG_PIXEL_FORMAT_ARGB   0x0026200A   // PixelFormat32bppARGB
 #define IMG_INTERP_HQ_BICUBIC   7            // InterpolationModeHighQualityBicubic
 #define IMG_INTERP_BILINEAR     3            // InterpolationModeBilinear（滚轮预览用）
+#define IMG_UNIT_PIXEL          2            // UnitPixel（GdipDrawImageRectRect 的源矩形单位）
 #define IMG_BG_RGB              RGB(24, 24, 24)    // 图像区底色
 #define IMG_BAR_RGB             RGB(16, 16, 16)    // 底部按钮条，比图像区更深一档
 #define IMG_BAR_LINE_RGB        RGB(52, 52, 52)    // 按钮条顶边那条分隔线
@@ -55,6 +67,10 @@ GpStatus WINGDIPAPI GdipDisposeImage(GpImage*);
 #define IMG_MAX_DIM             2560
 #define IMG_MAX_ZOOM            8.0
 #define IMG_MAX_FILES           4096
+// 缩略缓存（mipmap 一级）的边长。缩小到比这还小的尺寸时，绘制改用这张小图当采样源：
+// 从 2560 直接缩到 200 每格都要把整张源图遍历一遍，滚轮连续缩小时就明显跟不上；
+// 从 720 缩到 200 快一个数量级，而这个尺寸下肉眼看不出差别。
+#define IMG_THUMB_DIM           720
 
 // 底部按钮条高度。图像区域是「客户区减去这一条」。
 // 44 而不是 36：按钮 26 高，上下各留 9 的空白，看着才不像贴边。
@@ -80,6 +96,9 @@ static GpBitmap* imgSrc = NULL;      // 解码后的原图
 static UINT imgSrcW = 0, imgSrcH = 0;
 static GpBitmap* imgScaled = NULL;   // 按显示尺寸降采样好的缓存
 static int imgScaledW = 0, imgScaledH = 0;
+// mipmap 一级：换图时从 imgSrc 缩出来的一张小的，缩小预览用它当采样源（见 IMG_THUMB_DIM）
+static GpBitmap* imgThumb = NULL;
+static int imgThumbW = 0, imgThumbH = 0;
 static double imgZoom = 1.0;         // 1.0 = 适应窗口
 static int imgPanX = 0, imgPanY = 0; // 相对「居中显示」位置的偏移
 // 上一帧图像实际占的矩形（客户区坐标）。拖动平移时用它算新旧位置的并集，只失效这两块，
@@ -141,13 +160,53 @@ static void viewerFreeScaled(void) {
     imgScaledW = imgScaledH = 0;
 }
 
+static void viewerFreeThumb(void) {
+    if (imgThumb) {
+        GdipDisposeImage((GpImage*)imgThumb);
+        imgThumb = NULL;
+    }
+    imgThumbW = imgThumbH = 0;
+}
+
 static void viewerFreeSource(void) {
     viewerFreeScaled();
+    viewerFreeThumb();
     if (imgSrc) {
         GdipDisposeImage((GpImage*)imgSrc);
         imgSrc = NULL;
     }
     imgSrcW = imgSrcH = 0;
+}
+
+// 从 imgSrc 缩出一张边长不超过 IMG_THUMB_DIM 的小图，供缩小预览当采样源。
+// 换图时调一次即可（与窗口尺寸、缩放都无关）。
+static void viewerBuildThumb(void) {
+    viewerFreeThumb();
+    if (!imgSrc || !imgSrcW || !imgSrcH) return;
+    if (imgSrcW <= IMG_THUMB_DIM && imgSrcH <= IMG_THUMB_DIM) return;   // 源本来就不大，用不着
+
+    int biggest = (imgSrcW > imgSrcH) ? (int)imgSrcW : (int)imgSrcH;
+    double k = (double)IMG_THUMB_DIM / (double)biggest;
+    int tw = (int)((double)imgSrcW * k + 0.5);
+    int th = (int)((double)imgSrcH * k + 0.5);
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
+
+    GpBitmap* bmp = NULL;
+    if (GdipCreateBitmapFromScan0(tw, th, 0, IMG_PIXEL_FORMAT_ARGB, NULL, &bmp) != GpOk || !bmp) return;
+
+    GpGraphics* g = NULL;
+    if (GdipGetImageGraphicsContext((GpImage*)bmp, &g) != GpOk || !g) {
+        GdipDisposeImage((GpImage*)bmp);
+        return;
+    }
+    GdipSetInterpolationMode(g, IMG_INTERP_HQ_BICUBIC);
+    GdipDrawImageRectI(g, (GpImage*)imgSrc, 0, 0, tw, th);
+    GdipDeleteGraphics(g);
+
+    imgThumb = bmp;
+    imgThumbW = tw;
+    imgThumbH = th;
 }
 
 static void viewerFreeSiblings(void) {
@@ -176,9 +235,10 @@ static void viewerImageArea(int* cw, int* ch) {
     if (*ch < 1) *ch = 1;
 }
 
-// 当前该显示多大：适应窗口的比例 × imgZoom，再受 IMG_MAX_DIM 封顶。
-// 绘制和重采样都用它，保证两边算出来的尺寸永远一致。
-static void viewerTargetSize(int* dw, int* dh) {
+// 当前该显示多大：适应窗口的比例 × imgZoom。**不封顶** —— 放大到 800% 就该显示 8 倍大。
+// 以前这里把尺寸截到 IMG_MAX_DIM，于是放大到触顶之后画面就再也不变了：百分比还在涨、
+// 图一点不动（"477% 和 800% 差不多"就是这么来的）。缓存该多大是另一回事，见 viewerCacheSize。
+static void viewerDisplaySize(int* dw, int* dh) {
     *dw = 1;
     *dh = 1;
     if (!imgSrcW || !imgSrcH) return;
@@ -194,17 +254,23 @@ static void viewerTargetSize(int* dw, int* dh) {
     int h = (int)((double)imgSrcH * s + 0.5);
     if (w < 1) w = 1;
     if (h < 1) h = 1;
-    // 超上限就等比缩下来：宁可少放大，也不要为了一张缓存吃掉几十 MB
-    if (w > IMG_MAX_DIM || h > IMG_MAX_DIM) {
-        int biggest = (w > h) ? w : h;
-        double k = (double)IMG_MAX_DIM / (double)biggest;
-        w = (int)((double)w * k);
-        h = (int)((double)h * k);
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
-    }
     *dw = w;
     *dh = h;
+}
+
+// 降采样缓存该做多大：显示尺寸，但受 IMG_MAX_DIM 封顶（一张 32bpp 位图的字节数是 w*h*4，
+// 2560 就已经 26MB）。超过上限时绘制会把这张缓存拉伸到真正的显示尺寸 —— 那时画面会糊，
+// 但尺寸是对的，放大有反应。
+static void viewerCacheSize(int* dw, int* dh) {
+    viewerDisplaySize(dw, dh);
+    if (*dw > IMG_MAX_DIM || *dh > IMG_MAX_DIM) {
+        int biggest = (*dw > *dh) ? *dw : *dh;
+        double k = (double)IMG_MAX_DIM / (double)biggest;
+        *dw = (int)((double)*dw * k);
+        *dh = (int)((double)*dh * k);
+        if (*dw < 1) *dw = 1;
+        if (*dh < 1) *dh = 1;
+    }
 }
 
 // 把平移量夹在合法范围内：图比可视区大时，边缘不能被拖进可视区里面（那样会拖出一片
@@ -212,7 +278,7 @@ static void viewerTargetSize(int* dw, int* dh) {
 // 放大 / 缩小之后也要再夹一次 —— 缩放改变了可拖范围。
 static void viewerClampPan(void) {
     int dw = 0, dh = 0;
-    viewerTargetSize(&dw, &dh);
+    viewerDisplaySize(&dw, &dh);
     int cw = 0, ch = 0;
     viewerImageArea(&cw, &ch);
 
@@ -292,7 +358,7 @@ static void viewerRebuildScaled(void) {
     if (!hwndViewer || !imgSrc) return;
 
     int dw = 0, dh = 0;
-    viewerTargetSize(&dw, &dh);
+    viewerCacheSize(&dw, &dh);       // 缓存受 IMG_MAX_DIM 封顶，与显示尺寸分开算
     if (dw == imgScaledW && dh == imgScaledH && imgScaled) return;   // 尺寸没变，缓存还能用
 
     viewerFreeScaled();
@@ -430,6 +496,7 @@ static bool viewerLoad(const wchar_t* fullPath) {
     // 长宽比不变，所以算出来的目标尺寸仍然对，而标题不会被改成 2560x1920 那种谎话。
     imgSrcW = w;
     imgSrcH = h;
+    viewerBuildThumb();        // 缩小预览的采样源，与窗口尺寸无关，换图时做一次
 
     wcsncpy(imgPath, fullPath, MAX_PATH - 1);
     imgPath[MAX_PATH - 1] = L'\0';
@@ -676,7 +743,7 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             if (imgScaled) {
                 int dw = 0, dh = 0;
-                viewerTargetSize(&dw, &dh);
+                viewerDisplaySize(&dw, &dh);
                 int cw = rc.right - rc.left;
                 int ch = rc.bottom - rc.top - IMG_BAR_H;
                 if (ch < 1) ch = 1;
@@ -693,19 +760,53 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 // 底栏上面去，把按钮盖住；拖到底部时尤其明显。
                 IntersectClipRect(hdc, rc.left, rc.top, rc.right, rc.top + ch);
 
+                // 选采样源。放大的时候缓存本来就不够大，只能用缓存；缩得很小时改用缩略图 ——
+                // 从 2560 缩到 200 每格都要遍历整张源图，滚轮连续缩小就明显跟不上；从 720
+                // 缩到 200 快一个数量级，而这个尺寸下画质看不出差别。
+                GpBitmap* src = imgScaled;
+                int sw = imgScaledW, sh = imgScaledH;
+                if (imgThumb && imgThumbW * 4 <= sw * 3 && dw <= imgThumbW) {
+                    src = imgThumb;
+                    sw = imgThumbW;
+                    sh = imgThumbH;
+                }
+
                 GpGraphics* g = NULL;
-                if (GdipCreateFromHDC(hdc, &g) == GpOk && g) {
-                    if (dw == imgScaledW && dh == imgScaledH) {
-                        // 缓存就是按当前目标尺寸做的：直接 1:1 贴。这条是常态（适配窗口、
+                if (src && GdipCreateFromHDC(hdc, &g) == GpOk && g) {
+                    if (dw == sw && dh == sh) {
+                        // 源就是按当前目标尺寸做的：直接 1:1 贴。这条是常态（适配窗口、
                         // 缩放到位之后），走 GdipDrawImageI 而不是 DrawImageRectI —— 后者
                         // 即使尺寸相同也会过一次插值管线，拖动平移时每帧都白花这笔钱。
-                        GdipDrawImageI(g, (GpImage*)imgScaled, x, y);
+                        GdipDrawImageI(g, (GpImage*)src, x, y);
                     }
                     else {
-                        // 滚轮刚动、缓存还没重做（去抖 140ms 内）：把旧缓存拉伸成临时预览，
-                        // bilinear 够快，等定时器到了再换成高质量重采样的结果。
-                        GdipSetInterpolationMode(g, IMG_INTERP_BILINEAR);
-                        GdipDrawImageRectI(g, (GpImage*)imgScaled, x, y, dw, dh);
+                        // 把可视区反算成「源图的哪一块」，只画那一块。
+                        // 放大到 800% 时目标矩形是 7200x5400，窗口只有 900x700：GdipDrawImageRectI
+                        // 会按整张目标矩形去准备源数据（`GdipDrawImagePointsRect` 里
+                        // `GdipBitmapLockBits` 拷的是 src_area，没做源侧裁剪），2560x2560 的
+                        // 源图每帧拷 26MB，滚轮一格一顿就是这么来的。改完之后要拷的只剩屏幕上
+                        // 真正显示得出来的那一小片，代价与缩放倍数无关。
+                        // 切口永远落在窗口边上（图比可视区大时交集就是整条窗口边），所以
+                        // 边界那一排钳位采样看不出来。
+                        RECT vis;
+                        vis.left   = (x > 0) ? x : 0;
+                        vis.top    = (y > 0) ? y : 0;
+                        vis.right  = (x + dw < cw) ? x + dw : cw;
+                        vis.bottom = (y + dh < ch) ? y + dh : ch;
+                        if (vis.right > vis.left && vis.bottom > vis.top) {
+                            double kx = (double)sw / (double)dw;
+                            double ky = (double)sh / (double)dh;
+                            GdipSetInterpolationMode(g, IMG_INTERP_BILINEAR);
+                            GdipDrawImageRectRect(g, (GpImage*)src,
+                                                  (REAL)vis.left, (REAL)vis.top,
+                                                  (REAL)(vis.right - vis.left),
+                                                  (REAL)(vis.bottom - vis.top),
+                                                  (REAL)((double)(vis.left - x) * kx),
+                                                  (REAL)((double)(vis.top - y) * ky),
+                                                  (REAL)((double)(vis.right - vis.left) * kx),
+                                                  (REAL)((double)(vis.bottom - vis.top) * ky),
+                                                  IMG_UNIT_PIXEL, NULL, NULL, NULL);
+                        }
                     }
                     GdipDeleteGraphics(g);
                 }
@@ -764,7 +865,7 @@ static LRESULT CALLBACK viewerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 // 只失效「旧位置 + 新位置」两块。整屏 Invalidate 也能对，但拖动是每帧都来，
                 // 放大后的图整屏重绘就是白刷一遍背景和底栏。
                 int dw = 0, dh = 0;
-                viewerTargetSize(&dw, &dh);
+                viewerDisplaySize(&dw, &dh);
                 int cw = 0, ch = 0;
                 viewerImageArea(&cw, &ch);
                 RECT newRc;
