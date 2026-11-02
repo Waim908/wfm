@@ -1,7 +1,7 @@
 #include "main.h"
 
 #define TBBUTTON_COMMAND_OFFSET (WM_APP + 100)
-#define NUM_BUTTONS 10
+#define NUM_BUTTONS 11
 
 struct ToolButton {
     wchar_t* text;
@@ -13,6 +13,7 @@ struct ToolButton {
 extern void onBookmarkButtonClick();
 static void onCmdButtonClick();
 static void onExplorerButtonClick();
+static void onRegeditButtonClick();
 
 struct ToolButton buttons[] = {
     {NULL, 0, &onMenuItemUpClick, true},
@@ -24,7 +25,8 @@ struct ToolButton buttons[] = {
     {NULL, 6, &onMenuItemNewFileClick, false},
     {NULL, 7, &onBookmarkButtonClick, true},
     {NULL, 8, &onCmdButtonClick, false},
-    {NULL, 9, &onExplorerButtonClick, false}
+    {NULL, 9, &onExplorerButtonClick, false},
+    {NULL, 10, &onRegeditButtonClick, false}
 };
 
 static WNDPROC OrigWndProc;
@@ -49,6 +51,7 @@ void createToolButtons() {
     buttons[7].text = lc_str.tb_bookmark;
     buttons[8].text = L"CMD";
     buttons[9].text = L"Explorer";
+    buttons[10].text = L"Regedit";
 
     SendMessage(hwndToolbar, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
     SendMessage(hwndToolbar, TB_SETINDENT, 2, 0);
@@ -63,11 +66,13 @@ void createToolButtons() {
     ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FOLDER]);
     ImageList_AddIcon(hImageList, uiIcons[ICON_NEW_FILE]);
     ImageList_AddIcon(hImageList, uiIcons[ICON_BOOKMARK]);
-    // 这两个按钮画的是内嵌的 Tango 素材（res/terminal.ico / res/computer.ico），
+    // 这三个按钮画的是内嵌素材（res/terminal.ico / computer.ico / regedit.ico），
     // 和上面 8 个一样走 LoadImage —— 不再去读系统 cmd.exe / explorer.exe，
     // 也就没有了那次 PE 解析（以及为它做的一整套「首帧后再补图标」的延迟机制）。
+    // Regedit 用自绘图标，不碰 Wine 的 regedit.exe（那张图案来自改过的 Tango 素材）。
     ImageList_AddIcon(hImageList, uiIcons[ICON_CMD]);
     ImageList_AddIcon(hImageList, uiIcons[ICON_EXPLORER]);
+    ImageList_AddIcon(hImageList, uiIcons[ICON_REGEDIT]);
 
     SendMessage(hwndToolbar, TB_SETIMAGELIST, 0, (LPARAM)hImageList);
 
@@ -149,6 +154,12 @@ static void onExplorerButtonClick() {
     // explorer.exe 需要将路径作为参数传递；虚拟节点则不带参数，
     // 让 explorer 用自己的默认位置（如“我的电脑”）
     shellLaunchSystemApp(TRUE, L"explorer.exe", path[0] ? path : NULL, NULL);
+}
+
+static void onRegeditButtonClick() {
+    // regedit.exe 位于 Windows 目录而不是 System32，所以第一个参数必须是 TRUE。
+    // 注册表编辑器与当前目录无关，不需要工作目录参数。
+    shellLaunchSystemApp(TRUE, L"regedit.exe", NULL, NULL);
 }
 
 void createToolbar() {

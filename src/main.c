@@ -205,11 +205,14 @@ static const struct IconMapping iconMap[] = {
     {ICON_SEARCH, IDI_SEARCH},
     {ICON_NAV_ARROW, IDI_NAV_ARROW},
     {ICON_BOOKMARK, IDI_BOOKMARK},
-    // 工具栏最右两个按钮：CMD 用 Tango 的 terminal 图案、Explorer 用 Tango 的 computer
-    // 图案。它们以前是去读系统 cmd.exe / explorer.exe 的真实图标（一次 PE 解析，是启动
-    // 路径上最贵的一段），现在和上面 12 个一样内嵌 ico，那笔开销没有了。
+    // 工具栏最右三个按钮：CMD 用 Tango 的 terminal 图案、Explorer 用 Tango 的 computer
+    // 图案、Regedit 用本项目自绘的图案。它们以前是去读系统 cmd.exe / explorer.exe 的真实
+    // 图标（一次 PE 解析，是启动路径上最贵的一段），现在和上面 12 个一样内嵌 ico，那笔
+    // 开销没有了。Regedit 不读系统图标还多一层考虑：Wine 的 regedit.exe 图案取自改过的
+    // Tango 素材，直接嵌入会带来来源与许可问题。
     {ICON_CMD, IDI_TERMINAL},
     {ICON_EXPLORER, IDI_COMPUTER},
+    {ICON_REGEDIT, IDI_REGEDIT},
 };
 
 // 退出确认对话框。
@@ -268,7 +271,7 @@ void preloadIcons() {
             globalHInstance, MAKEINTRESOURCE(iconMap[i].resourceId),
             IMAGE_ICON, 16, 16, 0);
     }
-    startupMark("  icons: LoadImage x14");
+    startupMark("  icons: LoadImage x15");
 }
 
 void freeUIcons() {

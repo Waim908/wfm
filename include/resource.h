@@ -29,6 +29,8 @@
 // 源素材 res/Utilities-terminal-tango.svg / res/Computer-tango.svg，见 res/about-tango.txt。
 #define IDI_TERMINAL 126
 #define IDI_COMPUTER 127
+// 注册表编辑器按钮的图案，本项目自绘（res/regedit.svg），避免引入 GPL 图标集。
+#define IDI_REGEDIT 129
 
 #define IDI_PRELOADER_1 201
 #define IDI_PRELOADER_2 202
@@ -129,7 +131,8 @@
 #define ICON_BOOKMARK    11
 #define ICON_CMD         12
 #define ICON_EXPLORER    13
-#define NUM_UI_ICONS     14
+#define ICON_REGEDIT     14
+#define NUM_UI_ICONS     15
 
 extern HICON uiIcons[NUM_UI_ICONS];
 

@@ -27,6 +27,7 @@ IDI_BOOKMARK ICON "bookmark.ico"
 IDI_SHORTCUT_OVERLAY ICON "shortcut_overlay.ico"
 IDI_TERMINAL ICON "terminal.ico"
 IDI_COMPUTER ICON "computer.ico"
+IDI_REGEDIT ICON "regedit.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "Application.manifest"
 
