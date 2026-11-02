@@ -159,7 +159,7 @@ void ensureComInitialized(void);
 #endif
 
 #define APP_NAME L"Winlator File Manager"
-#define APP_VERSION L"1.5-mod.3.0"
+#define APP_VERSION L"1.5-mod.3.0.1"
 #define APP_DEV_NAME L"BrunoSX"
 
 // 关于对话框最后一行显示的附加说明。默认留空，需要时可以在这里填一段文字，
